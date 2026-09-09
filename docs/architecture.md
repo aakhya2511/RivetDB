@@ -333,8 +333,9 @@ The initial target is **snapshot isolation**. That means write skew is
 *permitted*. RivetDB will not describe itself as serializable unless there is a
 mechanical test demonstrating it — the plan is a history-generating harness
 plus a checker, and the claim follows the evidence rather than the intention.
-The precise anomaly table lives in
-[transactions.md](transactions.md) once Phase 5 begins.
+The precise anomaly table — which anomalies are prevented, which are permitted,
+each backed by a test — is written as `docs/transactions.md` when Phase 5
+begins.
 
 ### 7.3 Cross-range transactions
 
