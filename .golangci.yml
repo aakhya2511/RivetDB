@@ -1,0 +1,109 @@
+# golangci-lint configuration for RivetDB.
+#
+# The selection is deliberately narrow. Every enabled linter is here because it
+# catches a class of bug that is genuinely expensive in a storage and
+# consensus codebase; style-only linters are omitted so that a lint failure
+# always means something.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # Unchecked errors in this codebase mean unflushed WAL writes, unclosed
+    # files and swallowed RPC failures. This is the single most valuable check.
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+    # Errors must stay wrappable and comparable: recovery code distinguishes
+    # "corrupt record" from "short read" with errors.Is/As, and a formatted
+    # string loses that.
+    - err113
+    - errorlint
+    - wrapcheck
+
+    # Concurrency and resource correctness.
+    - bodyclose
+    - contextcheck
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+
+    # Integer conversion mistakes silently corrupt on-disk formats: an offset
+    # or length truncated by a bad conversion produces an unreadable SSTable.
+    - gosec
+
+    # Loops and copies.
+    - copyloopvar
+    - makezero
+    - nilerr
+    - predeclared
+    - unconvert
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+      disable:
+        # Struct field alignment is a deliberate, measured decision in the
+        # storage engine, not something to satisfy globally.
+        - fieldalignment
+    staticcheck:
+      checks:
+        - all
+    gosec:
+      excludes:
+        # File permissions are set explicitly and reviewed in the storage
+        # layer; the generic rules produce noise there.
+        - G306
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Join(
+        - errors.Unwrap(
+        - .Wrap(
+        - .Wrapf(
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests deliberately construct ad-hoc errors and skip error checks on
+      # cleanup paths where a failure cannot affect the assertion.
+      - path: _test\.go
+        linters:
+          - err113
+          - errcheck
+          - gosec
+          - wrapcheck
+      # Generated protobuf and gRPC stubs are not ours to lint.
+      - path: \.pb\.go
+        linters:
+          - err113
+          - errcheck
+          - gosec
+          - govet
+          - staticcheck
+          - unused
+          - wrapcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/rivetdb/rivetdb
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

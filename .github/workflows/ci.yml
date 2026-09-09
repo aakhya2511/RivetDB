@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Randomized tests draw a fresh seed on every run, so a nightly build
+  # explores schedules that pull requests never reach. Failures record their
+  # seed under testdata/seeds and become deterministic regression cases.
+  schedule:
+    - cron: "0 6 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  static:
+    name: format, vet, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      - name: go mod tidy is up to date
+        run: make tidy
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.6.1
+
+  test:
+    name: unit tests (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor is the version declared in go.mod; "stable" catches
+        # regressions from toolchain changes before they reach a release.
+        go: ["1.25", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: build
+        run: make build
+
+      - name: test
+        run: make test
+
+  race:
+    name: race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: test -race
+        run: make race
+
+  # RivetDB targets Linux for deployment but is developed on macOS. Building
+  # and testing on both keeps file-system assumptions in the storage engine
+  # (fsync semantics, rename atomicity, path handling) honest.
+  cross-platform:
+    name: tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: test
+        run: make test

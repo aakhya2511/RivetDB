@@ -1,0 +1,26 @@
+# Build output
+/bin/
+/dist/
+
+# Go test artifacts
+*.test
+*.out
+coverage.html
+
+# Profiles produced by `go test -cpuprofile` and pprof sessions
+*.prof
+*.pprof
+
+# Local cluster data directories created by demos and benchmarks
+/data/
+/tmp/
+
+# Benchmark results are published deliberately under benchmarks/results, not
+# captured incidentally from a developer's laptop.
+/benchmarks/scratch/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
