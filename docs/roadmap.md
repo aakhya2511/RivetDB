@@ -97,7 +97,7 @@ tombstones · forward iterators · `Get`/`Put`/`Delete`/`Scan`.
 7. A recorded baseline benchmark: sequential and random `Put`, point `Get`,
    `Scan`, with write amplification and space amplification measured.
 
-**Delivered so far — Phase 1A/1B/1C:** authoritative internal-key and write-batch
+**Delivered so far — Phase 1A/1B/1C/1D:** authoritative internal-key and write-batch
 codecs; versioned 32 KiB WAL block framing with independent header/content
 CRC32C; bounded streaming reader; `SyncBatch` and `SyncNone`; concurrent append
 serialization; clean restart; explicit truncated-tail repair; every-offset
@@ -105,10 +105,14 @@ truncation, systematic corruption, random-byte and failure-injection tests; WAL
 microbenchmark baseline; concurrent skip-list MemTable with exact lookup,
 lower-bound and version-candidate seek, stable iteration, half-open user-key
 ranges, exact-key replacement, freeze and deterministic approximate memory
-accounting. Evidence: [`phase-1ab.md`](evidence/phase-1ab.md) and
-[`phase-1c.md`](evidence/phase-1c.md).
+accounting; versioned SSTable writer with prefix-compressed restart blocks,
+full-last-key index, metadata, checksummed typed blocks, fixed EOF footer,
+bounded encoding and atomic durable publication. Evidence:
+[`phase-1ab.md`](evidence/phase-1ab.md),
+[`phase-1c.md`](evidence/phase-1c.md), and
+[`phase-1d.md`](evidence/phase-1d.md).
 
-**Remaining before Phase 1 is complete:** SSTable, Bloom filter,
+**Remaining before Phase 1 is complete:** SSTable reader/seek/iteration, Bloom filter,
 manifest/version set, active-to-immutable rotation and flush, compaction,
 engine-level recovery, Get/Put/Delete/Scan and the full Phase 1 benchmark.
 
@@ -180,8 +184,8 @@ anomaly table stating exactly which anomalies are prevented and which are
 permitted, each entry backed by a test that demonstrates the behaviour · GC
 never removes a version a live reader could see · restart preserves visibility.
 
-**Also decides:** timestamp allocation (ADR-0005) and isolation level
-(ADR-0006).
+**Also decides:** timestamp allocation and isolation level, each recorded in
+the next available ADR at that phase.
 
 ---
 

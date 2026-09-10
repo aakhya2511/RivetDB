@@ -34,6 +34,7 @@ Phase:    which phase this governs
 | [0003](0003-explicit-internal-key-comparator.md) | Explicit internal-key comparator | Accepted | 1 |
 | [0004](0004-wal-integrity-and-tail-recovery.md) | WAL fragment integrity and explicit tail recovery | Accepted | 1 |
 | [0005](0005-memtable-skip-list.md) | Skip list for the MemTable ordered structure | Accepted | 1C |
+| [0006](0006-sstable-physical-format.md) | SSTable block, index, footer and publication format | Accepted | 1D |
 
 ## Planned
 

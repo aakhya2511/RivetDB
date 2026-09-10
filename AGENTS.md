@@ -13,12 +13,13 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 ## 1. Current state
 
 **Phase 0 and the pre-Phase-1 key audit are complete. Phase 1A/1B storage
-primitives and WAL plus Phase 1C MemTable are implemented; Phase 1D (SSTable
-format and writer) is next.**
+primitives and WAL, Phase 1C MemTable, and Phase 1D SSTable format/writer are
+implemented; Phase 1E (SSTable reader, seek and iteration) is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
-internal-key/write-batch primitives, the checksummed WAL and the concurrent
-mutable/frozen MemTable under `internal/storage`. There is no complete storage
+internal-key/write-batch primitives, the checksummed WAL, the concurrent
+mutable/frozen MemTable and the deterministic SSTable writer under
+`internal/storage`. There is no production SSTable reader, complete storage
 engine, Raft, server or client.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
@@ -190,7 +191,9 @@ Decisions recorded: [ADR-0001](docs/design-decisions/0001-lsm-tree-over-b-tree.m
 [ADR-0004](docs/design-decisions/0004-wal-integrity-and-tail-recovery.md)
 (WAL integrity and tail recovery), and
 [ADR-0005](docs/design-decisions/0005-memtable-skip-list.md)
-(MemTable skip list). They list the rejected options' genuine
+(MemTable skip list), and
+[ADR-0006](docs/design-decisions/0006-sstable-physical-format.md)
+(SSTable physical format). They list the rejected options' genuine
 advantages, not strawmen — keep that standard.
 
 ---
@@ -206,7 +209,8 @@ first:
 2. WAL record framing and replay (§5.1) — fragmentation across block
    boundaries and strict stop at corruption. Complete.
 3. MemTable. Complete.
-4. SSTable block builder/reader, Bloom filter, index, footer (§5.3).
+4. SSTable format and writer (§5.3). Complete. Reader, seek and iteration are
+   next; Bloom-filter construction/query remains deferred.
 5. Manifest and version set (§5.4).
 6. Levelled compaction.
 7. Recovery, then the crash-at-every-offset test.

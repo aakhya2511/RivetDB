@@ -56,6 +56,15 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-28 | MemTable user-key range bounds are half-open and include either every version of a logical key or none. | verified (Phase 1C) |
 | STORAGE-29 | MemTable approximate size is monotonic while mutable, stable after freeze, and saturates rather than overflowing. | verified (Phase 1C) |
 | STORAGE-30 | MemTable reads, writes, iterator snapshots and freeze obey their documented linearizable synchronization contract without exposing partial mutations. | verified (Phase 1C) |
+| STORAGE-31 | SSTable entries and full block-boundary keys are strictly ordered by `CompareInternal`; exact duplicates and out-of-order input are rejected. | verified (Phase 1D) |
+| STORAGE-32 | Every data-block entry reconstructs one unambiguous encoded internal key and value from canonical bounded lengths and restart state. | verified (Phase 1D) |
+| STORAGE-33 | Every independently readable SSTable block authenticates its payload, compression, kind and block version with CRC32C. | verified (Phase 1D) |
+| STORAGE-34 | Every SSTable index handle names exactly one complete data block, and index keys equal those blocks' full last internal keys. | verified (Phase 1D) |
+| STORAGE-35 | The fixed SSTable footer authenticates its fields and names only non-overlapping, correctly typed in-file regions with no unexplained bytes. | verified (Phase 1D) |
+| STORAGE-36 | Identical ordered entries and writer options produce byte-identical SSTables. | verified (Phase 1D) |
+| STORAGE-37 | A truncated or partially written SSTable is corruption and is never treated as a recoverable WAL-style tail. | verified (Phase 1D) |
+| STORAGE-38 | SSTable publication exposes the final filename only after the complete file is fsynced, then fsyncs the containing directory; any I/O failure poisons the writer. | verified (Phase 1D) |
+| STORAGE-39 | All versions of one user key retain authoritative order, while table range metadata remains expressed in decoded user keys and encodes no owner range ID. | verified (Phase 1D) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -77,6 +86,16 @@ reference-model lower bounds, stable iterator/range snapshots, caller-buffer
 mutation, deterministic accounting, full structural validation, 100,000-entry
 stress, 128 concurrent writers/readers and insert-versus-freeze races under the
 race detector.
+
+STORAGE-31 through STORAGE-39 are enforced by the writer and test-scoped
+structural validation in
+[`writer_test.go`](../internal/storage/sstable/writer_test.go) and
+[`validate_test.go`](../internal/storage/sstable/validate_test.go). The suite
+covers authoritative-order rejection, exact duplicates, binary/prefix/version
+round trips, restart and block boundaries, full index-to-data mapping,
+metadata/footer integrity, deterministic hashes, every-offset truncation,
+protected corruption, bounded malformed fields, I/O poisoning and the
+file-sync/rename/directory-sync publication sequence.
 
 ## Raft
 

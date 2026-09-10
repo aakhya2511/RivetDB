@@ -1,14 +1,16 @@
 # Design Note: Local Storage Engine (Phase 1)
 
-**Status:** Phase 1A storage primitives, Phase 1B WAL and Phase 1C MemTable are
-implemented and mechanically tested. SSTables and later engine layers are not
-implemented. The rest of this note specifies later Phase 1 work.
+**Status:** Phase 1A storage primitives, Phase 1B WAL, Phase 1C MemTable and
+Phase 1D SSTable format/writer are implemented and mechanically tested. The
+production SSTable reader and later engine layers are not implemented. The rest
+of this note specifies later Phase 1 work.
 
 **Related:** [ADR-0001](design-decisions/0001-lsm-tree-over-b-tree.md) ·
 [ADR-0003](design-decisions/0003-explicit-internal-key-comparator.md) ·
 [ADR-0004](design-decisions/0004-wal-integrity-and-tail-recovery.md) ·
 [ADR-0005](design-decisions/0005-memtable-skip-list.md) ·
-[invariants.md](invariants.md) (STORAGE-1 … STORAGE-30) ·
+[ADR-0006](design-decisions/0006-sstable-physical-format.md) ·
+[invariants.md](invariants.md) (STORAGE-1 … STORAGE-39) ·
 [architecture.md](architecture.md) §3
 
 ---
@@ -167,7 +169,7 @@ Files in the data directory:
 | `CURRENT` | one line naming the active manifest file |
 | `MANIFEST-%06d` | the version-edit log |
 | `%06d.log` | a WAL segment |
-| `%06d.sst` | an SSTable |
+| `%012d.sst` | an SSTable; the same name plus `.tmp` is unpublished build state |
 
 ### 5.1 WAL
 
@@ -334,21 +336,41 @@ with no finite bytewise successor such as an all-`ff` key.
 
 ```text
  ┌────────────────────────────────┐
- │  data block 0                  │  ~4 KiB, sorted internal keys
+ │  data block 0                  │  target 4 KiB payload
  │  data block 1                  │
  │  …                             │
  ├────────────────────────────────┤
- │  filter block                  │  Bloom filter over user keys
+ │  index block                   │  full last key + data handle
  ├────────────────────────────────┤
- │  index block                   │  one entry per data block
+ │  metadata block                │  counts and key bounds
  ├────────────────────────────────┤
- │  footer (fixed 48 bytes)       │
+ │  filter block (future/absent)  │  user-key Bloom payload
+ ├────────────────────────────────┤
+ │  footer (fixed 80 bytes)       │  discoverable from EOF
  └────────────────────────────────┘
 ```
 
-**Data block.** Keys are prefix-compressed against the previous key, with a
-full key written every 16 entries (a *restart point*) so that a binary search
-within the block is possible:
+Format version 1 uses explicit byte encoding, never Go layout. Fixed-width
+integers are little-endian except the internal key's complemented sequence
+trailer (§5.2). Variable lengths are canonical unsigned LEB128.
+
+**Common block envelope.** Every independently readable block is:
+
+```text
+ payload || compression_u8 || kind_u8 || block_version_u8 || crc32c_u32
+
+ compression: 0 = none
+ kind:        1 = data, 2 = index, 3 = metadata, 4 = reserved filter
+ block version: 1
+ crc32c: little-endian CRC32C(payload || compression || kind || version)
+```
+
+The seven-byte envelope is included in every block handle length. Unknown
+compression, kind or block version is unsupported/corrupt input, never guessed.
+
+**Data block.** Encoded internal keys are prefix-compressed against the
+previous encoded key. This reconstructs bytes only; ordering is validated with
+`CompareInternal`. Every 16th entry is a restart and stores a full key:
 
 ```text
  entry:   shared    varint  bytes shared with the previous key
@@ -357,46 +379,90 @@ within the block is possible:
           keydelta  unshared bytes
           value     vallen bytes
 
- trailer: restarts  u32 × n   offsets of restart points
-          n         u32
-          type      u8        0 = uncompressed
-          crc32c    u32       over contents + type
+ payload trailer:
+          restarts  u32 LE × n   entry offsets from payload start
+          n         u32 LE
 ```
 
-**Filter block.** A Bloom filter over the *user* keys in the file (not the
-internal keys — a lookup does not know the sequence number it is looking for):
+The first entry of every nonempty block is a restart with `shared=0`; restart
+offsets are strictly increasing. A block never splits an entry. The default
+target is 4096 payload bytes including the restart array/count but excluding
+the common envelope. Before an entry is added, the writer cuts a nonempty block
+if its projected payload would exceed the target. A legal larger entry becomes
+one oversized block. The restart count and offsets are u32-bounded.
+
+Resource limits in version 1 are: user key 1 MiB, internal key 1 MiB + 9-byte
+trailer, value 64 MiB, encoded entry `internal + value + 30` bytes, and table
+size `MaxInt64`. Checked arithmetic rejects any overflow before allocation or
+write. Configured block targets cannot exceed the maximum legal data payload.
+
+**Index block.** Its payload begins with `count_u32`, followed by:
 
 ```text
- ┌──────────┬──────────┬──────────┬──────────┬────────────┐
- │ bits/key │ k (u8)   │ nbits u32│ bitmap   │ crc32c u32 │
- └──────────┴──────────┴──────────┴──────────┴────────────┘
+ key_len varint || full_last_internal_key || offset_u64 || length_u64
 ```
 
-Default 10 bits per key and k = 7, giving roughly a 1% false-positive rate.
-Bit positions come from a single 64-bit hash split into two 32-bit halves and
-combined as `h1 + i·h2` (Kirsch–Mitzenmacher), which is as accurate as k
-independent hashes at the cost of one. **False negatives are impossible by
-construction** (STORAGE-8); false positives cost a wasted block read and
-nothing else.
+There is one entry per data block. `offset` starts at the file beginning and
+`length` includes the block envelope. Index keys are the exact full last keys,
+not shortened separators. Future seek chooses the first index key not less
+than its internal seek key using §5.2, then searches that block. Multiple
+versions may cross a physical boundary without changing this rule.
 
-**Index block.** One entry per data block: initially the block's full last
-internal key, plus the block's offset and length. The index is sparse — it
-locates a block, not a key — so it stays small enough to keep resident. Index
-binary search uses the §5.2 internal-key comparator, never raw encoded-byte
-comparison. A future user-key-aware shorter separator is permitted only with a
-proof that it preserves lower-bound lookup semantics.
-
-**Footer.** Fixed size, read with one 48-byte pread from the end of the file:
+**Metadata block.** Its payload is:
 
 ```text
- ┌──────────────┬──────────────┬─────────┬──────────────────┐
- │ filter handle│ index handle │ version │ magic u64        │
- │ off+len      │ off+len      │  u32    │ 0x52697665744442 │
- └──────────────┴──────────────┴─────────┴──────────────────┘
+ entry_count_u64 || deletion_count_u64 || data_block_count_u32 ||
+ raw_key_value_bytes_u64 ||
+ smallest_internal_len_u32 || smallest_internal ||
+ largest_internal_len_u32  || largest_internal  ||
+ smallest_user_len_u32     || smallest_user     ||
+ largest_user_len_u32      || largest_user
 ```
 
-The magic identifies the file as a RivetDB SSTable; the version supports format
-evolution (R10). An unrecognised version is an error, never a guess.
+Internal bounds are the first and last entries under the authoritative order.
+User bounds are their decoded user keys. No owner range ID is stored, so future
+child ranges may share a physical immutable file and apply `[start,end)` user
+bounds externally.
+
+**Filter block.** Deferred to a later phase. Version 1 reserves block kind 4,
+a footer handle and flag. Phase 1D writes `(0,0)` with the flag clear. A future
+Bloom payload hashes decoded user keys only and can be inserted before the
+footer without changing its layout. No filter query logic exists in Phase 1D.
+
+**Footer.** Exactly 80 bytes at EOF:
+
+```text
+  0  index_offset_u64       8  index_length_u64
+ 16  metadata_offset_u64   24  metadata_length_u64
+ 32  filter_offset_u64     40  filter_length_u64
+ 48  data_region_end_u64
+ 56  format_version_u32 (=1)
+ 60  flags_u32          (bit 0 = filter present; currently 0)
+ 64  reserved_u32       (=0)
+ 68  footer_crc32c_u32
+ 72  magic_u64          (=0x5249564554535354, ASCII "RIVETSST")
+```
+
+The footer checksum covers bytes `[0,68)` and `[72,80)`, authenticating every
+other footer field. Handles are u64 offset/length pairs and must add without
+overflow, lie before the footer, name non-overlapping correctly typed blocks,
+and account for every byte: contiguous data region, then index, then metadata,
+then optional filter, then footer. No trailing garbage is accepted. An unknown
+major version, bad magic/checksum, invalid handle, malformed block or truncated
+file is corruption. SSTables have no recoverable-tail semantics.
+
+**Writer and publication.** Input must be strictly increasing under
+`CompareInternal`; exact duplicates and descending input are errors, never
+silently sorted. `Finish` rejects an empty table, flushes the final data block,
+writes index/metadata/footer, fsyncs and closes the deterministic
+`%012d.sst.tmp`, renames it to `%012d.sst`, then fsyncs the directory. Only then
+does it return success and metadata. Repeated successful `Finish` returns the
+same metadata; `Add` after finish fails. Any I/O failure poisons the writer.
+`Abort` explicitly closes and removes only the temporary path when safe;
+ambiguous post-rename evidence is retained. Manifest installation remains
+deferred, so the published file is durable but not yet live in a version set.
+Creation through publication requires exclusive database-directory ownership;
+Phase 1's `LOCK` prevents a competing creator from replacing the same identity.
 
 **Ordering within a level.** L0 files may overlap, because they are flushed
 MemTables and each covers whatever keys happened to be in memory; they are
