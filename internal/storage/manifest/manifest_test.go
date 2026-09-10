@@ -126,6 +126,9 @@ func TestContiguousReplayFrontierStopsAtGapThenCloses(t *testing.T) {
 }
 
 func TestManifestCrashAtEveryOffsetAndMiddleCorruption(t *testing.T) {
+	if os.Getenv("RIVETDB_EXHAUSTIVE") == "" {
+		t.Skip("set RIVETDB_EXHAUSTIVE=1 for every-byte Manifest truncation")
+	}
 	directory := t.TempDir()
 	path := filepath.Join(directory, manifestFileName(1))
 	writer, err := wal.OpenWriter(path, wal.WriterOptions{Durability: wal.SyncNone})

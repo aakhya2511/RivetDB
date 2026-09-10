@@ -266,6 +266,9 @@ func TestRecoveryIsIdempotent(t *testing.T) {
 }
 
 func TestExhaustiveTruncationReturnsMaximalPrefix(t *testing.T) {
+	if os.Getenv("RIVETDB_EXHAUSTIVE") == "" {
+		t.Skip("set RIVETDB_EXHAUSTIVE=1 for every-byte WAL truncation")
+	}
 	payloads := [][]byte{
 		[]byte("first"),
 		bytes.Repeat([]byte{0x7e}, BlockSize+113),

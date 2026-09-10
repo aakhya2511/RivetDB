@@ -1,14 +1,14 @@
 # RivetDB
 
-RivetDB is an experimental distributed transactional database built from first
-principles around a custom LSM storage engine, Multi-Raft replication, MVCC,
-and workload-adaptive range rebalancing.
+RivetDB is an experimental local LSM storage engine built from first principles
+as the future substrate for Multi-Raft replication, MVCC and
+workload-adaptive range rebalancing. Those distributed layers do not exist yet.
 
 Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 1 in progress — Phase 1A through Phase 1J complete.**
+> **Project status: Phase 1 complete — local-storage freeze candidate.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -22,10 +22,12 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > Scan, Flush, Compact, Close and restart recovery. Phase 1J separates assigned
 > and published visibility, adds real subprocess crash coverage, conservative
 > obsolete-SSTable reclamation and a 50,000-operation/120-restart stress gate.
+> Phase 1K adds measured frozen iteration, a bounded leased SSTable-reader
+> cache, persisted user-key Bloom filters, lower-copy Scan assembly and explicit
+> correctness/stress/crash/exhaustive certification tiers.
 >
 > **There is no Raft, distributed database service, server or client yet.**
-> Profiling, optimization and final local-storage certification are next. Everything
-> else described below is a design with a written specification, not working code — see
+> Everything else described below is a design with a written specification, not working code — see
 > [Roadmap](docs/roadmap.md) for exactly what is built and what is not.
 >
 > RivetDB is a research and demonstration system. It is not production
@@ -127,15 +129,20 @@ Requires Go 1.25 or later. No other dependencies — the module currently has
 none.
 
 ```bash
-make check     # the full gate: format, vet, lint, tests, race tests
-make test      # fast tests
-make race      # go test -race -count=2 ./...
+make check          # format, vet, lint, tidy, normal tests, diff check
+make test           # fast deterministic tests
+make race           # practical suite under -race -count=2
+make stress         # large randomized/reference campaigns
+make crash          # subprocess and publication crash campaigns
+make exhaustive     # every-byte WAL/SSTable/Manifest campaigns
+make certify-local  # every local correctness tier
+make benchmark      # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover     # coverage profile and HTML report
 make help      # all targets
 ```
 
-`make check` runs exactly what CI runs, so a green local check should mean a
-green pipeline.
+PR CI runs the practical checks; scheduled/manual CI adds the heavy tiers.
+`make certify-local` is the complete local-storage correctness command.
 
 ### Reproducing a randomized failure
 
@@ -176,15 +183,22 @@ a later phase cannot be tested honestly without it.
 
 ---
 
+## Local benchmark snapshot
+
+Phase 1K profiles and A/B allocation results are recorded in
+[the Phase 1K evidence](docs/evidence/phase-1k.md). The available internal APFS
+volume was approximately 96% utilized, so disk-sensitive timings are explicitly
+labeled constrained-environment baselines rather than representative
+performance claims. Benchmark database data can be placed on an external local
+SSD with `RIVETDB_BENCH_DIR`; no volume name is hard-coded.
+
+---
+
 ## Planned capabilities
 
 Everything here is designed and specified but **not yet built**. Each links to
 its phase gate.
 
-- **Custom LSM storage engine** — WAL with per-record checksums, MemTable,
-  SSTables with sparse index and Bloom filters, levelled compaction, manifest,
-  crash recovery. [Design](docs/storage-engine.md) ·
-  [Phase 1](docs/roadmap.md#phase-1--local-storage-engine-)
 - **Raft** — implemented here, not imported, because the failure handling is
   the point. [Phase 2](docs/roadmap.md#phase-2--single-raft-group-)
 - **Multi-Raft and range routing** — one Raft group per key range, many ranges

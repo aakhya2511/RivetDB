@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 
 	"github.com/rivetdb/rivetdb/internal/storage"
@@ -151,15 +150,20 @@ func tablesForPoint(version *manifest.Version, key []byte) []manifest.TableMetad
 }
 
 func (e *Engine) tableCandidate(table manifest.TableMetadata, key []byte, sequence uint64) (result sstable.Entry, found bool, resultErr error) {
-	reader, err := sstable.Open(filepath.Join(e.directory, sstable.FileName(table.FileNumber)), sstable.ReaderOptions{})
+	lease, err := e.tableCache.acquire(table)
 	if err != nil {
 		return result, false, fmt.Errorf("open authoritative table %d: %w", table.FileNumber, errors.Join(ErrCorruption, err))
 	}
-	defer func() { resultErr = errors.Join(resultErr, reader.Close()) }()
-	if !metadataMatches(table, reader.Metadata()) {
-		return result, false, errors.Join(ErrCorruption, manifest.ErrMetadataMismatch)
+	defer func() { resultErr = errors.Join(resultErr, lease.Release()) }()
+	mayContain, err := lease.Reader.MayContain(key)
+	if err != nil {
+		return sstable.Entry{}, false, fmt.Errorf("read authoritative table %d filter: %w", table.FileNumber, errors.Join(ErrCorruption, err))
 	}
-	result, err = reader.GetCandidate(key, sequence)
+	if !mayContain {
+		e.bloomTableSkips.Add(1)
+		return sstable.Entry{}, false, nil
+	}
+	result, err = lease.Reader.GetCandidate(key, sequence)
 	if errors.Is(err, sstable.ErrNotFound) {
 		return sstable.Entry{}, false, nil
 	}
@@ -198,13 +202,13 @@ func (e *Engine) Scan(ctx context.Context, start, end []byte) (result []KV, resu
 	if !view.memtables.HaveSequence {
 		return []KV{}, nil
 	}
-	inputs, readers, err := e.scanInputs(view, start, end)
+	inputs, leases, err := e.scanInputs(view, start, end)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		for _, reader := range readers {
-			resultErr = errors.Join(resultErr, reader.Close())
+		for _, lease := range leases {
+			resultErr = errors.Join(resultErr, lease.Release())
 		}
 	}()
 	merge, err := compaction.NewMergeIterator(inputs)
@@ -215,12 +219,15 @@ func (e *Engine) Scan(ctx context.Context, start, end []byte) (result []KV, resu
 	var values []KV
 	var currentUser []byte
 	var haveUser bool
-	var selected *candidate
+	var selected candidate
+	var haveSelected bool
 	emit := func() {
-		if selected != nil && selected.entry.Key.Kind() == storage.KindValue {
-			values = append(values, KV{Key: bytes.Clone(currentUser), Value: bytes.Clone(selected.entry.Value)})
+		if haveSelected && selected.entry.Key.Kind() == storage.KindValue {
+			// Both slices are already operation-owned: UserKey returns a copy,
+			// and every child iterator returns an owned value.
+			values = append(values, KV{Key: currentUser, Value: selected.entry.Value})
 		}
-		selected = nil
+		haveSelected = false
 	}
 	for merge.Next() {
 		if err := ctx.Err(); err != nil {
@@ -243,8 +250,9 @@ func (e *Engine) Scan(ctx context.Context, start, end []byte) (result []KV, resu
 			continue
 		}
 		value := candidate{entry: entry, fileNumber: file}
-		if selected == nil {
-			selected = &value
+		if !haveSelected {
+			selected = value
+			haveSelected = true
 			continue
 		}
 		if entry.Key.Sequence() == selected.entry.Key.Sequence() {
@@ -268,9 +276,9 @@ func (e *Engine) observeRead(stage ReadStage, generation uint64) {
 	}
 }
 
-func (e *Engine) scanInputs(view readView, start, end []byte) ([]compaction.MergeInput, []*sstable.Reader, error) {
+func (e *Engine) scanInputs(view readView, start, end []byte) ([]compaction.MergeInput, []*tableLease, error) {
 	inputs := make([]compaction.MergeInput, 0)
-	readers := make([]*sstable.Reader, 0)
+	leases := make([]*tableLease, 0)
 	addMemory := func(generation pipeline.ReadGeneration) error {
 		iterator, err := generation.Table.Range(start, end)
 		if err != nil {
@@ -292,33 +300,30 @@ func (e *Engine) scanInputs(view readView, start, end []byte) ([]compaction.Merg
 			if !tableOverlapsScan(table, start, end) {
 				continue
 			}
-			reader, err := sstable.Open(filepath.Join(e.directory, sstable.FileName(table.FileNumber)), sstable.ReaderOptions{})
+			lease, err := e.tableCache.acquire(table)
 			if err != nil {
-				return nil, readers, errors.Join(fmt.Errorf("open scan table %d: %w", table.FileNumber, err), closeTableReaders(readers))
+				return nil, leases, errors.Join(fmt.Errorf("open scan table %d: %w", table.FileNumber, err), releaseTableLeases(leases))
 			}
-			if !metadataMatches(table, reader.Metadata()) {
-				return nil, readers, errors.Join(ErrCorruption, manifest.ErrMetadataMismatch, reader.Close(), closeTableReaders(readers))
-			}
-			iterator, err := reader.Range(start, end)
+			iterator, err := lease.Reader.Range(start, end)
 			if err != nil {
-				return nil, readers, errors.Join(fmt.Errorf("range table %d: %w", table.FileNumber, err), reader.Close(), closeTableReaders(readers))
+				return nil, leases, errors.Join(fmt.Errorf("range table %d: %w", table.FileNumber, err), lease.Release(), releaseTableLeases(leases))
 			}
-			readers = append(readers, reader)
+			leases = append(leases, lease)
 			e.scanTableReads.Add(1)
 			inputs = append(inputs, compaction.MergeInput{FileNumber: table.FileNumber, Iterator: iterator})
 		}
 	}
-	return inputs, readers, nil
+	return inputs, leases, nil
 }
 
 func tableOverlapsScan(table manifest.TableMetadata, start, end []byte) bool {
 	return (start == nil || bytes.Compare(table.LargestUser, start) >= 0) && (end == nil || bytes.Compare(table.SmallestUser, end) < 0)
 }
 
-func closeTableReaders(readers []*sstable.Reader) error {
+func releaseTableLeases(leases []*tableLease) error {
 	var result error
-	for _, reader := range readers {
-		result = errors.Join(result, reader.Close())
+	for _, lease := range leases {
+		result = errors.Join(result, lease.Release())
 	}
 	return result
 }

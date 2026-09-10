@@ -8,12 +8,13 @@ import (
 	"github.com/rivetdb/rivetdb/internal/storage"
 	"github.com/rivetdb/rivetdb/internal/storage/manifest"
 	"github.com/rivetdb/rivetdb/internal/storage/sstable"
+	"github.com/rivetdb/rivetdb/internal/testutil"
 )
 
 func BenchmarkMerge(b *testing.B) {
 	for _, count := range []int{2, 8, 32} {
 		b.Run(fmt.Sprintf("%d-way", count), func(b *testing.B) {
-			directory := b.TempDir()
+			directory := testutil.BenchmarkDir(b)
 			store := createStore(b, directory)
 			defer store.Close()
 			tables := make([]manifest.TableMetadata, 0, count)
@@ -63,7 +64,7 @@ func BenchmarkCompaction(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				b.StopTimer()
-				directory := b.TempDir()
+				directory := testutil.BenchmarkDir(b)
 				store := createStore(b, directory)
 				for file := range test.files {
 					entries := make([]testEntry, test.entries)

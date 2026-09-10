@@ -5,6 +5,8 @@ import (
 	"hash/crc32"
 	"path/filepath"
 	"testing"
+
+	"github.com/rivetdb/rivetdb/internal/testutil"
 )
 
 func BenchmarkAppend(b *testing.B) {
@@ -20,7 +22,7 @@ func BenchmarkAppend(b *testing.B) {
 	}
 	for _, benchmark := range benchmarks {
 		b.Run(benchmark.name, func(b *testing.B) {
-			path := filepath.Join(b.TempDir(), "bench.log")
+			path := filepath.Join(testutil.BenchmarkDir(b), "bench.log")
 			writer, err := OpenWriter(path, WriterOptions{Durability: benchmark.durability})
 			if err != nil {
 				b.Fatalf("OpenWriter: %v", err)
@@ -39,7 +41,7 @@ func BenchmarkAppend(b *testing.B) {
 }
 
 func BenchmarkSequentialRead(b *testing.B) {
-	path := filepath.Join(b.TempDir(), "bench.log")
+	path := filepath.Join(testutil.BenchmarkDir(b), "bench.log")
 	writer, err := OpenWriter(path, WriterOptions{Durability: SyncNone})
 	if err != nil {
 		b.Fatalf("OpenWriter: %v", err)

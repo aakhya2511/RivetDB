@@ -93,6 +93,27 @@ func BenchmarkForwardIteration(b *testing.B) {
 	}
 }
 
+func BenchmarkFrozenIteration(b *testing.B) {
+	for _, size := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprint(size), func(b *testing.B) {
+			table, _ := populatedBenchmarkTable(b, size, 1)
+			b.ReportAllocs()
+			for b.Loop() {
+				count := 0
+				iterator, err := table.FrozenIterator()
+				if err != nil {
+					b.Fatal(err)
+				}
+				for iterator.Next() {
+					benchmarkEntry, _ = iterator.Entry()
+					count++
+				}
+				benchmarkCount = count
+			}
+		})
+	}
+}
+
 func BenchmarkMixedVersionedKeys(b *testing.B) {
 	for _, size := range []int{1_000, 10_000, 100_000} {
 		b.Run(fmt.Sprint(size), func(b *testing.B) {

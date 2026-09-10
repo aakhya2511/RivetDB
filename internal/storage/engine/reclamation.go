@@ -73,6 +73,17 @@ func (e *Engine) ReclaimObsoleteTables(ctx context.Context) (TableReclamationRes
 			resultErr = errors.Join(resultErr, ErrCorruption, errObsoleteStillLive)
 			continue
 		}
+		evicted, evictErr := e.tableCache.evict(number)
+		if evictErr != nil {
+			result.Retained++
+			e.maintenanceFailures.Add(1)
+			resultErr = errors.Join(resultErr, evictErr)
+			continue
+		}
+		if !evicted {
+			result.Retained++
+			continue
+		}
 		path := filepath.Join(e.directory, sstable.FileName(number))
 		if err := e.removeFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			result.Retained++

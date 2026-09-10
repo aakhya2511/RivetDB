@@ -175,6 +175,24 @@ published/assigned sequence and file-number authority with zero reuse. This is
 a latest-state model and crash/durability campaign, not a formal
 linearizability or transactional history checker.
 
+Phase 1K retains that model and adds exact equality between snapshot and direct
+frozen MemTable traversal, caller-ownership mutation checks, bounded table-cache
+reuse/eviction/Close tests, and a deterministic obsolete-reader lease through
+compaction reclamation. Bloom testing inserts 10,000 deterministic user keys,
+proves zero false negatives, measures absent keys rather than asserting zero
+false positives, detects a filter bit flip by CRC, and rejects a
+checksum-valid filter whose bits create false negatives during eager Open.
+Existing post-open corruption tests remain unchanged; no block cache can hide
+later file mutation.
+
+Expensive coverage is partitioned, not removed. `make test` is the normal
+deterministic suite, `make race` repeats that practical suite under the race
+detector, `make stress` enables large/reference campaigns, `make crash` runs
+process/publication failures, and `make exhaustive` runs every-byte WAL,
+SSTable and Manifest truncations. `make certify-local` runs all correctness
+tiers in order. Scheduled/manual CI runs the heavy tiers separately from PR
+latency.
+
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the
 manifest, crash during a range split, crash while a transaction is prepared.

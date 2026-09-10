@@ -33,7 +33,7 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-5 | A read returns the newest version of a key visible to it, considering the MemTable, the immutable MemTable and every SSTable level. | verified for latest-state reads (Phase 1I) |
 | STORAGE-6 | Compaction never resurrects a deleted key: a tombstone is dropped only when no older version of that key can survive in any remaining file, and no live reader can be positioned before it. | verified by retaining all tombstones (Phase 1H/1I) |
 | STORAGE-7 | Compaction is value-preserving: for every key and every read timestamp, the value visible before compaction equals the value visible after. | verified by exact version preservation (Phase 1H) |
-| STORAGE-8 | A Bloom filter never produces a false negative. A "not present" answer from the filter means the key is genuinely absent from that SSTable. | planned (Phase 1) |
+| STORAGE-8 | A Bloom filter never produces a false negative. A "not present" answer from the filter means the key is genuinely absent from that SSTable. | verified (Phase 1K) |
 | STORAGE-9 | The manifest describes exactly the set of SSTables that exist and are reachable. Recovery never opens a file absent from the manifest, and never misses one present in it. | planned (Phase 1) |
 | STORAGE-10 | An iterator observes a fixed, consistent view of the engine for its whole lifetime. Concurrent flushes and compactions do not change what it yields. | planned (Phase 1) |
 | STORAGE-11 | A file is made visible to readers only after its contents and its directory entry are durable. No reader ever observes a torn or partial SSTable. | planned (Phase 1) |
@@ -137,6 +137,9 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-109 | Durable storage sequences are never reused, and assigned and published authorities are monotonic across flush, compaction and restart. | verified (Phase 1J) |
 | STORAGE-110 | A newest tombstone cannot allow an older value to resurrect across flush, compaction, restart or physical obsolete-file reclamation. | verified (Phase 1J) |
 | STORAGE-111 | Corrupt authoritative WAL, CURRENT, Manifest or live SSTable state fails explicitly and is never reconstructed heuristically from directory contents; corrupt unlisted SSTables remain non-authoritative. | verified (Phase 1J) |
+| STORAGE-112 | Direct MemTable traversal is permitted only after permanent freeze, follows the immutable level-zero order exactly, allocates no full-table snapshot and exposes no mutable MemTable-owned bytes. | verified (Phase 1K) |
+| STORAGE-113 | A cached SSTable reader is keyed by one never-reused file identity and usable only under a lease; it cannot be evicted or physically reclaimed while borrowed, retained cache capacity is bounded, and Engine Close drains it under the operation-lifetime lock. | verified (Phase 1K) |
+| STORAGE-114 | Performance optimizations do not change the logical Get/Scan result, published sequence boundary, persistent formats, eager integrity boundary or durability acknowledgement point. | verified (Phase 1K) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -177,7 +180,15 @@ lower-bound and version-candidate reference models, multi-block version groups,
 full/range iteration, hostile handles and varints, rechecksummed restart
 corruption, every-byte and seeded random mutations, every-offset truncation,
 injected I/O/short-read/close failures, caller ownership, concurrent reads and
-Close races. The opt-in 100,000-entry gate exercises 1,697 blocks.
+Close races. The opt-in 100,000-entry gate exercises roughly 1,700 blocks;
+the exact count varies with its replayable random value stream.
+
+STORAGE-8 is enforced by [`bloom_test.go`](../internal/storage/sstable/bloom_test.go):
+10,000 inserted user keys have zero false negatives, a disjoint set measures
+false positives, a protected-bit mutation fails CRC, and a rechecksummed filter
+with cleared bits fails eager Open rather than skipping stored data. A v1 table
+with the optional filter absent remains readable and conservatively returns
+"may contain."
 
 STORAGE-48 through STORAGE-59 are enforced by
 [`pipeline_test.go`](../internal/storage/pipeline/pipeline_test.go) and the
@@ -231,6 +242,13 @@ leaving active-WAL deletion disabled; and verifies tombstone, orphan and
 authority behavior across restart. The opt-in Phase 1J campaign executes
 50,000 modeled operations and 120 restarts with full-state/digest checkpoints,
 monotonic sequence/file authorities and no identity reuse.
+
+STORAGE-112 through STORAGE-114 are enforced by the frozen-iterator equality
+and ownership test, bounded cache reuse/Close tests, the deterministic
+borrowed-obsolete-reader reclamation test, and the complete pre-existing
+Engine reference, visibility, crash and race suites. The Phase 1K evidence
+records the profiles and A/B measurements; performance numbers themselves are
+not safety assertions.
 
 ## Raft
 

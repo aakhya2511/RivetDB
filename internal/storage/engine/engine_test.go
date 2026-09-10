@@ -839,6 +839,9 @@ func TestWALReclamationCoverageIsCandidateOnly(t *testing.T) {
 }
 
 func TestSubprocessCrashBoundaries(t *testing.T) {
+	if os.Getenv("RIVETDB_CRASH") == "" {
+		t.Skip("set RIVETDB_CRASH=1 for subprocess write-boundary crashes")
+	}
 	if directory := os.Getenv("RIVETDB_CRASH_CHILD_DIR"); directory != "" {
 		target := os.Getenv("RIVETDB_CRASH_CHILD_STAGE")
 		e, err := Open(Options{Directory: directory, WriteHook: func(stage pipeline.WriteStage, _ pipeline.WriteResult) {

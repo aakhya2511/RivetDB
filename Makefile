@@ -33,7 +33,7 @@ help: ## List available targets
 ## --- Gate -------------------------------------------------------------------
 
 .PHONY: check
-check: fmt-check vet lint test race ## Run the full gate (what CI runs)
+check: fmt-check vet lint tidy test diff-check ## Run the practical deterministic development gate
 
 ## --- Formatting and static analysis -----------------------------------------
 
@@ -77,6 +77,36 @@ test: ## Run the fast test suite
 .PHONY: race
 race: ## Run the test suite under the race detector
 	$(GO) test -race -count=$(RACE_COUNT) -timeout $(TEST_TIMEOUT) $(TEST_FLAGS) $(PKGS)
+
+.PHONY: stress
+stress: ## Run opt-in randomized and large in-process campaigns
+	RIVETDB_STRESS=1 RIVETDB_PHASE1J_STRESS=1 $(GO) test -count=1 -timeout 90m $(TEST_FLAGS) $(PKGS)
+
+.PHONY: crash
+crash: ## Run subprocess and durable-publication crash campaigns
+	RIVETDB_CRASH=1 $(GO) test -count=1 -timeout 30m -run 'Crash|Publication|FailureMatrix|WriteDurableBeforeAtomicApply|WALDurableBeforeMemTableApply' $(TEST_FLAGS) $(PKGS)
+
+.PHONY: exhaustive
+exhaustive: ## Run every-byte WAL, SSTable, and Manifest campaigns
+	RIVETDB_EXHAUSTIVE=1 $(GO) test -count=1 -timeout 60m -run 'ExhaustiveTruncation|EveryTruncation|ManifestCrashAtEveryOffset' $(TEST_FLAGS) $(PKGS)
+
+BENCH_FLAGS ?= -run '^$$' -bench . -benchmem -count=5
+
+.PHONY: benchmark
+benchmark: ## Run the reproducible benchmark suite (honors RIVETDB_BENCH_DIR)
+	$(GO) test -timeout 120m $(BENCH_FLAGS) $(PKGS)
+
+.PHONY: certify-local
+certify-local: ## Run every local-storage correctness tier in order
+	$(MAKE) check
+	$(MAKE) race
+	$(MAKE) stress
+	$(MAKE) crash
+	$(MAKE) exhaustive
+
+.PHONY: diff-check
+diff-check: ## Fail on whitespace errors in the working diff
+	git diff --check
 
 .PHONY: cover
 cover: ## Produce a coverage profile and an HTML report

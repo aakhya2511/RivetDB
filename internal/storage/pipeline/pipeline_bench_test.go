@@ -8,6 +8,7 @@ import (
 
 	"github.com/rivetdb/rivetdb/internal/storage"
 	"github.com/rivetdb/rivetdb/internal/storage/memtable"
+	"github.com/rivetdb/rivetdb/internal/testutil"
 )
 
 func BenchmarkWriteSingleNoRotation(b *testing.B) {
@@ -35,7 +36,7 @@ func BenchmarkWriteMultipleWriters(b *testing.B) {
 }
 
 func BenchmarkFlushThroughput(b *testing.B) {
-	directory := b.TempDir()
+	directory := testutil.BenchmarkDir(b)
 	p, err := newPipeline(pipelineOptions(directory), &fakeWAL{}, nil)
 	if err != nil {
 		b.Fatalf("newPipeline: %v", err)
@@ -92,7 +93,7 @@ func BenchmarkBackpressure(b *testing.B) {
 
 func benchmarkPipeline(b *testing.B, threshold uint64, maximum int, executor flushExecutor) *Pipeline {
 	b.Helper()
-	options := pipelineOptions(b.TempDir())
+	options := pipelineOptions(testutil.BenchmarkDir(b))
 	options.MemTableBytes = threshold
 	options.MaxImmutables = maximum
 	p, err := newPipeline(options, &fakeWAL{}, executor)

@@ -15,7 +15,7 @@ find than to prevent.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: docs, module, build, CI, logging, test harness | ✅ |
-| 1 | Local LSM storage engine | 🔨 in progress (1A–1J) |
+| 1 | Local LSM storage engine | ✅ complete (1A–1K) |
 | 2 | Single Raft group | ⬜ |
 | 3 | Durable replicated range (Raft + storage) | ⬜ |
 | 4 | Multi-Raft and range routing | ⬜ |
@@ -29,7 +29,7 @@ find than to prevent.
 | 12 | Optional AI operator | ⬜ |
 
 **What exists right now:** Phase 0, the pre-Phase-1 internal-key contract and
-Phase 1A through 1J include a complete local latest-state key-value engine.
+Phase 1A through 1K include a certified local latest-state key-value engine.
 There is no Raft, server or client. Anything else described in
 [architecture.md](architecture.md) is a design, clearly marked as such.
 
@@ -70,7 +70,7 @@ before there is anything complicated to gate.
 
 ---
 
-## Phase 1 — Local storage engine ⬜
+## Phase 1 — Local storage engine ✅
 
 A durable, ordered, single-node key-value store with an on-disk format this
 project owns. No network, no replication. Design:
@@ -97,7 +97,7 @@ tombstones · forward iterators · `Get`/`Put`/`Delete`/`Scan`.
 7. A recorded baseline benchmark: sequential and random `Put`, point `Get`,
    `Scan`, with write amplification and space amplification measured.
 
-**Delivered so far — Phase 1A/1B/1C/1D/1E/1F/1G/1H/1I/1J:** authoritative internal-key and write-batch
+**Delivered — Phase 1A/1B/1C/1D/1E/1F/1G/1H/1I/1J/1K:** authoritative internal-key and write-batch
 codecs; versioned 32 KiB WAL block framing with independent header/content
 CRC32C; bounded streaming reader; `SyncBatch` and `SyncNone`; concurrent append
 serialization; clean restart; explicit truncated-tail repair; every-offset
@@ -136,8 +136,11 @@ proof, keeps physical WAL deletion candidate-only, and passes a 50,000-operation
 reference campaign with 120 restarts; evidence is in
 [`phase-1j.md`](evidence/phase-1j.md).
 
-**Remaining before Phase 1 is complete:** profiling/optimization decisions,
-Bloom-filter work and the final Phase 1 acceptance benchmark/certification.
+Phase 1K adds profile-justified frozen iteration, a bounded leased table-reader
+cache, user-key Bloom filters in the reserved v1 block, lower-copy Scan result
+assembly, reproducible benchmark placement and explicit certification tiers.
+Its constrained-environment measurements, full correctness record and Raft
+readiness audit are in [`phase-1k.md`](evidence/phase-1k.md).
 
 ---
 

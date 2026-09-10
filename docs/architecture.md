@@ -193,7 +193,8 @@ published once. Point lookup considers every source that can contain a
 candidate: active, all immutables, every overlapping L0 table and one
 binary-range-selected table per non-overlapping higher level. The highest sequence wins globally; a
 tombstone shadows older values. Scan heap-merges the same sources and collapses
-versions by user key. Bloom filters remain absent.
+versions by user key. User-key Bloom filters skip definite-negative SSTables,
+and a bounded leased reader cache amortizes eager complete-file validation.
 
 The engine owns its on-disk format. Every structure — WAL record framing,
 SSTable blocks, the index, the Bloom filter, the footer, the manifest — is
@@ -213,7 +214,9 @@ installation may briefly make an immutable and its identically numbered L0
 file both visible, but removes the immutable only after Manifest durability and
 Version publication, so no read gap exists. Compaction similarly publishes one
 new immutable Version while readers that captured the old Version finish on
-retained inputs. SSTable caching is deferred. The single active WAL has
+retained inputs. Phase 1K's bounded SSTable cache retains eager validation and
+uses explicit leases so reclamation cannot close or unlink a borrowed reader.
+The single active WAL has
 whole-file candidate inspection but cannot be physically reclaimed until a
 future closed-segment lifecycle exists.
 
@@ -495,7 +498,8 @@ The general shape:
   published storage sequences. Get and Scan capture the published high-water
   once. Every Engine operation that may use an immutable Version or SSTable
   holds the shared operation lock for that lifetime; obsolete-table deletion
-  takes it exclusively and rechecks the current Version before unlinking.
+  takes it exclusively, rechecks the current Version and evicts any cached
+  identity before unlinking. A borrowed cache lease retains the file.
 - **Explicit lifecycle.** Every component that starts goroutines exposes
   `Close`, cancels a context, and waits for its goroutines to exit.
   [`testutil.NoLeaks`](../internal/testutil/leak.go) enforces this in tests: a
@@ -557,8 +561,7 @@ internal/storage/     key/batch, WAL, MemTable, SSTable writer/reader and flush 
 docs/                 this document, invariants, roadmap, ADRs
 ```
 
-Planned, in roadmap order: the remainder of `internal/storage` (Bloom filter,
-manifest, compaction and final engine coordination), `internal/raft`,
+Planned, in roadmap order: `internal/raft`,
 `internal/multiraft`, `internal/rangedesc`,
 `internal/mvcc`, `internal/txn`, `internal/routing`, `internal/migration`,
 `internal/rebalance`, `internal/telemetry`, `internal/server`, plus `cmd/`,

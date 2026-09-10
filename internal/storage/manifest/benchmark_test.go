@@ -10,10 +10,11 @@ import (
 	"github.com/rivetdb/rivetdb/internal/storage"
 	"github.com/rivetdb/rivetdb/internal/storage/sstable"
 	"github.com/rivetdb/rivetdb/internal/storage/wal"
+	"github.com/rivetdb/rivetdb/internal/testutil"
 )
 
 func BenchmarkManifestAppendFsync(b *testing.B) {
-	directory := b.TempDir()
+	directory := testutil.BenchmarkDir(b)
 	writer, err := wal.OpenWriter(filepath.Join(directory, manifestFileName(1)), wal.WriterOptions{Durability: wal.SyncBatch})
 	if err != nil {
 		b.Fatal(err)
@@ -33,7 +34,7 @@ func BenchmarkManifestAppendFsync(b *testing.B) {
 func BenchmarkManifestRecovery(b *testing.B) {
 	for _, count := range []int{100, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("edits-%d", count), func(b *testing.B) {
-			directory := b.TempDir()
+			directory := testutil.BenchmarkDir(b)
 			path := filepath.Join(directory, manifestFileName(1))
 			writer, err := wal.OpenWriter(path, wal.WriterOptions{Durability: wal.SyncNone})
 			if err != nil {
@@ -74,7 +75,7 @@ func BenchmarkManifestRecovery(b *testing.B) {
 }
 
 func BenchmarkManifestRewrite(b *testing.B) {
-	directory := b.TempDir()
+	directory := testutil.BenchmarkDir(b)
 	store, err := Create(Options{Directory: directory})
 	if err != nil {
 		b.Fatal(err)
@@ -106,7 +107,7 @@ func BenchmarkVersionInstall(b *testing.B) {
 }
 
 func BenchmarkDurableTableInstall(b *testing.B) {
-	directory := b.TempDir()
+	directory := testutil.BenchmarkDir(b)
 	tableWriter, err := sstable.OpenWriter(directory, 1, sstable.Options{})
 	if err != nil {
 		b.Fatal(err)

@@ -17,8 +17,8 @@ primitives and WAL, Phase 1C MemTable, Phase 1D SSTable format/writer, Phase 1E
 SSTable reader/seek/iteration, Phase 1F MemTable rotation/flush pipeline, and
 Phase 1G Manifest/VersionSet authority, Phase 1H version-preserving LSM
 compaction, Phase 1I integrated local engine/read path and Phase 1J crash,
-visibility, reclamation and deep-stress work are implemented; Phase 1K
-(profiling, performance engineering and final local-storage certification) is next.**
+visibility and reclamation work, and Phase 1K measured performance and final
+local-storage certification are complete. Phase 2 Raft is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -69,16 +69,21 @@ curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install
 ## 3. Commands
 
 ```bash
-make check    # the gate: fmt-check, vet, lint, test, race. Run before every commit.
-make test     # fast tests
-make race     # go test -race -count=2 ./...
+make check    # format, vet, lint, tidy, normal tests and diff check
+make test     # fast deterministic tests
+make race     # practical race suite, count 2
+make stress   # large randomized/reference campaigns
+make crash    # subprocess and publication crash campaigns
+make exhaustive # every-byte truncation/corruption campaigns
+make certify-local # complete local-storage correctness gate
+make benchmark # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover    # coverage profile + HTML report in bin/
 make tidy     # go mod tidy, fails if it was not already tidy
 make help     # everything else
 ```
 
-`make check` runs exactly what CI runs. Green locally should mean green in
-Actions.
+PR CI runs the practical tiers; scheduled/manual CI adds stress, crash and
+exhaustive. `make certify-local` runs every local-storage correctness tier.
 
 Replaying a randomized failure:
 
@@ -223,7 +228,14 @@ first:
 9. Integrated recovery and local read path. Complete; see `docs/evidence/phase-1i.md`.
 10. Crash recovery, reclamation safety and deep local-engine stress. Complete;
     see `docs/evidence/phase-1j.md`.
-11. Profiling, performance engineering and final local-storage certification. Next.
+11. Profiling, performance engineering and final local-storage certification.
+    Complete; see `docs/evidence/phase-1k.md` and ADR-0013.
+
+Benchmark data uses `testing.TempDir` by default. Set
+`RIVETDB_BENCH_DIR=/Volumes/<volume>/rivetdb-bench` to place only benchmark
+database/test data on an external local SSD. Never hard-code a volume name or
+publish disk-sensitive numbers without recording filesystem, capacity, free
+space, utilization, directory, hardware, OS, Go and power state.
 
 Two parts of the spec are load-bearing and should not be changed casually:
 

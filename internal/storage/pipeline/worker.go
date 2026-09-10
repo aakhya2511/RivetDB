@@ -137,7 +137,11 @@ func (p *Pipeline) flushToSSTable(options sstable.Options) flushExecutor {
 		if err != nil {
 			return flushResult{ambiguous: finalExists(p.directory, item.fileNumber)}, fmt.Errorf("open flush SSTable writer: %w", err)
 		}
-		iterator := item.table.Iterator()
+		iterator, err := item.table.FrozenIterator()
+		if err != nil {
+			abortErr := writer.Abort()
+			return flushResult{ambiguous: finalExists(p.directory, item.fileNumber)}, errors.Join(fmt.Errorf("iterate immutable generation %d: %w", item.id, err), abortErr)
+		}
 		for iterator.Next() {
 			entry, ok := iterator.Entry()
 			invariant.Assert(ok, "STORAGE-52", "valid MemTable iterator has no entry")
@@ -165,7 +169,10 @@ func validateFlushOutput(path string, table *memtable.MemTable) (resultErr error
 		return fmt.Errorf("open published flush output: %w", err)
 	}
 	defer func() { resultErr = errors.Join(resultErr, reader.Close()) }()
-	want := table.Iterator()
+	want, err := table.FrozenIterator()
+	if err != nil {
+		return fmt.Errorf("iterate immutable flush input: %w", err)
+	}
 	got, err := reader.NewIterator()
 	if err != nil {
 		return fmt.Errorf("iterate published flush output: %w", err)

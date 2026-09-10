@@ -23,23 +23,25 @@ import (
 )
 
 const (
-	DefaultMemTableBytes = uint64(4 << 20)
-	DefaultMaxImmutables = 4
+	DefaultMemTableBytes      = uint64(4 << 20)
+	DefaultMaxImmutables      = 4
+	DefaultTableCacheCapacity = 32
 )
 
 // Options configures one local storage engine.
 type Options struct {
-	Directory       string
-	MemTableBytes   uint64
-	MaxImmutables   int
-	SSTableOptions  sstable.Options
-	L0Trigger       int
-	TargetFileSize  uint64
-	Clock           clock.Clock
-	Logger          *slog.Logger
-	WriteHook       pipeline.WriteHook
-	ReadHook        ReadHook
-	MaintenanceHook MaintenanceHook
+	Directory          string
+	MemTableBytes      uint64
+	MaxImmutables      int
+	SSTableOptions     sstable.Options
+	L0Trigger          int
+	TargetFileSize     uint64
+	Clock              clock.Clock
+	Logger             *slog.Logger
+	WriteHook          pipeline.WriteHook
+	ReadHook           ReadHook
+	MaintenanceHook    MaintenanceHook
+	TableCacheCapacity int
 }
 
 // KV is one latest-state user-key/value result.
@@ -51,6 +53,10 @@ type Stats struct {
 	Recoveries, ReplayedEntries                    uint64
 	GetL0TableReads, GetHigherTableReads           uint64
 	ScanTableReads                                 uint64
+	TableCacheHits, TableCacheMisses, TableOpens   uint64
+	TableCacheEvictions, CachedTableReaders        uint64
+	ActiveTableLeases                              uint64
+	BloomTableSkips                                uint64
 	ReclaimedTables, MaintenanceFailures           uint64
 	Pipeline                                       pipeline.Stats
 	Manifest                                       manifest.Stats
@@ -70,9 +76,11 @@ type Engine struct {
 	recoveries, replayed                           atomic.Uint64
 	getL0TableReads, getHigherTableReads           atomic.Uint64
 	scanTableReads                                 atomic.Uint64
+	bloomTableSkips                                atomic.Uint64
 	readHook                                       ReadHook
 	removeFile                                     func(string) error
 	maintenanceHook                                MaintenanceHook
+	tableCache                                     *tableCache
 	reclaimed                                      map[uint64]struct{}
 	reclaimedTables, maintenanceFailures           atomic.Uint64
 }
@@ -89,6 +97,12 @@ func Open(options Options) (_ *Engine, resultErr error) {
 		options.MaxImmutables = DefaultMaxImmutables
 	}
 	if options.MemTableBytes == 0 || options.MaxImmutables < 1 {
+		return nil, ErrInvalidOptions
+	}
+	if options.TableCacheCapacity == 0 {
+		options.TableCacheCapacity = DefaultTableCacheCapacity
+	}
+	if options.TableCacheCapacity < 1 {
 		return nil, ErrInvalidOptions
 	}
 	if options.Clock == nil {
@@ -172,7 +186,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open compaction executor: %w", err), pipe.Close(context.Background()))
 	}
-	e := &Engine{directory: options.Directory, pipeline: pipe, manifest: store, compact: executor, readHook: options.ReadHook, removeFile: os.Remove, maintenanceHook: options.MaintenanceHook, reclaimed: make(map[uint64]struct{})}
+	e := &Engine{directory: options.Directory, pipeline: pipe, manifest: store, compact: executor, readHook: options.ReadHook, removeFile: os.Remove, maintenanceHook: options.MaintenanceHook, tableCache: newTableCache(options.Directory, options.TableCacheCapacity), reclaimed: make(map[uint64]struct{})}
 	e.recoveries.Store(1)
 	e.replayed.Store(replayed)
 	return e, nil
@@ -294,7 +308,7 @@ func (e *Engine) Close(ctx context.Context) error {
 		return e.closeErr
 	}
 	e.closed = true
-	e.closeErr = errors.Join(e.pipeline.Close(context.WithoutCancel(ctx)), e.manifest.Close())
+	e.closeErr = errors.Join(e.pipeline.Close(context.WithoutCancel(ctx)), e.tableCache.close(), e.manifest.Close())
 	return e.closeErr
 }
 
@@ -302,6 +316,11 @@ func (e *Engine) Stats() Stats {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	result := Stats{Puts: e.puts.Load(), Deletes: e.deletes.Load(), Gets: e.gets.Load(), GetHits: e.getHits.Load(), GetMisses: e.getMisses.Load(), Scans: e.scans.Load(), Recoveries: e.recoveries.Load(), ReplayedEntries: e.replayed.Load(), GetL0TableReads: e.getL0TableReads.Load(), GetHigherTableReads: e.getHigherTableReads.Load(), ScanTableReads: e.scanTableReads.Load(), ReclaimedTables: e.reclaimedTables.Load(), MaintenanceFailures: e.maintenanceFailures.Load()}
+	cache := e.tableCache.stats()
+	result.TableCacheHits, result.TableCacheMisses, result.TableOpens = cache.Hits, cache.Misses, cache.Opens
+	result.TableCacheEvictions, result.CachedTableReaders = cache.Evictions, cache.CachedReaders
+	result.ActiveTableLeases = cache.ActiveLeases
+	result.BloomTableSkips = e.bloomTableSkips.Load()
 	if e.pipeline != nil {
 		result.Pipeline = e.pipeline.Stats()
 	}

@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/rivetdb/rivetdb/internal/storage"
@@ -83,6 +84,30 @@ func BenchmarkReaderGetCandidate(b *testing.B) {
 			b.Fatalf("GetCandidate: %v", err)
 		}
 		benchmarkReaderEntry = entry
+	}
+}
+
+func BenchmarkReaderGetCandidateBlockSize(b *testing.B) {
+	entries := deterministicEntries(b, 20_000)
+	for _, size := range []int{4 << 10, 8 << 10, 16 << 10} {
+		b.Run(fmt.Sprint(size), func(b *testing.B) {
+			_, metadata, path := buildRealTable(b, uint64(300+size), Options{BlockSize: size}, entries) //nolint:gosec // bounded benchmark sizes
+			reader := mustOpenReader(b, path)
+			b.Cleanup(func() { closeReader(b, reader) })
+			target := entries[len(entries)/2].key
+			user := target.UserKey()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				entry, err := reader.GetCandidate(user, target.Sequence())
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkReaderEntry = entry
+			}
+			b.ReportMetric(float64(metadata.FileSize), "table-bytes")
+			b.ReportMetric(float64(metadata.DataBlockCount), "data-blocks")
+		})
 	}
 }
 

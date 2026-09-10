@@ -321,6 +321,69 @@ func TestIteratorSnapshotAndExhaustion(t *testing.T) {
 	assertIteratorEntries(t, table.IteratorFrom(b), []Entry{{Key: b, Value: []byte("b")}})
 }
 
+func TestFrozenIteratorMatchesSnapshotAndPreservesOwnership(t *testing.T) {
+	t.Parallel()
+
+	table := deterministicTable()
+	for index := range 100 {
+		key := mustKey(t, []byte(fmt.Sprintf("key-%03d", index/4)), uint64(index%4), storage.ValueKind(index%2)) //nolint:gosec // bounded test index
+		value := []byte(fmt.Sprintf("value-%03d", index))
+		if key.Kind() == storage.KindDelete {
+			value = nil
+		}
+		mustInsert(t, table, key, value)
+	}
+	if _, err := table.FrozenIterator(); !errors.Is(err, ErrNotFrozen) {
+		t.Fatalf("mutable FrozenIterator error = %v, want ErrNotFrozen", err)
+	}
+	table.Freeze()
+
+	want := collect(t, table.Iterator())
+	it, err := table.FrozenIterator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]Entry, 0, len(want))
+	for it.Next() {
+		entry, ok := it.Entry()
+		if !ok {
+			t.Fatal("valid frozen iterator has no entry")
+		}
+		got = append(got, entry)
+	}
+	if it.Next() {
+		t.Fatal("frozen iterator resumed after exhaustion")
+	}
+	if _, ok := it.Entry(); ok {
+		t.Fatal("frozen iterator Entry valid after exhaustion")
+	}
+	if len(got) != len(want) {
+		t.Fatalf("frozen count = %d, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if storage.CompareInternal(got[index].Key, want[index].Key) != 0 || !bytes.Equal(got[index].Value, want[index].Value) {
+			t.Fatalf("frozen entry %d = %s, want %s", index, formatEntry(got[index]), formatEntry(want[index]))
+		}
+	}
+	mutable, err := table.FrozenIterator()
+	if err != nil || !mutable.Next() {
+		t.Fatalf("mutation FrozenIterator error = %v", err)
+	}
+	mutated, ok := mutable.Entry()
+	if !ok || len(mutated.Value) == 0 {
+		t.Fatal("first frozen iterator entry is not a value")
+	}
+	mutated.Value[0] ^= 0xff
+	again, err := table.FrozenIterator()
+	if err != nil || !again.Next() {
+		t.Fatalf("second FrozenIterator error = %v", err)
+	}
+	first, ok := again.Entry()
+	if !ok || !bytes.Equal(first.Value, want[0].Value) {
+		t.Fatal("frozen iterator value mutation reached table storage")
+	}
+}
+
 func TestOwnershipCopiesInputsAndOutputs(t *testing.T) {
 	t.Parallel()
 

@@ -379,6 +379,9 @@ func TestStateTransitionMatrix(t *testing.T) {
 }
 
 func TestHundredTableStress(t *testing.T) {
+	if os.Getenv("RIVETDB_STRESS") == "" {
+		t.Skip("set RIVETDB_STRESS=1 for the 100-table compaction campaign")
+	}
 	directory := t.TempDir()
 	store := createStore(t, directory)
 	defer store.Close()

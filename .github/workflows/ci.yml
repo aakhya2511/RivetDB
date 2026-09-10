@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   # Randomized tests draw a fresh seed on every run, so a nightly build
   # explores schedules that pull requests never reach. Failures record their
   # seed under testdata/seeds and become deterministic regression cases.
@@ -102,3 +103,22 @@ jobs:
 
       - name: test
         run: make test
+
+  certification-heavy:
+    name: ${{ matrix.tier }} certification
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [stress, crash, exhaustive]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: run ${{ matrix.tier }} tier
+        run: make ${{ matrix.tier }}

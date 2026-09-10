@@ -18,6 +18,7 @@ import (
 type Options struct {
 	BlockSize       int
 	RestartInterval int
+	DisableBloom    bool
 }
 
 // Metadata describes one successfully published table.
@@ -77,6 +78,10 @@ type Writer struct {
 	smallestKey   storage.InternalKey
 	smallestUser  []byte
 	largestUser   []byte
+	lastBloomUser []byte
+	bloomHashes   []bloomHash
+	haveBloomUser bool
+	enableBloom   bool
 	haveEntry     bool
 	failed        error
 	finished      bool
@@ -111,7 +116,9 @@ func OpenWriter(directory string, fileNumber uint64, options Options) (*Writer, 
 	if err != nil {
 		return nil, fmt.Errorf("create temporary SSTable %s: %w", temporaryPath, err)
 	}
-	return newWriter(file, directory, temporaryPath, finalPath, fileNumber, blockSize, restartInterval, osPublication()), nil
+	writer := newWriter(file, directory, temporaryPath, finalPath, fileNumber, blockSize, restartInterval, osPublication())
+	writer.enableBloom = !options.DisableBloom
+	return writer, nil
 }
 
 // FileName returns the sortable committed filename for fileNumber.
@@ -129,6 +136,7 @@ func newWriter(file writableFile, directory, temporaryPath, finalPath string, fi
 		fileNumber:    fileNumber,
 		blockSize:     blockSize,
 		block:         newDataBlockBuilder(restartInterval),
+		enableBloom:   true,
 	}
 }
 
@@ -203,6 +211,11 @@ func (w *Writer) Add(key storage.InternalKey, value []byte) error {
 	w.lastKey = cloneInternalKey(key)
 	w.lastEncoded = append(w.lastEncoded[:0], encoded...)
 	w.largestUser = bytes.Clone(userKey)
+	if !w.haveBloomUser || !bytes.Equal(w.lastBloomUser, userKey) {
+		w.bloomHashes = append(w.bloomHashes, hashBloomKey(userKey))
+		w.lastBloomUser = append(w.lastBloomUser[:0], userKey...)
+		w.haveBloomUser = true
+	}
 	return nil
 }
 
@@ -231,7 +244,18 @@ func (w *Writer) Finish() (Metadata, error) {
 	if metadataErr != nil {
 		return Metadata{}, metadataErr
 	}
-	footer := encodeFooter(indexHandle, metadataHandle, BlockHandle{}, dataEnd)
+	var filterHandle BlockHandle
+	if w.enableBloom {
+		filterPayload, filterErr := encodeBloom(w.bloomHashes)
+		if filterErr != nil {
+			return Metadata{}, w.poison(filterErr)
+		}
+		filterHandle, filterErr = w.writeBlock(filterPayload, blockFilter)
+		if filterErr != nil {
+			return Metadata{}, filterErr
+		}
+	}
+	footer := encodeFooter(indexHandle, metadataHandle, filterHandle, dataEnd)
 	if writeErr := w.writeAll(footer[:]); writeErr != nil {
 		return Metadata{}, writeErr
 	}

@@ -1,9 +1,8 @@
 # Design Note: Local Storage Engine (Phase 1)
 
-**Status:** Phase 1A through Phase 1J are implemented and mechanically tested,
-including explicit read-visibility publication, subprocess crash recovery,
-conservative obsolete-SSTable reclamation and deep local-engine stress.
-Physical WAL deletion and remaining Phase 1 optimization work are deferred.
+**Status:** Phase 1A through Phase 1K are implemented and mechanically tested.
+The local engine is a freeze candidate; physical WAL deletion, group commit and
+a block cache remain deliberately deferred.
 
 **Related:** [ADR-0001](design-decisions/0001-lsm-tree-over-b-tree.md) ·
 [ADR-0003](design-decisions/0003-explicit-internal-key-comparator.md) ·
@@ -16,7 +15,8 @@ Physical WAL deletion and remaining Phase 1 optimization work are deferred.
 [ADR-0010](design-decisions/0010-version-preserving-lsm-compaction.md) ·
 [ADR-0011](design-decisions/0011-integrated-local-lsm-read-write-semantics.md) ·
 [ADR-0012](design-decisions/0012-crash-visibility-and-physical-reclamation.md) ·
-[invariants.md](invariants.md) (STORAGE-1 … STORAGE-111) ·
+[ADR-0013](design-decisions/0013-evidence-driven-local-storage-performance.md) ·
+[invariants.md](invariants.md) (STORAGE-1 … STORAGE-114) ·
 [architecture.md](architecture.md) §3
 
 ---
@@ -52,8 +52,8 @@ about durability makes every guarantee above it false.
 
 - **Replication, networking, transactions.** The engine knows nothing about
   clusters. It is a local database.
-- **A block cache.** Correctness first; caching is a Phase 11 optimisation with
-  a measurement attached.
+- **A block cache.** Phase 1K measured the opportunity but retained the
+  post-open-corruption integrity model instead.
 - **Secondary indexes, merge operators, column families.** No user needs them
   here.
 - **Concurrent writers.** Writes are serialised through a single write path.
@@ -96,8 +96,9 @@ about durability makes every guarantee above it false.
 **Read path.** MemTable → immutable MemTable → L0 files newest-first → L1…Ln by
 binary search within each level. Stop at the first entry for the key: because
 newer data is always consulted first, that entry is the correct answer.
-A Bloom filter per SSTable skips files that cannot contain the key (STORAGE-8);
-in a levelled layout most point lookups touch one data block.
+A user-key Bloom filter per SSTable skips files that cannot contain the key
+(STORAGE-8); a bounded cache amortizes eager reader validation. In a levelled
+layout most point lookups touch one data block.
 
 **Write path.** A batch is appended to the WAL, optionally fsynced, then
 applied to the MemTable. WAL-before-MemTable is what makes recovery possible:
@@ -137,6 +138,9 @@ upper-bound check, so no boundary can split a version group. Full and range
 iterators snapshot ordered entries while holding a read lock, then traverse the
 private snapshot without locks. An iterator is consequently stable across
 later inserts, replacement and freeze, at the cost of reader-local copying.
+The flush-only frozen iterator instead walks the permanently immutable
+level-zero chain and copies each returned value without allocating a full-table
+snapshot; requesting it before Freeze fails.
 
 One `sync.RWMutex` gives the Phase 1C object a linearizable concurrency
 contract. Writers serialize; readers, seeks and iterator snapshot construction
@@ -212,8 +216,9 @@ leave the MemTable list. This permits a brief identical handoff overlap but no
 gap. Get selects the greatest visible sequence across all sources. Scan reuses
 the compaction heap merge, groups by user key and emits one newest value while
 omitting tombstones. Both are sequence-bounded operations, not transaction or
-MVCC snapshot APIs. Table readers are opened per operation; caches, Bloom
-filters and physical WAL deletion remain deferred.
+MVCC snapshot APIs. Phase 1K reuses eagerly validated readers through bounded
+file-identity leases and applies the persisted user-key Bloom before a
+candidate block read. Physical WAL deletion remains deferred.
 
 ### 4.4 Phase 1J visibility, crashes and physical reclamation
 
@@ -249,6 +254,24 @@ unlisted files are conservative orphans, not inferred obsolete candidates.
 Unlink failure retains extra disk usage and changes no logical Version; retry
 is idempotent. This is physical file reclamation only—no internal version or
 tombstone is discarded.
+
+### 4.5 Phase 1K measured read and flush paths
+
+Each Engine retains at most 32 SSTable readers by default. Capacity is
+configurable. The cache key is a file number within the Engine's fixed
+directory, and file numbers are never reused. A miss performs the same complete
+eager `Open` validation as Phase 1E; a hit does not replace Manifest authority.
+Borrow/release leases prevent eviction. Reclamation first evicts the identity
+and retains the obsolete file if a lease is outstanding; Engine Close takes the
+exclusive operation lock before draining readers.
+
+The flush worker traverses only permanently frozen MemTables directly and
+copies each returned value without a full-table snapshot. Scans transfer bytes
+already owned by child iterator entries into their materialized caller-owned
+result instead of cloning those copies again. No decoded-block or MemTable-node
+storage escapes. Bloom construction, cache admission and frozen traversal
+change neither persistent key ordering nor WAL/Manifest durability and
+publication.
 
 ## 5. On-disk format
 
@@ -521,10 +544,25 @@ User bounds are their decoded user keys. No owner range ID is stored, so future
 child ranges may share a physical immutable file and apply `[start,end)` user
 bounds externally.
 
-**Filter block.** Deferred to a later phase. Version 1 reserves block kind 4,
-a footer handle and flag. Phase 1D writes `(0,0)` with the flag clear. A future
-Bloom payload hashes decoded user keys only and can be inserted before the
-footer without changing its layout. No filter query logic exists in Phase 1D.
+**Filter block.** Version 1 may omit the filter (zero handle, flag clear) or
+store one user-key Bloom filter in the already-reserved kind-4 block. Its
+payload is byte-exact:
+
+```text
+algorithm_u8 (=1, seeded FNV-1a plus deterministic mixing)
+probes_u8    (=7)
+reserved_u16 (=0)
+bit_count_u32 LE (multiple of 8, at least 64)
+seed_u64 LE  (=0x9e3779b97f4a7c15)
+bits[bit_count/8]
+```
+
+The writer inserts each distinct decoded user key once, uses ten bits per key
+rounded to a byte, and caps the payload before allocation. Double hashing sets
+`(h1 + i*h2) mod bit_count` for seven probes. The reader validates header,
+length and block CRC, and eager Open proves every decoded data-stream user key
+tests present before trusting the table. False positives are permitted; a
+false negative is corruption. Phase 1D files without a filter remain readable.
 
 **Footer.** Exactly 80 bytes at EOF:
 
@@ -584,8 +622,10 @@ unbounded and a reversed range is rejected.
 Readers support concurrent read-only methods and independent iterators without
 a shared block cache. Close is idempotent and excludes active reads. A Reader
 must outlive its iterators; all operations fail with `ErrClosed` after it is
-closed. Bloom absence is understood but no Bloom lookup or construction exists.
-See [ADR-0007](design-decisions/0007-sstable-reader-validation-and-seek.md).
+closed. Phase 1K constructs and checks the optional v1 Bloom block; an absent
+filter from an older v1 writer conservatively means "may contain." See
+[ADR-0007](design-decisions/0007-sstable-reader-validation-and-seek.md) and
+[ADR-0013](design-decisions/0013-evidence-driven-local-storage-performance.md).
 
 **Ordering within a level.** L0 files may overlap, because they are flushed
 MemTables and each covers whatever keys happened to be in memory; they are

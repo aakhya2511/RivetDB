@@ -44,6 +44,7 @@ type Reader struct {
 	index    []decodedIndexEntry
 	dataCRCs []uint32
 	metadata Metadata
+	bloom    bloomFilter
 	maxIndex uint64
 	closed   bool
 }
@@ -116,6 +117,16 @@ func openReader(file randomAccessFile, size uint64, path string, options ReaderO
 	if uint64(len(r.index)) != uint64(diskMetadata.dataBlockCount) {
 		return nil, corrupt(ErrInvalidBlock, "index and metadata block counts differ")
 	}
+	if footerState.filter.Length != 0 {
+		filterPayload, filterErr := r.readBlockUnlocked(footerState.filter, blockFilter, footerOffset)
+		if filterErr != nil {
+			return nil, filterErr
+		}
+		r.bloom, filterErr = decodeBloom(filterPayload)
+		if filterErr != nil {
+			return nil, filterErr
+		}
+	}
 	if handleErr := validateDataHandles(r.index, footerState.dataEnd); handleErr != nil {
 		return nil, handleErr
 	}
@@ -162,14 +173,16 @@ func decodeFooter(footer []byte, footerOffset uint64) (footerState, error) {
 		filter:   BlockHandle{Offset: binary.LittleEndian.Uint64(footer[footerFilterOffset:]), Length: binary.LittleEndian.Uint64(footer[footerFilterLength:])},
 		dataEnd:  binary.LittleEndian.Uint64(footer[footerDataRegionEnd:]),
 	}
-	if flags&footerFilterPresentFlag != 0 {
-		return footerState{}, fmt.Errorf("%w: filter blocks are not supported", ErrUnsupportedVersion)
-	}
-	if state.filter != (BlockHandle{}) {
+	present := flags&footerFilterPresentFlag != 0
+	if !present && state.filter != (BlockHandle{}) || present && state.filter == (BlockHandle{}) {
 		return footerState{}, corrupt(ErrInvalidHandle, "absent filter has nonzero handle")
 	}
+	metadataEnd := footerOffset
+	if present {
+		metadataEnd = state.filter.Offset
+	}
 	if state.dataEnd != state.index.Offset || !handleEndsAt(state.index, state.metadata.Offset) ||
-		!handleEndsAt(state.metadata, footerOffset) {
+		!handleEndsAt(state.metadata, metadataEnd) || present && !handleEndsAt(state.filter, footerOffset) {
 		return footerState{}, corrupt(ErrInvalidHandle, "structural regions are not contiguous")
 	}
 	if err := validateHandle(state.index, footerOffset, BlockTrailerSize); err != nil {
@@ -177,6 +190,14 @@ func decodeFooter(footer []byte, footerOffset uint64) (footerState, error) {
 	}
 	if err := validateHandle(state.metadata, footerOffset, BlockTrailerSize); err != nil {
 		return footerState{}, err
+	}
+	if present {
+		if state.filter.Length > maxBloomBytes+bloomHeaderSize+BlockTrailerSize {
+			return footerState{}, ErrResourceLimit
+		}
+		if err := validateHandle(state.filter, footerOffset, bloomHeaderSize+BlockTrailerSize); err != nil {
+			return footerState{}, err
+		}
 	}
 	return state, nil
 }
@@ -236,6 +257,9 @@ func (r *Reader) validateDataStream(disk decodedMetadata) (Metadata, error) {
 		}
 		last = blockLast
 		for _, entry := range block.entries {
+			if !r.bloom.mayContain(entry.key.UserKey()) {
+				return Metadata{}, corrupt(ErrInvalidBlock, "Bloom false negative")
+			}
 			if count == math.MaxUint64 {
 				return Metadata{}, corrupt(ErrInvalidBlock, "entry count overflow")
 			}
@@ -298,6 +322,13 @@ func (r *Reader) Get(target storage.InternalKey) (Entry, error) {
 
 // GetCandidate returns the newest user-key version whose sequence is at most target.
 func (r *Reader) GetCandidate(userKey []byte, target uint64) (Entry, error) {
+	mayContain, err := r.MayContain(userKey)
+	if err != nil {
+		return Entry{}, err
+	}
+	if !mayContain {
+		return Entry{}, ErrNotFound
+	}
 	seekKey, err := candidateSeekKey(userKey, target)
 	if err != nil {
 		return Entry{}, err
@@ -310,6 +341,23 @@ func (r *Reader) GetCandidate(userKey []byte, target uint64) (Entry, error) {
 		return Entry{}, ErrNotFound
 	}
 	return entry, nil
+}
+
+// MayContain reports the user-key Bloom result. Tables written before Bloom
+// activation conservatively return true.
+func (r *Reader) MayContain(userKey []byte) (bool, error) {
+	if r == nil {
+		return false, ErrClosed
+	}
+	if len(userKey) > MaxUserKeySize {
+		return false, ErrKeyTooLarge
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.closed {
+		return false, ErrClosed
+	}
+	return r.bloom.mayContain(userKey), nil
 }
 
 func candidateSeekKey(userKey []byte, target uint64) (storage.InternalKey, error) {
