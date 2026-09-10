@@ -98,6 +98,18 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-70 | Manifest replacement never deletes or invalidates the old recoverable Manifest before the new CURRENT switch is durable; ambiguous switches retain both candidates. | verified (Phase 1G) |
 | STORAGE-71 | Manifest replay and Version ordering are deterministic and independent of map iteration order. | verified (Phase 1G) |
 | STORAGE-72 | Physical WAL files are retained in Phase 1G even when the durable replay frontier proves a prefix logically redundant. | verified (Phase 1G) |
+| STORAGE-73 | Phase 1H compaction preserves the exact multiset of internal entries, including every version and tombstone; unrepresentable exact duplicates fail without replacement. | verified (Phase 1H) |
+| STORAGE-74 | Merge output is globally ordered only by `storage.CompareInternal`; physical tie-breakers do not change logical ordering. | verified (Phase 1H) |
+| STORAGE-75 | Compaction overlap closure uses logical user-key ranges and includes every transitively overlapping source and target table. | verified (Phase 1H) |
+| STORAGE-76 | Compaction output tables in L1+ are ordered and non-overlapping, and no logical user-key version group is split at a target-size boundary. | verified (Phase 1H) |
+| STORAGE-77 | One atomic VersionEdit deletes every compaction input and adds every output; no partial logical replacement is installable. | verified (Phase 1H) |
+| STORAGE-78 | Before replacement Manifest durability inputs remain authoritative; afterward outputs are authoritative and inputs are only logically obsolete. | verified (Phase 1H) |
+| STORAGE-79 | Durable outputs from a failed or pre-install compaction remain unlisted orphans and never displace live inputs. | verified (Phase 1H) |
+| STORAGE-80 | A compaction plan whose input is no longer live with identical metadata cannot install. | verified (Phase 1H) |
+| STORAGE-81 | Compaction does not change or infer WAL replay coverage from output sequence minima or maxima. | verified (Phase 1H) |
+| STORAGE-82 | Compaction input corruption or any output failure aborts the logical replacement and is never skipped. | verified (Phase 1H) |
+| STORAGE-83 | Compaction output file numbers come only from the durable VersionSet allocator; failed attempts may burn numbers but never reuse them. | verified (Phase 1H) |
+| STORAGE-84 | Physically deleting obsolete input SSTables is deferred while immutable Version reference reclamation is absent. | verified (Phase 1H) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -161,6 +173,14 @@ concurrent reads and serialized installs, orphan/temp collision recovery,
 missing/corrupt/mismatched live tables, conservative Manifest/WAL/live sequence
 maxima, contiguous-frontier gaps and restart, both sides of the durable AddFile
 crash boundary, snapshot rewrite and retained WAL.
+
+STORAGE-73 through STORAGE-84 are enforced by
+[`compaction_test.go`](../internal/storage/compaction/compaction_test.go) and
+the Phase 1G replacement crash test. Coverage includes transitive L0/L1
+user-range closure, deterministic picking, heap ordering, exact multiset
+preservation, all versions/tombstones, duplicate-safe failure, multi-output
+user-key boundaries, stale plans after durable output, atomic pre/post-Manifest
+restart behavior, retained obsolete files and repeated 100-table compaction.
 
 ## Raft
 

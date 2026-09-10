@@ -15,8 +15,8 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 **Phase 0 and the pre-Phase-1 key audit are complete. Phase 1A/1B storage
 primitives and WAL, Phase 1C MemTable, Phase 1D SSTable format/writer, Phase 1E
 SSTable reader/seek/iteration, Phase 1F MemTable rotation/flush pipeline, and
-Phase 1G Manifest/VersionSet authority are implemented; Phase 1H (levelled
-compaction) is next.**
+Phase 1G Manifest/VersionSet authority and Phase 1H version-preserving LSM
+compaction are implemented; Phase 1I (integrated local engine/read path) is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -217,7 +217,8 @@ first:
    construction/query remains deferred.
 6. MemTable rotation and SSTable flush pipeline. Complete.
 7. Manifest and version set (§5.4). Complete; see `docs/evidence/phase-1g.md`.
-8. Levelled compaction. Next.
+8. Version-preserving L0-to-L1 compaction (§5.5). Complete; see `docs/evidence/phase-1h.md`.
+9. Integrated recovery and local read path. Next.
 8. Levelled compaction.
 9. Recovery, then the crash-at-every-offset test.
 

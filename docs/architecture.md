@@ -197,6 +197,13 @@ SSTable blocks, the index, the Bloom filter, the footer, the manifest — is
 specified byte-for-byte in [storage-engine.md](storage-engine.md) §5 and
 carries a version number so the format can evolve.
 
+Phase 1H's first compactor is a single explicit executor. It selects an
+immutable-Version plan, performs deterministic bounded heap merge outside the
+VersionSet lock, then revalidates and installs through one Manifest edit. It is
+strictly version-preserving: without MVCC visibility evidence it drops neither
+old versions nor tombstones. Obsolete inputs remain physical while old Version
+references may exist.
+
 ---
 
 ## 4. Consensus

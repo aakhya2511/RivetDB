@@ -30,4 +30,5 @@ var (
 	ErrOverlappingLevel        = errors.New("nonzero LSM level contains overlapping tables")
 	ErrMetadataMismatch        = errors.New("manifest and SSTable metadata differ")
 	ErrComparatorMismatch      = errors.New("internal-key comparator identity mismatch")
+	ErrStaleVersion            = errors.New("stale Version input set")
 )

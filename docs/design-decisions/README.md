@@ -38,6 +38,7 @@ Phase:    which phase this governs
 | [0007](0007-sstable-reader-validation-and-seek.md) | SSTable reader validation and seek strategy | Accepted | 1E |
 | [0008](0008-memtable-rotation-and-flush-lifecycle.md) | MemTable rotation and flush lifecycle | Accepted | 1F |
 | [0009](0009-manifest-versionset-and-replay-frontier-authority.md) | Manifest, VersionSet and replay-frontier authority | Accepted | 1G |
+| [0010](0010-version-preserving-lsm-compaction.md) | Version-preserving LSM compaction | Accepted | 1H |
 
 ## Planned
 

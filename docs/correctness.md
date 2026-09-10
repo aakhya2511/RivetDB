@@ -5,7 +5,7 @@ This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
 **Current scope:** Phase 0, the pre-Phase-1 key contract and Phase 1A through
-1G storage units exist. No database consistency claims are made because there is
+1H storage units exist. No database consistency claims are made because there is
 not yet a complete key-value engine. This document describes the strategy the
 remaining implementation will be held to; sections marked *planned* are plans,
 not results.
@@ -131,6 +131,13 @@ missing/corrupt/mismatched live tables fail, old Manifests survive rewrite, and
 WAL replay skips only complete batches at or below the durable inclusive
 contiguous frontier. Concurrent readers run under the race detector against
 immutable Versions.
+
+Phase 1H treats compaction as exact structural replacement. Heap-merge,
+overlap-closure, multi-output, oversized user-key group, stale-plan,
+pre/post-Manifest crash, restart and 100-table stress tests compare complete
+internal-entry multisets including tombstones and old versions. Inputs are
+never physically deleted, and replay-frontier equality is checked across the
+atomic replacement.
 
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the

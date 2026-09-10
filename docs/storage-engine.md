@@ -612,6 +612,31 @@ The same discipline applies to every new file: contents fsynced, then the
 directory fsynced, and only then is the file referenced from the manifest
 (STORAGE-11). A reader therefore never sees a file that is not fully durable.
 
+### 5.5 Version-preserving compaction
+
+Phase 1H implements deterministic L0-to-L1 structural compaction under
+[ADR-0010](design-decisions/0010-version-preserving-lsm-compaction.md). At a
+configurable L0 file-count trigger (default four), the picker seeds the oldest
+L0 file and repeatedly expands across every overlapping L0 and L1 logical
+user-key range until closure is stable. The plan retains its immutable Version
+inputs for installation revalidation.
+
+Inputs are opened through the production reader and merged with an O(N log K),
+O(K) heap ordered by `CompareInternal`; file number and iterator ordinal only
+break exact ties. Phase 1H performs no MVCC garbage collection: all versions
+and tombstones survive. Exact duplicate internal keys cause a safe failed
+attempt because the v1 SSTable writer cannot represent duplicates within one
+file; they are never silently deduplicated.
+
+Outputs reuse the v1 SSTable writer and default to a 4 MiB logical-byte target.
+A boundary is taken only before a different user key, so one version group may
+produce an oversized file but is never split merely to meet the target. Every
+output is durably published and reopened before one VersionEdit deletes every
+input and adds every output. Installation rechecks that inputs remain live and
+that the candidate Version is valid. The replay frontier is unchanged. Removed
+inputs are tracked as logically obsolete but retained physically until Version
+reference reclamation exists.
+
 ## 6. Durability modes
 
 | Mode | Behaviour | Loses on machine crash | Intended use |
@@ -636,8 +661,8 @@ conflates the two is describing a guarantee it does not have.
 | Crash mid-WAL-append | a structurally incomplete trailing record is reported as a repairable tail; earlier complete records replay | STORAGE-3 |
 | Crash after WAL fsync, before MemTable apply | replay re-applies the batch | STORAGE-1 |
 | Crash during flush | the partial SSTable is never in the manifest, so it is ignored and deleted; the WAL still holds the data | STORAGE-9, STORAGE-11 |
-| Crash during compaction | inputs remain live because the version edit was never applied; the partial output is orphaned and removed | STORAGE-7 |
-| Crash between file fsync and manifest update | the file is orphaned; recovery deletes files absent from the manifest | STORAGE-9 |
+| Crash during compaction | before the atomic VersionEdit inputs remain live and outputs are retained orphans; afterward outputs are live and inputs are retained but logically obsolete | STORAGE-77, STORAGE-79 |
+| Crash between file fsync and manifest update | the file is an orphan retained for conservative later reclamation | STORAGE-9 |
 | Crash between manifest write and `CURRENT` rename | the old manifest is still valid; the new one is orphaned | STORAGE-9 |
 | Bit flip in a data block | the block CRC fails; the read returns an error rather than wrong data | STORAGE-2 |
 | Bit flip in the index or footer | detected on open; the file is rejected | STORAGE-2 |

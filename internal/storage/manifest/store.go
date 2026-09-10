@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/rivetdb/rivetdb/internal/clock"
+	"github.com/rivetdb/rivetdb/internal/invariant"
 	"github.com/rivetdb/rivetdb/internal/rlog"
 	"github.com/rivetdb/rivetdb/internal/storage/pipeline"
 	"github.com/rivetdb/rivetdb/internal/storage/sstable"
@@ -63,6 +64,7 @@ type Store struct {
 	stats          Stats
 	currentOps     currentOps
 	afterDurable   func() error
+	obsolete       []uint64
 }
 
 // Create creates the first Manifest and publishes CURRENT crash-safely.
@@ -411,6 +413,55 @@ func (s *Store) InstallTable(ctx context.Context, installation pipeline.TableIns
 		s.logger.Info("replay frontier advanced", slog.Uint64("replay_frontier", *edit.ReplayFrontier))
 	}
 	return nil
+}
+
+// InstallCompaction atomically replaces unchanged live inputs with already
+// durable, validated outputs. It deliberately leaves replay-frontier metadata
+// absent so structural compaction cannot manufacture WAL coverage.
+func (s *Store) InstallCompaction(ctx context.Context, inputs, outputs []TableMetadata) error {
+	if ctx == nil || len(inputs) == 0 || len(outputs) == 0 {
+		return ErrInvalidOptions
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("before compaction installation: %w", err)
+	}
+	for _, output := range outputs {
+		path := filepath.Join(s.directory, sstable.FileName(output.FileNumber))
+		if err := validatePhysicalTable(path, output); err != nil {
+			return fmt.Errorf("validate compaction output: %w", err)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, input := range inputs {
+		if !s.current.Contains(input) {
+			return ErrStaleVersion
+		}
+	}
+	edit := VersionEdit{AddedFiles: cloneTables(outputs)}
+	for _, input := range inputs {
+		edit.DeletedFiles = append(edit.DeletedFiles, DeletedFile{Level: input.Level, FileNumber: input.FileNumber})
+	}
+	if _, err := s.current.apply(edit); err != nil {
+		return errors.Join(ErrStaleVersion, err)
+	}
+	beforeFrontier, beforeHaveFrontier := s.current.frontier, s.current.haveFrontier
+	if err := s.installLocked(edit); err != nil {
+		return fmt.Errorf("install compaction replacement: %w", err)
+	}
+	invariant.Assert(s.current.frontier == beforeFrontier && s.current.haveFrontier == beforeHaveFrontier, "STORAGE-81", "compaction changed replay frontier")
+	for _, input := range inputs {
+		s.obsolete = append(s.obsolete, input.FileNumber)
+	}
+	return nil
+}
+
+// ObsoleteFiles returns logically obsolete compaction inputs. Files are not
+// physically deleted while old immutable Version references may exist.
+func (s *Store) ObsoleteFiles() []uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]uint64(nil), s.obsolete...)
 }
 
 // Rewrite writes a one-record snapshot Manifest and atomically switches CURRENT.

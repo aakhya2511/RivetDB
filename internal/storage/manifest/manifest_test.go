@@ -723,6 +723,45 @@ func TestCrashAfterManifestDurabilityRecoversLiveTable(t *testing.T) {
 	}
 }
 
+func TestCompactionCrashAfterManifestDurabilityRecoversAtomicReplacement(t *testing.T) {
+	directory := t.TempDir()
+	store, err := Create(Options{Directory: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputNumber, _ := store.AllocateFileNumber(context.Background())
+	inputMeta := writeTable(t, directory, inputNumber, 7, "key", "input")
+	input, _ := NewTableMetadata(0, 1, 7, 7, inputMeta)
+	last := uint64(7)
+	if installErr := store.Install(VersionEdit{AddedFiles: []TableMetadata{input}, LastSequence: &last}); installErr != nil {
+		t.Fatal(installErr)
+	}
+	outputNumber, _ := store.AllocateFileNumber(context.Background())
+	outputMeta := writeTable(t, directory, outputNumber, 7, "key", "input")
+	output, _ := NewTableMetadata(1, 2, 7, 7, outputMeta)
+	crash := errors.New("post-Manifest crash")
+	store.afterDurable = func() error { return crash }
+	if installErr := store.InstallCompaction(context.Background(), []TableMetadata{input}, []TableMetadata{output}); !errors.Is(installErr, crash) {
+		t.Fatalf("error=%v", installErr)
+	}
+	volatile, _ := store.Current()
+	if !volatile.Contains(input) || volatile.Contains(output) {
+		t.Fatal("volatile replacement published")
+	}
+	if closeErr := store.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	recovered, err := Open(Options{Directory: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	current, _ := recovered.Current()
+	if current.Contains(input) || !current.Contains(output) {
+		t.Fatal("durable replacement not recovered atomically")
+	}
+}
+
 func TestCorruptAndMismatchedLiveTableFailRecovery(t *testing.T) {
 	for _, test := range []struct {
 		name   string

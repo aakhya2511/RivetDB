@@ -72,6 +72,15 @@ func (v *Version) LastSequence() (uint64, bool) { return v.lastSequence, v.haveL
 // ReplayFrontier returns the inclusive safely installed WAL frontier.
 func (v *Version) ReplayFrontier() (uint64, bool) { return v.frontier, v.haveFrontier }
 
+// Contains reports whether the same file metadata is live at its stated level.
+func (v *Version) Contains(table TableMetadata) bool {
+	if v == nil || table.Level >= MaxLevels {
+		return false
+	}
+	index := findFile(v.levels[table.Level], table.FileNumber)
+	return index >= 0 && tableEqual(v.levels[table.Level][index], table)
+}
+
 func (v *Version) apply(edit VersionEdit) (*Version, error) {
 	if err := validateEditShape(edit); err != nil {
 		return nil, err
