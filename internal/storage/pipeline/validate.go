@@ -9,6 +9,7 @@ func (p *Pipeline) validateIfEnabledLocked() {
 		return
 	}
 	invariant.Assert(p.active != nil && p.active.state == StateActive && !p.active.table.Frozen(), "STORAGE-50", "pipeline lacks one mutable active table")
+	invariant.Assert(!p.haveVisible || p.haveAssigned && p.visibleSequence <= p.lastAssigned, "STORAGE-98", "visible sequence exceeds assigned authority")
 	invariant.Assert(len(p.immutables) <= p.maxImmutable, "STORAGE-55", "immutable count %d exceeds %d", len(p.immutables), p.maxImmutable)
 	seen := map[uint64]struct{}{p.active.id: {}}
 	for index, item := range p.immutables {

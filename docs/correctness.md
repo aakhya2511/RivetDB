@@ -5,7 +5,7 @@ This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
 **Current scope:** Phase 0, the pre-Phase-1 key contract and Phase 1A through
-1I exist, including a complete local latest-state key-value engine. No
+1J exist, including a crash-tested local latest-state key-value engine. No
 distributed, transactional, serializability or linearizability claim is made.
 This document describes the strategy the remaining implementation will be held
 to; sections marked *planned* are plans, not results.
@@ -147,6 +147,33 @@ WAL replay without reappend, valid-orphan exclusion, missing/corrupt live-table
 rejection and concurrent Get/Scan/write/flush/compaction under the race
 detector. A Get or Scan is a sequence-bounded operation, not an MVCC snapshot
 transaction, and no linearizability claim is inferred from these tests.
+
+Phase 1J makes the visibility authority independently testable. Structured
+write hooks stop one contiguous `Put(A), Put(B), Delete(C)` batch after
+assignment, WAL write, WAL durability, apply start, apply completion and publication.
+Concurrent Get and Scan operations see the complete old state at every
+pre-publication barrier—even after the new internal entries are installed—and
+the complete new state at publication. A child-process harness exits without
+`Close` at the assignment/durability/apply/publication boundaries; the parent
+reopens and checks absent non-durable versus present durable-but-unacknowledged
+outcomes.
+
+The always-on reclamation tests hold a Scan after it captures an old Version,
+install a compaction replacement, and prove the exclusive maintenance pass
+cannot unlink inputs until the Scan completes. Injected unlink failure leaves
+the Version and reads unchanged and a retry succeeds. WAL maintenance validates
+whole-batch/whole-file coverage and frontier straddles but leaves deletion
+disabled for the single active append target. Corrupt unlisted final SSTables
+are classified invalid and excluded; corrupt live tables fail Open.
+
+The opt-in Phase 1J campaign uses three fixed seeds plus one freshly logged
+seed for 50,000 modeled operations: 7,575 Put, 2,498 Delete, 22,499 Get and
+17,428 Scan. It performs 100 flushes, 24 compactions, 24 reclamation passes and
+120 close/open cycles. Every checkpoint compares explicit key results, a full
+Scan and SHA-256 logical digest, validates live files and asserts monotonic
+published/assigned sequence and file-number authority with zero reuse. This is
+a latest-state model and crash/durability campaign, not a formal
+linearizability or transactional history checker.
 
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the

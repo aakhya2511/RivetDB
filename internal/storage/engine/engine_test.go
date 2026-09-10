@@ -7,6 +7,7 @@ import (
 	"fmt"
 	mathrand "math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -16,8 +17,15 @@ import (
 	"github.com/rivetdb/rivetdb/internal/storage"
 	"github.com/rivetdb/rivetdb/internal/storage/compaction"
 	"github.com/rivetdb/rivetdb/internal/storage/manifest"
+	"github.com/rivetdb/rivetdb/internal/storage/pipeline"
 	"github.com/rivetdb/rivetdb/internal/storage/sstable"
+	"github.com/rivetdb/rivetdb/internal/storage/wal"
 	"github.com/rivetdb/rivetdb/internal/testutil"
+)
+
+var (
+	errInjectedMaintenance = errors.New("injected maintenance failure")
+	errUnexpectedScan      = errors.New("unexpected scan result")
 )
 
 func TestLocalLifecycleLatestStateAndRestart(t *testing.T) {
@@ -499,6 +507,10 @@ func TestConcurrentReadsWritesFlushCompactionAndClose(t *testing.T) {
 				t.Errorf("compact: %v", err)
 				return
 			}
+			if _, err := e.ReclaimObsoleteTables(ctx); err != nil {
+				t.Errorf("reclaim: %v", err)
+				return
+			}
 		}
 	}()
 	wg.Wait()
@@ -577,6 +589,364 @@ func TestCloseIgnoresCancellationAfterShutdownBegins(t *testing.T) {
 	if _, err := e.Get(context.Background(), []byte("still-open")); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Get after Close=%v", err)
 	}
+}
+
+func TestEngineBatchVisibilityUsesPublishedHighWater(t *testing.T) {
+	stages := []pipeline.WriteStage{
+		pipeline.WriteStageAssigned,
+		pipeline.WriteStageWALWritten,
+		pipeline.WriteStageWALDurable,
+		pipeline.WriteStageApplyStarted,
+		pipeline.WriteStageApplyCompleted,
+		pipeline.WriteStagePublished,
+	}
+	for _, target := range stages {
+		t.Run(target.String(), func(t *testing.T) {
+			reached := make(chan struct{})
+			release := make(chan struct{})
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+			var once sync.Once
+			directory := t.TempDir()
+			initial := openTestEngine(t, directory, 4)
+			mustPut(t, initial, []byte("a"), []byte("old-a"))
+			mustPut(t, initial, []byte("b"), []byte("old-b"))
+			mustPut(t, initial, []byte("c"), []byte("old-c"))
+			closeTestEngine(t, initial)
+			e, err := Open(Options{
+				Directory: directory, MemTableBytes: 1 << 20, MaxImmutables: 4,
+				WriteHook: func(stage pipeline.WriteStage, _ pipeline.WriteResult) {
+					if stage == target {
+						once.Do(func() { close(reached); <-release })
+					}
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeTestEngine(t, e)
+
+			writeDone := make(chan error, 1)
+			go func() {
+				writeDone <- e.WriteBatch(context.Background(), []storage.Mutation{
+					{Key: []byte("a"), Value: []byte("new-a"), Kind: storage.KindValue},
+					{Key: []byte("b"), Value: []byte("new-b"), Kind: storage.KindValue},
+					{Key: []byte("c"), Kind: storage.KindDelete},
+				})
+			}()
+			<-reached
+			stats := e.Stats().Pipeline
+			if !stats.HaveAssigned || stats.LastAssigned != 5 {
+				t.Fatalf("assigned authority=%+v", stats)
+			}
+			if target == pipeline.WriteStagePublished {
+				if !stats.HaveVisible || stats.VisibleSequence != 5 {
+					t.Fatalf("published authority=%+v", stats)
+				}
+				assertValue(t, e, []byte("a"), []byte("new-a"))
+				assertValue(t, e, []byte("b"), []byte("new-b"))
+				assertNotFound(t, e, []byte("c"))
+				assertScan(t, e, nil, nil, []KV{{Key: []byte("a"), Value: []byte("new-a")}, {Key: []byte("b"), Value: []byte("new-b")}})
+			} else {
+				if !stats.HaveVisible || stats.VisibleSequence != 2 {
+					t.Fatalf("pre-publication authority=%+v", stats)
+				}
+				assertValue(t, e, []byte("a"), []byte("old-a"))
+				assertValue(t, e, []byte("b"), []byte("old-b"))
+				assertValue(t, e, []byte("c"), []byte("old-c"))
+				assertScan(t, e, nil, nil, []KV{{Key: []byte("a"), Value: []byte("old-a")}, {Key: []byte("b"), Value: []byte("old-b")}, {Key: []byte("c"), Value: []byte("old-c")}})
+			}
+			close(release)
+			if err := <-writeDone; err != nil {
+				t.Fatal(err)
+			}
+			assertValue(t, e, []byte("a"), []byte("new-a"))
+			assertValue(t, e, []byte("b"), []byte("new-b"))
+			assertNotFound(t, e, []byte("c"))
+		})
+	}
+}
+
+func TestScanVersionLifetimeBlocksObsoleteTableReclamation(t *testing.T) {
+	captured := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	reclaimAttempted := make(chan struct{})
+	var captureOnce, reclaimOnce sync.Once
+	directory := t.TempDir()
+	e, openErr := Open(Options{
+		Directory: directory, MemTableBytes: 1 << 20, MaxImmutables: 4, L0Trigger: 4,
+		ReadHook: func(stage ReadStage, _ uint64) {
+			if stage == ReadStageScanViewCaptured {
+				captureOnce.Do(func() { close(captured); <-release })
+			}
+		},
+		MaintenanceHook: func(stage MaintenanceStage) {
+			if stage == MaintenanceStageTableReclaimAttempt {
+				reclaimOnce.Do(func() { close(reclaimAttempted) })
+			}
+		},
+	})
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer func() { _ = e.Close(context.Background()) }()
+	for index := 0; index < 4; index++ {
+		mustPut(t, e, []byte("key"), []byte{byte(index)})
+		if err := e.Flush(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	version, err := e.manifest.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFiles := version.LiveFileNumbers()
+	scanDone := make(chan error, 1)
+	go func() {
+		values, scanErr := e.Scan(context.Background(), nil, nil)
+		if scanErr == nil && (len(values) != 1 || !bytes.Equal(values[0].Value, []byte{3})) {
+			scanErr = errUnexpectedScan
+		}
+		scanDone <- scanErr
+	}()
+	<-captured
+	if _, err := e.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reclaimDone := make(chan struct {
+		result TableReclamationResult
+		err    error
+	}, 1)
+	go func() {
+		result, reclaimErr := e.ReclaimObsoleteTables(context.Background())
+		reclaimDone <- struct {
+			result TableReclamationResult
+			err    error
+		}{result, reclaimErr}
+	}()
+	<-reclaimAttempted
+	select {
+	case outcome := <-reclaimDone:
+		t.Fatalf("reclamation passed active scan: %+v %v", outcome.result, outcome.err)
+	default:
+	}
+	for _, number := range oldFiles {
+		if _, err := os.Stat(filepath.Join(directory, sstable.FileName(number))); err != nil {
+			t.Fatalf("old-reader file %d removed early: %v", number, err)
+		}
+	}
+	close(release)
+	if err := <-scanDone; err != nil {
+		t.Fatalf("old scan: %v", err)
+	}
+	outcome := <-reclaimDone
+	if outcome.err != nil || outcome.result.Deleted != uint64(len(oldFiles)) {
+		t.Fatalf("reclaim=%+v err=%v", outcome.result, outcome.err)
+	}
+	for _, number := range oldFiles {
+		if _, err := os.Stat(filepath.Join(directory, sstable.FileName(number))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("obsolete file %d still exists: %v", number, err)
+		}
+	}
+	assertValue(t, e, []byte("key"), []byte{3})
+	second, reclaimErr := e.ReclaimObsoleteTables(context.Background())
+	if reclaimErr != nil || second.Deleted != 0 {
+		t.Fatalf("idempotent reclaim=%+v err=%v", second, reclaimErr)
+	}
+	closeTestEngine(t, e)
+	e = openTestEngine(t, directory, 4)
+	assertValue(t, e, []byte("key"), []byte{3})
+}
+
+func TestObsoleteTableDeletionFailureIsMaintenanceOnly(t *testing.T) {
+	e := openTestEngine(t, t.TempDir(), 4)
+	defer closeTestEngine(t, e)
+	for index := 0; index < 4; index++ {
+		mustPut(t, e, []byte("key"), []byte{byte(index)})
+		if err := e.Flush(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.removeFile = func(string) error { return errInjectedMaintenance }
+	result, err := e.ReclaimObsoleteTables(context.Background())
+	if !errors.Is(err, errInjectedMaintenance) || result.Retained != 4 {
+		t.Fatalf("failed reclaim=%+v err=%v", result, err)
+	}
+	assertValue(t, e, []byte("key"), []byte{3})
+	e.removeFile = os.Remove
+	result, err = e.ReclaimObsoleteTables(context.Background())
+	if err != nil || result.Deleted != 4 {
+		t.Fatalf("retry reclaim=%+v err=%v", result, err)
+	}
+}
+
+func TestWALReclamationCoverageIsCandidateOnly(t *testing.T) {
+	e := openTestEngine(t, t.TempDir(), 4)
+	defer closeTestEngine(t, e)
+	mustPut(t, e, []byte("flushed"), []byte("value"))
+	if err := e.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := e.InspectWALReclamation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.HaveFrontier || status.Frontier != 0 || status.PhysicalDeletionEnabled || len(status.Segments) != 1 || !status.Segments[0].EntirelyAtOrBelowFrontier {
+		t.Fatalf("flushed status=%+v", status)
+	}
+	mustPut(t, e, []byte("active"), []byte("value"))
+	status, err = e.InspectWALReclamation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Segments[0].EntirelyAtOrBelowFrontier || status.Segments[0].LargestSequence != 1 {
+		t.Fatalf("mixed status=%+v", status)
+	}
+
+	path := filepath.Join(t.TempDir(), "straddle.wal")
+	writer, err := wal.OpenWriter(path, wal.WriterOptions{Durability: wal.SyncBatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := storage.EncodeWriteBatch(storage.WriteBatch{FirstSequence: 0, Mutations: []storage.Mutation{putMutation("a"), putMutation("b"), putMutation("c")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Append(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectWALFile(path, 1, true); !errors.Is(err, manifest.ErrFrontierSplitsBatch) {
+		t.Fatalf("straddling coverage=%v", err)
+	}
+}
+
+func TestSubprocessCrashBoundaries(t *testing.T) {
+	if directory := os.Getenv("RIVETDB_CRASH_CHILD_DIR"); directory != "" {
+		target := os.Getenv("RIVETDB_CRASH_CHILD_STAGE")
+		e, err := Open(Options{Directory: directory, WriteHook: func(stage pipeline.WriteStage, _ pipeline.WriteResult) {
+			if stage.String() == target {
+				os.Exit(86)
+			}
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = e.WriteBatch(context.Background(), []storage.Mutation{{Key: []byte("a"), Value: []byte("new-a"), Kind: storage.KindValue}, {Key: []byte("b"), Value: []byte("new-b"), Kind: storage.KindValue}, {Key: []byte("c"), Kind: storage.KindDelete}})
+		t.Fatalf("child did not crash at %s", target)
+	}
+	for _, test := range []struct {
+		stage   pipeline.WriteStage
+		durable bool
+	}{{pipeline.WriteStageAssigned, false}, {pipeline.WriteStageWALWritten, true}, {pipeline.WriteStageWALDurable, true}, {pipeline.WriteStageApplyCompleted, true}, {pipeline.WriteStagePublished, true}} {
+		t.Run(test.stage.String(), func(t *testing.T) {
+			directory := t.TempDir()
+			initial := openTestEngine(t, directory, 4)
+			mustPut(t, initial, []byte("c"), []byte("old-c"))
+			closeTestEngine(t, initial)
+			command := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestSubprocessCrashBoundaries$")
+			command.Env = append(os.Environ(), "RIVETDB_CRASH_CHILD_DIR="+directory, "RIVETDB_CRASH_CHILD_STAGE="+test.stage.String())
+			output, err := command.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 86 {
+				t.Fatalf("child exit=%v output=%s", err, output)
+			}
+			recovered := openTestEngine(t, directory, 4)
+			if test.durable {
+				assertValue(t, recovered, []byte("a"), []byte("new-a"))
+				assertValue(t, recovered, []byte("b"), []byte("new-b"))
+				assertNotFound(t, recovered, []byte("c"))
+			} else {
+				assertNotFound(t, recovered, []byte("a"))
+				assertNotFound(t, recovered, []byte("b"))
+				assertValue(t, recovered, []byte("c"), []byte("old-c"))
+			}
+			closeTestEngine(t, recovered)
+		})
+	}
+}
+
+func TestRepeatedOpenOfCorruptCurrentIsDeterministicAndNonMutating(t *testing.T) {
+	directory := t.TempDir()
+	e := openTestEngine(t, directory, 4)
+	mustPut(t, e, []byte("durable"), []byte("value"))
+	closeTestEngine(t, e)
+	if err := os.WriteFile(filepath.Join(directory, manifest.CurrentFileName), []byte("../guessed-manifest\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := directoryPhysicalDigest(t, directory)
+	var first string
+	for attempt := 0; attempt < 2; attempt++ {
+		opened, err := Open(Options{Directory: directory})
+		if err == nil {
+			_ = opened.Close(context.Background())
+			t.Fatal("Open accepted corrupt CURRENT")
+		}
+		if !errors.Is(err, manifest.ErrCurrentCorrupt) {
+			t.Fatalf("attempt %d error=%v", attempt, err)
+		}
+		if attempt == 0 {
+			first = err.Error()
+		} else if err.Error() != first {
+			t.Fatalf("Open errors differ: %q != %q", err, first)
+		}
+		if got := directoryPhysicalDigest(t, directory); got != want {
+			t.Fatalf("attempt %d mutated directory: %x != %x", attempt, got, want)
+		}
+	}
+}
+
+func TestCloseRacesWithObsoleteTableMaintenance(t *testing.T) {
+	directory := t.TempDir()
+	e := openTestEngine(t, directory, 2)
+	for index := 0; index < 2; index++ {
+		mustPut(t, e, []byte("key"), []byte{byte(index)})
+		if err := e.Flush(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	maintenanceDone := make(chan error, 1)
+	closeDone := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := e.ReclaimObsoleteTables(context.Background())
+		maintenanceDone <- err
+	}()
+	go func() {
+		<-start
+		closeDone <- e.Close(context.Background())
+	}()
+	close(start)
+	if err := <-maintenanceDone; err != nil && !errors.Is(err, ErrClosed) {
+		t.Fatalf("racing maintenance=%v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("racing Close=%v", err)
+	}
+	reopened := openTestEngine(t, directory, 2)
+	defer closeTestEngine(t, reopened)
+	assertValue(t, reopened, []byte("key"), []byte{1})
 }
 
 func openTestEngine(t testing.TB, directory string, trigger int) *Engine {
@@ -701,4 +1071,8 @@ func writeStandaloneTable(t testing.TB, directory string, number uint64, key, va
 		t.Fatal(err)
 	}
 	return metadata
+}
+
+func putMutation(key string) storage.Mutation {
+	return storage.Mutation{Key: []byte(key), Value: []byte("value-" + key), Kind: storage.KindValue}
 }

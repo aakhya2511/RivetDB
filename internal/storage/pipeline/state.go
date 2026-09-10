@@ -97,6 +97,10 @@ type Stats struct {
 	ImmutableBytes     uint64
 	NextSequence       uint64
 	SequenceExhausted  bool
+	LastAssigned       uint64
+	HaveAssigned       bool
+	VisibleSequence    uint64
+	HaveVisible        bool
 	Rotations          uint64
 	Flushes            uint64
 	Installs           uint64

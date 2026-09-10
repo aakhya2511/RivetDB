@@ -38,10 +38,12 @@ type Options struct {
 	// MemTable. Open never writes its contents back to the WAL.
 	RecoveredTable    *memtable.MemTable
 	SequenceExhausted bool
+	WriteHook         WriteHook
 }
 
 type durableWAL interface {
 	Append([]byte) (wal.Position, error)
+	Sync() error
 	Close() error
 }
 
@@ -70,6 +72,41 @@ type WriteResult struct {
 	Generation    uint64
 }
 
+// WriteStage is a deterministic observation boundary in the durable write
+// lifecycle. Hooks are for correctness testing and must not call Write.
+type WriteStage uint8
+
+const (
+	WriteStageAssigned WriteStage = iota
+	WriteStageWALWritten
+	WriteStageWALDurable
+	WriteStageApplyStarted
+	WriteStageApplyCompleted
+	WriteStagePublished
+)
+
+func (s WriteStage) String() string {
+	switch s {
+	case WriteStageAssigned:
+		return "WRITE_ASSIGNED"
+	case WriteStageWALWritten:
+		return "WAL_WRITTEN"
+	case WriteStageWALDurable:
+		return "WAL_DURABLE"
+	case WriteStageApplyStarted:
+		return "MEMTABLE_APPLY_STARTED"
+	case WriteStageApplyCompleted:
+		return "MEMTABLE_APPLY_COMPLETED"
+	case WriteStagePublished:
+		return "VISIBILITY_PUBLISHED"
+	default:
+		return fmt.Sprintf("UNKNOWN_WRITE_STAGE_%d", s)
+	}
+}
+
+// WriteHook observes a stage without holding the Pipeline mutex.
+type WriteHook func(WriteStage, WriteResult)
+
 // Pipeline owns one synchronous WAL writer, one active MemTable and one FIFO
 // immutable flush worker.
 type Pipeline struct {
@@ -82,35 +119,41 @@ type Pipeline struct {
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 
-	wal            durableWAL
-	directory      string
-	threshold      uint64
-	maxImmutable   int
-	active         *generation
-	immutables     []*generation
-	outputs        []FlushOutput
-	nextSequence   uint64
-	seqExhausted   bool
-	nextGeneration uint64
-	nextFile       uint64
-	flush          flushExecutor
-	allocator      FileAllocator
-	installer      TableInstaller
-	clock          clock.Clock
-	logger         *slog.Logger
-	stats          Stats
-	accepting      bool
-	closed         bool
-	closeErr       error
+	wal             durableWAL
+	directory       string
+	threshold       uint64
+	maxImmutable    int
+	active          *generation
+	immutables      []*generation
+	outputs         []FlushOutput
+	nextSequence    uint64
+	seqExhausted    bool
+	lastAssigned    uint64
+	haveAssigned    bool
+	visibleSequence uint64
+	haveVisible     bool
+	nextGeneration  uint64
+	nextFile        uint64
+	flush           flushExecutor
+	allocator       FileAllocator
+	installer       TableInstaller
+	clock           clock.Clock
+	logger          *slog.Logger
+	stats           Stats
+	accepting       bool
+	closed          bool
+	closeErr        error
+	writeHook       WriteHook
 }
 
-// Open constructs a pipeline using a SyncBatch WAL and the Phase 1D writer.
+// Open constructs a pipeline using explicit per-batch WAL sync and the Phase
+// 1D writer.
 // The directory must already exist and be exclusively owned by the caller.
 func Open(options Options) (*Pipeline, error) {
 	if err := validateOptions(options); err != nil {
 		return nil, err
 	}
-	logWriter, err := wal.OpenWriter(filepath.Join(options.Directory, WALFileName), wal.WriterOptions{Durability: wal.SyncBatch})
+	logWriter, err := wal.OpenWriter(filepath.Join(options.Directory, WALFileName), wal.WriterOptions{Durability: wal.SyncNone})
 	if err != nil {
 		return nil, fmt.Errorf("open pipeline WAL: %w", err)
 	}
@@ -161,7 +204,7 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 		nextSequence: options.NextSequence, seqExhausted: options.SequenceExhausted,
 		nextGeneration: firstGeneration + 1, nextFile: firstFile,
 		clock: options.Clock, logger: rlog.Component(options.Logger, "storage.pipeline"), accepting: true,
-		allocator: options.FileAllocator, installer: options.TableInstaller,
+		allocator: options.FileAllocator, installer: options.TableInstaller, writeHook: options.WriteHook,
 	}
 	p.writeToken <- struct{}{}
 	recovered := options.RecoveredTable
@@ -169,6 +212,13 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 		recovered = memtable.New()
 	}
 	p.active = &generation{id: firstGeneration, table: recovered, state: StateActive}
+	if options.SequenceExhausted {
+		p.lastAssigned, p.visibleSequence = math.MaxUint64, math.MaxUint64
+		p.haveAssigned, p.haveVisible = true, true
+	} else if options.NextSequence != 0 {
+		p.lastAssigned, p.visibleSequence = options.NextSequence-1, options.NextSequence-1
+		p.haveAssigned, p.haveVisible = true, true
+	}
 	if recovered.Len() != 0 {
 		iterator := recovered.Iterator()
 		for iterator.Next() {
@@ -194,7 +244,8 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 	return p, nil
 }
 
-// Write assigns, durably appends and atomically applies one nonempty batch.
+// Write assigns, durably appends, atomically applies and publishes one
+// nonempty batch.
 func (p *Pipeline) Write(ctx context.Context, mutations []storage.Mutation) (WriteResult, error) {
 	if ctx == nil {
 		return WriteResult{}, ErrInvalidOptions
@@ -255,34 +306,62 @@ func (p *Pipeline) Write(ctx context.Context, mutations []storage.Mutation) (Wri
 	if err := ctx.Err(); err != nil {
 		return WriteResult{}, fmt.Errorf("before WAL append: %w", err)
 	}
-	if _, err := p.wal.Append(encoded); err != nil {
-		return WriteResult{}, fmt.Errorf("append durable pipeline WAL batch: %w", err)
-	}
-
-	p.mu.Lock()
-	applyErr := p.active.table.ApplyBatch(batch)
-	invariant.Assert(applyErr == nil, "STORAGE-49", "apply prevalidated durable batch: %v", applyErr)
 	last := first + count - 1
-	if !p.active.haveSeq {
-		p.active.smallestSeq = first
-	}
-	p.active.haveSeq = true
-	p.active.largestSeq = last
+	result := WriteResult{FirstSequence: first, LastSequence: last, Generation: generationID}
+	p.mu.Lock()
+	invariant.Assert(p.nextSequence == first, "STORAGE-98", "sequence authority changed while one writer held admission")
+	p.lastAssigned, p.haveAssigned = last, true
 	if last == math.MaxUint64 {
 		p.seqExhausted = true
 	} else {
 		p.nextSequence = last + 1
 	}
+	p.mu.Unlock()
+	p.observe(WriteStageAssigned, result)
+	if _, err := p.wal.Append(encoded); err != nil {
+		return WriteResult{}, fmt.Errorf("append pipeline WAL batch: %w", err)
+	}
+	p.observe(WriteStageWALWritten, result)
+	if err := p.wal.Sync(); err != nil {
+		return WriteResult{}, fmt.Errorf("sync pipeline WAL batch: %w", err)
+	}
+	p.observe(WriteStageWALDurable, result)
+
+	p.mu.Lock()
+	invariant.Assert(p.active.id == generationID, "STORAGE-99", "active generation changed during admitted write")
+	table := p.active.table
+	p.mu.Unlock()
+	p.observe(WriteStageApplyStarted, result)
+	applyErr := table.ApplyBatch(batch)
+	invariant.Assert(applyErr == nil, "STORAGE-49", "apply prevalidated durable batch: %v", applyErr)
+	p.observe(WriteStageApplyCompleted, result)
+	p.mu.Lock()
+	invariant.Assert(p.active.id == generationID && p.active.table == table, "STORAGE-99", "active generation changed before visibility publication")
+	if !p.active.haveSeq {
+		p.active.smallestSeq = first
+	}
+	p.active.haveSeq = true
+	p.active.largestSeq = last
+	invariant.Assert(!p.haveVisible || last > p.visibleSequence, "STORAGE-100", "visible sequence did not advance: %d after %d", last, p.visibleSequence)
+	p.visibleSequence, p.haveVisible = last, true
+	invariant.Assert(!p.haveAssigned || p.visibleSequence <= p.lastAssigned, "STORAGE-98", "visible sequence %d exceeds assigned %d", p.visibleSequence, p.lastAssigned)
 	rotate := p.active.table.ReachedSize(p.threshold)
 	if rotate {
 		p.rotateLocked()
 	}
 	p.validateIfEnabledLocked()
 	p.mu.Unlock()
+	p.observe(WriteStagePublished, result)
 	if rotate {
 		p.notify(p.wake)
 	}
-	return WriteResult{FirstSequence: first, LastSequence: last, Generation: generationID}, nil
+	return result, nil
+}
+
+func (p *Pipeline) observe(stage WriteStage, result WriteResult) {
+	if p.writeHook != nil {
+		p.writeHook(stage, result)
+	}
 }
 
 func validateMutations(mutations []storage.Mutation) error {
@@ -514,6 +593,8 @@ func (p *Pipeline) Stats() Stats {
 	}
 	stats.NextSequence = p.nextSequence
 	stats.SequenceExhausted = p.seqExhausted
+	stats.LastAssigned, stats.HaveAssigned = p.lastAssigned, p.haveAssigned
+	stats.VisibleSequence, stats.HaveVisible = p.visibleSequence, p.haveVisible
 	return stats
 }
 
@@ -542,11 +623,7 @@ func (p *Pipeline) ReadSnapshot() (ReadSnapshot, error) {
 		item := p.immutables[index]
 		result.Immutables = append(result.Immutables, ReadGeneration{Generation: item.id, FileNumber: item.fileNumber, Table: item.table})
 	}
-	if p.seqExhausted {
-		result.LatestSequence, result.HaveSequence = math.MaxUint64, true
-	} else if p.nextSequence != 0 {
-		result.LatestSequence, result.HaveSequence = p.nextSequence-1, true
-	}
+	result.LatestSequence, result.HaveSequence = p.visibleSequence, p.haveVisible
 	return result, nil
 }
 

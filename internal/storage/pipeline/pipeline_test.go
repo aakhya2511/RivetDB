@@ -26,6 +26,7 @@ type fakeWAL struct {
 	mu      sync.Mutex
 	records [][]byte
 	err     error
+	syncErr error
 	closed  bool
 	hook    func()
 }
@@ -48,6 +49,12 @@ func (w *fakeWAL) Close() error {
 	defer w.mu.Unlock()
 	w.closed = true
 	return nil
+}
+
+func (w *fakeWAL) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.syncErr
 }
 
 func (w *fakeWAL) count() int {
@@ -111,15 +118,83 @@ func TestWriteDurableBeforeAtomicApply(t *testing.T) {
 	}
 }
 
-func TestWALFailureChangesNoMemTableOrSequence(t *testing.T) {
-	w := &fakeWAL{err: errInjected}
-	p := newTestPipeline(t, pipelineOptions(t.TempDir()), w, successfulFlush)
-	if _, err := p.Write(context.Background(), []storage.Mutation{put("a")}); !errors.Is(err, errInjected) {
-		t.Fatalf("Write error = %v, want injected", err)
+func TestWALFailureBurnsAssignedButDoesNotPublishOrApply(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		wal  *fakeWAL
+	}{{"write", &fakeWAL{err: errInjected}}, {"sync", &fakeWAL{syncErr: errInjected}}} {
+		t.Run(test.name, func(t *testing.T) {
+			p := newTestPipeline(t, pipelineOptions(t.TempDir()), test.wal, successfulFlush)
+			if _, err := p.Write(context.Background(), []storage.Mutation{put("a")}); !errors.Is(err, errInjected) {
+				t.Fatalf("Write error = %v, want injected", err)
+			}
+			stats := p.Stats()
+			if p.active.table.Len() != 0 || stats.NextSequence != 1 || !stats.HaveAssigned || stats.LastAssigned != 0 || stats.HaveVisible || stats.Rotations != 0 {
+				t.Fatalf("failure changed visible state: %+v len=%d", stats, p.active.table.Len())
+			}
+		})
 	}
-	stats := p.Stats()
-	if p.active.table.Len() != 0 || stats.NextSequence != 0 || stats.Rotations != 0 {
-		t.Fatalf("failure changed state: %+v len=%d", stats, p.active.table.Len())
+}
+
+func TestBatchVisibilityPublishesAtOneExplicitBoundary(t *testing.T) {
+	stages := []WriteStage{WriteStageAssigned, WriteStageWALWritten, WriteStageWALDurable, WriteStageApplyStarted, WriteStageApplyCompleted, WriteStagePublished}
+	for _, target := range stages {
+		t.Run(target.String(), func(t *testing.T) {
+			reached := make(chan struct{})
+			release := make(chan struct{})
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+			options := pipelineOptions(t.TempDir())
+			options.WriteHook = func(stage WriteStage, _ WriteResult) {
+				if stage == target {
+					close(reached)
+					<-release
+				}
+			}
+			p := newTestPipeline(t, options, &fakeWAL{}, successfulFlush)
+			batch := []storage.Mutation{put("a"), put("b"), {Key: []byte("c"), Kind: storage.KindDelete}}
+			result := make(chan error, 1)
+			go func() { _, err := p.Write(context.Background(), batch); result <- err }()
+			<-reached
+			snapshot, err := p.ReadSnapshot()
+			if err != nil {
+				t.Fatalf("ReadSnapshot: %v", err)
+			}
+			published := target == WriteStagePublished
+			if snapshot.HaveSequence != published || published && snapshot.LatestSequence != 2 {
+				t.Fatalf("stage %s snapshot=%+v", target, snapshot)
+			}
+			visible := 0
+			iterator, err := snapshot.Active.Table.Range(nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for iterator.Next() {
+				entry, ok := iterator.Entry()
+				if !ok {
+					t.Fatal("iterator lost entry")
+				}
+				if snapshot.HaveSequence && entry.Key.Sequence() <= snapshot.LatestSequence {
+					visible++
+				}
+			}
+			if published && visible != 3 || !published && visible != 0 {
+				t.Fatalf("stage %s visible entries=%d", target, visible)
+			}
+			close(release)
+			if err := <-result; err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			stats := p.Stats()
+			if !stats.HaveAssigned || !stats.HaveVisible || stats.LastAssigned != 2 || stats.VisibleSequence != 2 {
+				t.Fatalf("final authorities=%+v", stats)
+			}
+		})
 	}
 }
 

@@ -29,14 +29,17 @@ const (
 
 // Options configures one local storage engine.
 type Options struct {
-	Directory      string
-	MemTableBytes  uint64
-	MaxImmutables  int
-	SSTableOptions sstable.Options
-	L0Trigger      int
-	TargetFileSize uint64
-	Clock          clock.Clock
-	Logger         *slog.Logger
+	Directory       string
+	MemTableBytes   uint64
+	MaxImmutables   int
+	SSTableOptions  sstable.Options
+	L0Trigger       int
+	TargetFileSize  uint64
+	Clock           clock.Clock
+	Logger          *slog.Logger
+	WriteHook       pipeline.WriteHook
+	ReadHook        ReadHook
+	MaintenanceHook MaintenanceHook
 }
 
 // KV is one latest-state user-key/value result.
@@ -48,6 +51,7 @@ type Stats struct {
 	Recoveries, ReplayedEntries                    uint64
 	GetL0TableReads, GetHigherTableReads           uint64
 	ScanTableReads                                 uint64
+	ReclaimedTables, MaintenanceFailures           uint64
 	Pipeline                                       pipeline.Stats
 	Manifest                                       manifest.Stats
 	Compaction                                     compaction.Stats
@@ -66,6 +70,11 @@ type Engine struct {
 	recoveries, replayed                           atomic.Uint64
 	getL0TableReads, getHigherTableReads           atomic.Uint64
 	scanTableReads                                 atomic.Uint64
+	readHook                                       ReadHook
+	removeFile                                     func(string) error
+	maintenanceHook                                MaintenanceHook
+	reclaimed                                      map[uint64]struct{}
+	reclaimedTables, maintenanceFailures           atomic.Uint64
 }
 
 // Open creates or recovers one local engine directory.
@@ -150,6 +159,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 		SequenceExhausted: exhausted, FirstGeneration: firstGeneration,
 		SSTableOptions: options.SSTableOptions, Clock: options.Clock, Logger: options.Logger,
 		FileAllocator: store, TableInstaller: store, RecoveredTable: recovered,
+		WriteHook: options.WriteHook,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open write pipeline: %w", err)
@@ -162,7 +172,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open compaction executor: %w", err), pipe.Close(context.Background()))
 	}
-	e := &Engine{directory: options.Directory, pipeline: pipe, manifest: store, compact: executor}
+	e := &Engine{directory: options.Directory, pipeline: pipe, manifest: store, compact: executor, readHook: options.ReadHook, removeFile: os.Remove, maintenanceHook: options.MaintenanceHook, reclaimed: make(map[uint64]struct{})}
 	e.recoveries.Store(1)
 	e.replayed.Store(replayed)
 	return e, nil
@@ -206,15 +216,39 @@ func (e *Engine) Delete(ctx context.Context, key []byte) error {
 	return e.write(ctx, storage.Mutation{Kind: storage.KindDelete, Key: key}, &e.deletes)
 }
 func (e *Engine) write(ctx context.Context, mutation storage.Mutation, counter *atomic.Uint64) error {
+	if err := e.writeBatch(ctx, []storage.Mutation{mutation}); err != nil {
+		return err
+	}
+	counter.Add(1)
+	return nil
+}
+
+// WriteBatch applies one local WAL/MemTable-atomic batch. It is not a
+// transaction API and supports no reads or rollback.
+func (e *Engine) WriteBatch(ctx context.Context, mutations []storage.Mutation) error {
+	if err := e.writeBatch(ctx, mutations); err != nil {
+		return err
+	}
+	for _, mutation := range mutations {
+		switch mutation.Kind {
+		case storage.KindValue:
+			e.puts.Add(1)
+		case storage.KindDelete:
+			e.deletes.Add(1)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) writeBatch(ctx context.Context, mutations []storage.Mutation) error {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
 		return ErrClosed
 	}
-	if _, err := e.pipeline.Write(ctx, []storage.Mutation{mutation}); err != nil {
+	if _, err := e.pipeline.Write(ctx, mutations); err != nil {
 		return fmt.Errorf("write local mutation: %w", err)
 	}
-	counter.Add(1)
 	return nil
 }
 
@@ -267,7 +301,7 @@ func (e *Engine) Close(ctx context.Context) error {
 func (e *Engine) Stats() Stats {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	result := Stats{Puts: e.puts.Load(), Deletes: e.deletes.Load(), Gets: e.gets.Load(), GetHits: e.getHits.Load(), GetMisses: e.getMisses.Load(), Scans: e.scans.Load(), Recoveries: e.recoveries.Load(), ReplayedEntries: e.replayed.Load(), GetL0TableReads: e.getL0TableReads.Load(), GetHigherTableReads: e.getHigherTableReads.Load(), ScanTableReads: e.scanTableReads.Load()}
+	result := Stats{Puts: e.puts.Load(), Deletes: e.deletes.Load(), Gets: e.gets.Load(), GetHits: e.getHits.Load(), GetMisses: e.getMisses.Load(), Scans: e.scans.Load(), Recoveries: e.recoveries.Load(), ReplayedEntries: e.replayed.Load(), GetL0TableReads: e.getL0TableReads.Load(), GetHigherTableReads: e.getHigherTableReads.Load(), ScanTableReads: e.scanTableReads.Load(), ReclaimedTables: e.reclaimedTables.Load(), MaintenanceFailures: e.maintenanceFailures.Load()}
 	if e.pipeline != nil {
 		result.Pipeline = e.pipeline.Stats()
 	}

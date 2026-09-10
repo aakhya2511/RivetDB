@@ -21,6 +21,18 @@ type readView struct {
 	version   *manifest.Version
 }
 
+// ReadStage is a deterministic read-lifetime observation boundary.
+type ReadStage uint8
+
+const (
+	ReadStageGetViewCaptured ReadStage = iota
+	ReadStageScanViewCaptured
+)
+
+// ReadHook observes a captured Version while the operation still holds the
+// Engine read lock. It exists for deterministic lifetime/reclamation tests.
+type ReadHook func(ReadStage, uint64)
+
 type candidate struct {
 	entry      sstable.Entry
 	fileNumber uint64
@@ -57,6 +69,7 @@ func (e *Engine) Get(ctx context.Context, key []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.observeRead(ReadStageGetViewCaptured, view.version.Generation())
 	if !view.memtables.HaveSequence {
 		e.getMisses.Add(1)
 		return nil, ErrNotFound
@@ -181,6 +194,7 @@ func (e *Engine) Scan(ctx context.Context, start, end []byte) (result []KV, resu
 	if err != nil {
 		return nil, err
 	}
+	e.observeRead(ReadStageScanViewCaptured, view.version.Generation())
 	if !view.memtables.HaveSequence {
 		return []KV{}, nil
 	}
@@ -246,6 +260,12 @@ func (e *Engine) Scan(ctx context.Context, start, end []byte) (result []KV, resu
 		emit()
 	}
 	return values, nil
+}
+
+func (e *Engine) observeRead(stage ReadStage, generation uint64) {
+	if e.readHook != nil {
+		e.readHook(stage, generation)
+	}
 }
 
 func (e *Engine) scanInputs(view readView, start, end []byte) ([]compaction.MergeInput, []*sstable.Reader, error) {

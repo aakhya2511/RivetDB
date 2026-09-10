@@ -109,7 +109,7 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-81 | Compaction does not change or infer WAL replay coverage from output sequence minima or maxima. | verified (Phase 1H) |
 | STORAGE-82 | Compaction input corruption or any output failure aborts the logical replacement and is never skipped. | verified (Phase 1H) |
 | STORAGE-83 | Compaction output file numbers come only from the durable VersionSet allocator; failed attempts may burn numbers but never reuse them. | verified (Phase 1H) |
-| STORAGE-84 | Physically deleting obsolete input SSTables is deferred while immutable Version reference reclamation is absent. | verified (Phase 1H) |
+| STORAGE-84 | Phase 1H does not physically delete obsolete input SSTables without an explicit immutable-Version/read-lifetime proof. | verified (Phase 1H) |
 | STORAGE-85 | Engine recovery applies required durable WAL batches directly to one recovered MemTable and never appends them again; assignment resumes above every durable sequence. | verified (Phase 1I) |
 | STORAGE-86 | Every Engine Get and Scan captures one sequence boundary, one active/immutable membership snapshot and one immutable Version for the operation. | verified (Phase 1I) |
 | STORAGE-87 | Get resolves the greatest sequence not above its boundary across active, every immutable, every overlapping L0 table and at most one range-selected table per non-overlapping higher level. | verified (Phase 1I) |
@@ -122,7 +122,21 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-94 | L0 reads account for arbitrary overlap, while higher-level point lookup uses non-overlapping decoded user-key ranges rather than internal-key bytes. | verified (Phase 1I) |
 | STORAGE-95 | Successful Put/Delete acknowledgement remains WAL-before-MemTable and is immediately visible to subsequent operations on that Engine. | verified (Phase 1I) |
 | STORAGE-96 | Engine shutdown rejects later operations, joins the flush worker and preserves an unflushed active MemTable through its durable WAL representation. | verified (Phase 1I) |
-| STORAGE-97 | WAL and obsolete SSTable physical deletion remain deferred; logical frontier and obsolescence metadata alone cannot unlink a file. | verified (Phase 1I) |
+| STORAGE-97 | Physical WAL deletion remains deferred; logical frontier or obsolescence metadata alone cannot unlink an active WAL or an SSTable without the Phase 1J lifetime proof. | verified (Phase 1I/1J) |
+| STORAGE-98 | The fully published sequence never exceeds the last assigned sequence. Readers use the published authority, never the merely assigned authority. | verified (Phase 1J) |
+| STORAGE-99 | An admitted batch is installed wholly into the same active MemTable generation to which its contiguous sequence interval was assigned before that interval can be published. | verified (Phase 1J) |
+| STORAGE-100 | The visible high-water moves only forward, once per complete batch, after WAL durability and complete MemTable application; a batch has no partially published boundary. | verified (Phase 1J) |
+| STORAGE-101 | Every Get and Scan captures one published high-water for its full operation, so no allocated-but-unpublished entry can influence its result. | verified (Phase 1J) |
+| STORAGE-102 | A synchronously acknowledged engine batch is recoverable after process loss; a WAL-durable batch whose client result was not delivered is explicitly ambiguous and may recover. | verified (Phase 1J) |
+| STORAGE-103 | After restart, CURRENT's selected Manifest and its valid durable prefix exclusively determine the logical Version; physical orphan, temporary and unknown files cannot become live by existence alone. | verified (Phase 1J) |
+| STORAGE-104 | WAL reclamation candidates are whole files whose every complete batch ends at or below the already-durable contiguous replay frontier; a straddling batch is invalid. Physical deletion of the active append target is forbidden. | verified candidate computation (Phase 1J) |
+| STORAGE-105 | WAL maintenance consumes and never advances the Manifest replay frontier. | verified (Phase 1J) |
+| STORAGE-106 | A logically obsolete SSTable is physically deleted only while an exclusive Engine operation-lifetime lock proves that the current Version, retained reads/scans and in-flight compactions cannot reference it. | verified (Phase 1J) |
+| STORAGE-107 | Failure or repetition of physical reclamation leaves logical Version authority and latest-state contents unchanged; an extra obsolete file is maintenance debt, not live data. | verified (Phase 1J) |
+| STORAGE-108 | Durable file-number authority never decreases or reuses a number across flush, compaction, orphan discovery, reclamation and restart; burned numbers remain burned. | verified (Phase 1J) |
+| STORAGE-109 | Durable storage sequences are never reused, and assigned and published authorities are monotonic across flush, compaction and restart. | verified (Phase 1J) |
+| STORAGE-110 | A newest tombstone cannot allow an older value to resurrect across flush, compaction, restart or physical obsolete-file reclamation. | verified (Phase 1J) |
+| STORAGE-111 | Corrupt authoritative WAL, CURRENT, Manifest or live SSTable state fails explicitly and is never reconstructed heuristically from directory contents; corrupt unlisted SSTables remain non-authoritative. | verified (Phase 1J) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -204,6 +218,19 @@ without reappend, sequence continuation, valid orphan and stale-temp exclusion,
 missing/corrupt live-table rejection, fixed/fresh seeded reference models,
 restart cycles and concurrent writers/readers/scans/flush/compaction under the
 race detector.
+
+STORAGE-98 through STORAGE-111 are enforced by the explicit pipeline
+assignment/publication stages, the Engine visibility and reclamation tests,
+the subprocess crash test, and the lower-layer crash/corruption matrices. The
+suite pauses one three-entry batch at every visibility stage and proves Get and
+Scan switch only at the complete publication boundary; distinguishes
+non-durable and WAL-durable ambiguous process exits; blocks physical obsolete
+SSTable deletion behind a Scan retaining the old Version; injects unlink
+failure and retries idempotently; rejects frontier-straddling WAL batches while
+leaving active-WAL deletion disabled; and verifies tombstone, orphan and
+authority behavior across restart. The opt-in Phase 1J campaign executes
+50,000 modeled operations and 120 restarts with full-state/digest checkpoints,
+monotonic sequence/file authorities and no identity reuse.
 
 ## Raft
 

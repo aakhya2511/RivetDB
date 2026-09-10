@@ -1,8 +1,9 @@
 # Design Note: Local Storage Engine (Phase 1)
 
-**Status:** Phase 1A through Phase 1I are implemented and mechanically tested,
-including the integrated local latest-state engine. Deep reclamation/crash
-stress and remaining Phase 1 optimization work are not implemented.
+**Status:** Phase 1A through Phase 1J are implemented and mechanically tested,
+including explicit read-visibility publication, subprocess crash recovery,
+conservative obsolete-SSTable reclamation and deep local-engine stress.
+Physical WAL deletion and remaining Phase 1 optimization work are deferred.
 
 **Related:** [ADR-0001](design-decisions/0001-lsm-tree-over-b-tree.md) ·
 [ADR-0003](design-decisions/0003-explicit-internal-key-comparator.md) ·
@@ -14,7 +15,8 @@ stress and remaining Phase 1 optimization work are not implemented.
 [ADR-0009](design-decisions/0009-manifest-versionset-and-replay-frontier-authority.md) ·
 [ADR-0010](design-decisions/0010-version-preserving-lsm-compaction.md) ·
 [ADR-0011](design-decisions/0011-integrated-local-lsm-read-write-semantics.md) ·
-[invariants.md](invariants.md) (STORAGE-1 … STORAGE-97) ·
+[ADR-0012](design-decisions/0012-crash-visibility-and-physical-reclamation.md) ·
+[invariants.md](invariants.md) (STORAGE-1 … STORAGE-111) ·
 [architecture.md](architecture.md) §3
 
 ---
@@ -162,10 +164,13 @@ flush.
 `internal/storage/pipeline` owns one `SyncBatch` WAL writer, one active mutable
 MemTable and one bounded FIFO of frozen generations. One serialized admission
 token orders concurrent batches and assigns their contiguous sequence ranges.
-The order is validate and assign, encode, WAL append/fsync, atomic MemTable
-`ApplyBatch`, acknowledgement, then a size check. A batch reaching or crossing
-the configured `SizeBytes` target rotates only after the whole batch is
-applied, so no batch spans generations and one batch may exceed the target.
+The order is validate, assign one contiguous interval, encode, WAL
+append/fsync, atomic MemTable `ApplyBatch`, publish the interval's last
+sequence, acknowledgement, then a size check. Assignment and publication are
+separate authorities; readers capture the published high-water only. A batch
+reaching or crossing the configured `SizeBytes` target rotates only after the
+whole batch is applied, so no batch spans generations and one batch may exceed
+the target.
 
 Rotation freezes the old generation, assigns it a stable in-memory SSTable
 file number, installs exactly one successor and queues the old generation under
@@ -200,7 +205,7 @@ recovers allocation/sequence authorities, repairs only an incomplete WAL tail,
 and applies whole batches beyond the inclusive replay frontier directly to a
 recovered active MemTable. Replayed records are never appended again.
 
-Get and Scan capture the pipeline's latest sequence and active/immutable
+Get and Scan capture the pipeline's published sequence and active/immutable
 membership, then one immutable Version. An immutable remains readable through
 physical flush and Manifest installation; after Version publication it can
 leave the MemTable list. This permits a brief identical handoff overlap but no
@@ -208,7 +213,42 @@ gap. Get selects the greatest visible sequence across all sources. Scan reuses
 the compaction heap merge, groups by user key and emits one newest value while
 omitting tombstones. Both are sequence-bounded operations, not transaction or
 MVCC snapshot APIs. Table readers are opened per operation; caches, Bloom
-filters, WAL deletion and obsolete-table deletion remain deferred.
+filters and physical WAL deletion remain deferred.
+
+### 4.4 Phase 1J visibility, crashes and physical reclamation
+
+The pipeline exposes `LastAssigned` and `VisibleSequence` as distinct
+monotonic authorities. After the WAL has durably accepted a batch and every
+entry is installed in the admitted active MemTable, one coordinator critical
+section updates generation coverage and advances `VisibleSequence` directly to
+the batch end. Only then may the write acknowledge. Entries above a captured
+visible high-water are ignored even if a reader races after physical MemTable
+application but before publication. The stages `WRITE_ASSIGNED`, `WAL_WRITTEN`,
+`WAL_DURABLE`, `MEMTABLE_APPLY_STARTED`, `MEMTABLE_APPLY_COMPLETED` and
+`VISIBILITY_PUBLISHED` are deterministic test seams, not extra durability
+states.
+
+Process-crash tests exit a child without `Close`. Before WAL durability the
+batch is absent; after WAL durability it is allowed and expected to replay even
+when the client never received success. A returned success is never ambiguous:
+the batch is already durable, fully applied and published.
+
+The Phase 1 WAL remains one open append target. Maintenance decodes its
+complete batches and computes whole-file sequence coverage against the already
+durable replay frontier. A frontier-straddling batch is invalid. The inspector
+never advances the frontier, and physical deletion is disabled because no
+closed segment can be retired without affecting the live writer.
+
+Compaction-obsolete SSTables may be unlinked only under the exclusive Engine
+operation-lifetime lock. All Get, Scan, Flush and Compact operations retain the
+shared lock for their complete Version/file-use lifetime, so exclusive
+acquisition proves that no old reader or in-flight compaction can still need an
+input. The pass rechecks absence from the current Version and considers only
+successful compaction inputs tracked in this process. After restart those
+unlisted files are conservative orphans, not inferred obsolete candidates.
+Unlink failure retains extra disk usage and changes no logical Version; retry
+is idempotent. This is physical file reclamation only—no internal version or
+tombstone is discarded.
 
 ## 5. On-disk format
 
@@ -620,7 +660,8 @@ The replay frontier means every complete batch ending at or below it is already
 represented by authoritative installed state. It advances only through
 gap-free installed flush spans; later installed spans beyond a gap do not move
 it. A batch crossing the boundary is an error rather than a partial replay.
-The frontier is durable metadata only: Phase 1G does not delete WAL files.
+The frontier is durable metadata only. Phase 1J computes whole-file WAL
+reclamation candidates from it but does not delete the single active WAL.
 
 `CURRENT` is replaced by writing a temporary file, fsyncing it, renaming it over
 `CURRENT`, and then **fsyncing the containing directory**. The last step is the
@@ -654,8 +695,8 @@ produce an oversized file but is never split merely to meet the target. Every
 output is durably published and reopened before one VersionEdit deletes every
 input and adds every output. Installation rechecks that inputs remain live and
 that the candidate Version is valid. The replay frontier is unchanged. Removed
-inputs are tracked as logically obsolete but retained physically until Version
-reference reclamation exists.
+inputs are tracked as logically obsolete. Phase 1J may physically delete them
+only after its exclusive Engine operation-lifetime proof.
 
 ## 6. Durability modes
 
@@ -680,6 +721,7 @@ conflates the two is describing a guarantee it does not have.
 |---|---|---|
 | Crash mid-WAL-append | a structurally incomplete trailing record is reported as a repairable tail; earlier complete records replay | STORAGE-3 |
 | Crash after WAL fsync, before MemTable apply | replay re-applies the batch | STORAGE-1 |
+| Crash after MemTable apply, before publication/acknowledgement | the durable batch replays; its client result is ambiguous | STORAGE-102 |
 | Crash during flush | the partial or published SSTable is not in the manifest, so it is retained but ignored; the WAL still holds the data | STORAGE-9, STORAGE-11 |
 | Crash during compaction | before the atomic VersionEdit inputs remain live and outputs are retained orphans; afterward outputs are live and inputs are retained but logically obsolete | STORAGE-77, STORAGE-79 |
 | Crash between file fsync and manifest update | the file is an orphan retained for conservative later reclamation | STORAGE-9 |
@@ -688,6 +730,7 @@ conflates the two is describing a guarantee it does not have.
 | Bit flip in the index or footer | detected on open; the file is rejected | STORAGE-2 |
 | Truncated SSTable | the footer magic or the file length check fails on open | STORAGE-2 |
 | Disk full during flush | the flush fails and is retried; the MemTable stays in memory and the WAL keeps the data; writes are throttled | — |
+| Obsolete SSTable unlink fails | the current Version and reads remain unchanged; the extra file is reported as maintenance debt | STORAGE-107 |
 | Two processes open one directory | the second fails on `LOCK` | — |
 
 The Phase 1 gate requires a test that crashes the engine at *every* write offset
@@ -702,9 +745,10 @@ Ownership, stated explicitly:
 |---|---|---|
 | WAL writer, active MemTable | the single write goroutine | none |
 | Immutable MemTable | created by the writer, read by everyone | read-only after sealing |
-| Version set | the version-set mutex | readers take a reference-counted snapshot |
+| Version set | the version-set mutex | readers take an immutable snapshot while retaining the Engine operation lock |
 | SSTable files | immutable once written | concurrent readers, no lock |
 | Compaction state | the compaction goroutine | reports results through the version set |
+| Physical obsolete-table reclamation | Engine exclusive operation lock | begins only after all read/scan/flush/compaction holders release |
 
 The design principle is that **the mutable set is small and the immutable set is
 large**. Only two things mutate: the active MemTable and the current version
@@ -823,6 +867,19 @@ The Phase 1 gate. Every item is a test that must exist and pass.
 - Iterators opened before a flush or compaction are unaffected (STORAGE-10).
 - Concurrent readers with a writer under `-race`.
 - `testutil.NoLeaks` on open/close cycles: no goroutine survives `Close`.
+
+**Phase 1J destruction gate**
+- Pause a multi-entry batch at every assignment/apply/publication stage; Get and
+  Scan switch from the complete old state to the complete new state only at
+  `VISIBILITY_PUBLISHED` (STORAGE-98 through STORAGE-101).
+- Exit a subprocess without `Close` before and after WAL durability and verify
+  the documented absent-versus-ambiguous recovery outcomes (STORAGE-102).
+- Hold a Scan on an old Version through compaction; obsolete input deletion
+  blocks until the Scan completes, and deletion failure changes no logical
+  state (STORAGE-106, STORAGE-107).
+- Run the opt-in 50,000-operation reference campaign with 120 restarts,
+  thousands of Gets/Scans, flush, compaction, reclamation, full-state digests
+  and monotonic file/sequence authority checks.
 
 **Benchmarks (baseline, recorded not asserted)**
 - Sequential and random `Put` throughput per durability mode.

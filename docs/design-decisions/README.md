@@ -40,6 +40,7 @@ Phase:    which phase this governs
 | [0009](0009-manifest-versionset-and-replay-frontier-authority.md) | Manifest, VersionSet and replay-frontier authority | Accepted | 1G |
 | [0010](0010-version-preserving-lsm-compaction.md) | Version-preserving LSM compaction | Accepted | 1H |
 | [0011](0011-integrated-local-lsm-read-write-semantics.md) | Integrated local LSM read/write semantics | Accepted | 1I |
+| [0012](0012-crash-visibility-and-physical-reclamation.md) | Crash recovery, visibility publication and physical reclamation | Accepted | 1J |
 
 ## Planned
 

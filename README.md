@@ -8,7 +8,7 @@ Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 1 in progress — Phase 1A through Phase 1I complete.**
+> **Project status: Phase 1 in progress — Phase 1A through Phase 1J complete.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -19,10 +19,12 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > active-to-immutable MemTable rotation/flush pipeline, and the crash-safe
 > Manifest/immutable VersionSet authority with durable table installation.
 > Phase 1I adds an integrated local LSM engine with Open, Put, Delete, Get,
-> Scan, Flush, Compact, Close and restart recovery.
+> Scan, Flush, Compact, Close and restart recovery. Phase 1J separates assigned
+> and published visibility, adds real subprocess crash coverage, conservative
+> obsolete-SSTable reclamation and a 50,000-operation/120-restart stress gate.
 >
 > **There is no Raft, distributed database service, server or client yet.**
-> Deeper crash/reclamation stress and remaining Phase 1 work are next. Everything
+> Profiling, optimization and final local-storage certification are next. Everything
 > else described below is a design with a written specification, not working code — see
 > [Roadmap](docs/roadmap.md) for exactly what is built and what is not.
 >

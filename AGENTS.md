@@ -16,8 +16,9 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 primitives and WAL, Phase 1C MemTable, Phase 1D SSTable format/writer, Phase 1E
 SSTable reader/seek/iteration, Phase 1F MemTable rotation/flush pipeline, and
 Phase 1G Manifest/VersionSet authority, Phase 1H version-preserving LSM
-compaction and Phase 1I integrated local engine/read path are implemented;
-Phase 1J (crash recovery, reclamation safety and deep local-engine stress) is next.**
+compaction, Phase 1I integrated local engine/read path and Phase 1J crash,
+visibility, reclamation and deep-stress work are implemented; Phase 1K
+(profiling, performance engineering and final local-storage certification) is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -220,7 +221,9 @@ first:
 7. Manifest and version set (§5.4). Complete; see `docs/evidence/phase-1g.md`.
 8. Version-preserving L0-to-L1 compaction (§5.5). Complete; see `docs/evidence/phase-1h.md`.
 9. Integrated recovery and local read path. Complete; see `docs/evidence/phase-1i.md`.
-10. Crash recovery, reclamation safety and deep local-engine stress. Next.
+10. Crash recovery, reclamation safety and deep local-engine stress. Complete;
+    see `docs/evidence/phase-1j.md`.
+11. Profiling, performance engineering and final local-storage certification. Next.
 
 Two parts of the spec are load-bearing and should not be changed casually:
 

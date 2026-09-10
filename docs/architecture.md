@@ -1,8 +1,8 @@
 # RivetDB Architecture
 
-**Status:** design baseline for the implementation. Nothing below the Phase 0
-foundation is implemented yet; see [roadmap.md](roadmap.md) for what exists
-today and [invariants.md](invariants.md) for the properties each subsystem must
+**Status:** design baseline for the implementation. Phase 0 and Phase 1A
+through 1J are implemented; see [roadmap.md](roadmap.md) for what exists today
+and [invariants.md](invariants.md) for the properties each subsystem must
 uphold.
 
 This document describes the intended structure of RivetDB and, more
@@ -186,10 +186,12 @@ An LSM tree, implemented in this repository. Rationale versus a B+ tree is in
                                   SSTable in L1, L2, ...
 ```
 
-Phase 1I reads capture one sequence and one coherent active/immutable/Version
-view. Point lookup considers every source that can contain a candidate: active,
-all immutables, every overlapping L0 table and one binary-range-selected table
-per non-overlapping higher level. The highest sequence wins globally; a
+Phase 1J reads capture one explicitly published sequence and one coherent
+active/immutable/Version view. Assigned sequences do not become readable until
+their complete WAL-durable MemTable batch is applied and its final sequence is
+published once. Point lookup considers every source that can contain a
+candidate: active, all immutables, every overlapping L0 table and one
+binary-range-selected table per non-overlapping higher level. The highest sequence wins globally; a
 tombstone shadows older values. Scan heap-merges the same sources and collapses
 versions by user key. Bloom filters remain absent.
 
@@ -202,15 +204,18 @@ Phase 1H's first compactor is a single explicit executor. It selects an
 immutable-Version plan, performs deterministic bounded heap merge outside the
 VersionSet lock, then revalidates and installs through one Manifest edit. It is
 strictly version-preserving: without MVCC visibility evidence it drops neither
-old versions nor tombstones. Obsolete inputs remain physical while old Version
-references may exist.
+old versions nor tombstones. Phase 1J may delete obsolete inputs only after an
+exclusive Engine operation-lifetime lock proves no old Version reader or
+in-flight compaction can still reference them.
 
 The integrated Engine orchestrates rather than duplicates these units. Flush
 installation may briefly make an immutable and its identically numbered L0
 file both visible, but removes the immutable only after Manifest durability and
 Version publication, so no read gap exists. Compaction similarly publishes one
 new immutable Version while readers that captured the old Version finish on
-retained inputs. SSTable caching and physical reclamation are deferred.
+retained inputs. SSTable caching is deferred. The single active WAL has
+whole-file candidate inspection but cannot be physically reclaimed until a
+future closed-segment lifecycle exists.
 
 ---
 
@@ -486,6 +491,11 @@ The general shape:
   the AddFile Manifest fsync, and only then is the immutable Version published.
   The interface remains engine-scoped and does not foreclose a future shared
   WAL across ranges.
+- **Visibility and reclamation ownership.** Phase 1J separates assigned from
+  published storage sequences. Get and Scan capture the published high-water
+  once. Every Engine operation that may use an immutable Version or SSTable
+  holds the shared operation lock for that lifetime; obsolete-table deletion
+  takes it exclusively and rechecks the current Version before unlinking.
 - **Explicit lifecycle.** Every component that starts goroutines exposes
   `Close`, cancels a context, and waits for its goroutines to exit.
   [`testutil.NoLeaks`](../internal/testutil/leak.go) enforces this in tests: a
