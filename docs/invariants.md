@@ -29,7 +29,7 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-1 | A write acknowledged in a durability mode that promises persistence is present after a crash at any point after the acknowledgement. | verified for WAL (Phase 1B, filesystem contract) |
 | STORAGE-2 | Every WAL record's checksum is verified on replay. A record whose checksum fails is not applied. | verified (Phase 1B) |
 | STORAGE-3 | A partially written trailing WAL record is truncated, not applied. A crash mid-append loses only the in-flight record, never an earlier one. | verified (Phase 1B) |
-| STORAGE-4 | Keys within an SSTable are strictly ascending, with no duplicates of the same `(key, timestamp)` pair. | planned (Phase 1) |
+| STORAGE-4 | Keys within an SSTable are strictly ascending, with no duplicate internal keys. | verified for individual SSTables (Phase 1E) |
 | STORAGE-5 | A read returns the newest version of a key visible to it, considering the MemTable, the immutable MemTable and every SSTable level. | planned (Phase 1) |
 | STORAGE-6 | Compaction never resurrects a deleted key: a tombstone is dropped only when no older version of that key can survive in any remaining file, and no live reader can be positioned before it. | planned (Phase 1) |
 | STORAGE-7 | Compaction is value-preserving: for every key and every read timestamp, the value visible before compaction equals the value visible after. | planned (Phase 1) |
@@ -65,6 +65,14 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-37 | A truncated or partially written SSTable is corruption and is never treated as a recoverable WAL-style tail. | verified (Phase 1D) |
 | STORAGE-38 | SSTable publication exposes the final filename only after the complete file is fsynced, then fsyncs the containing directory; any I/O failure poisons the writer. | verified (Phase 1D) |
 | STORAGE-39 | All versions of one user key retain authoritative order, while table range metadata remains expressed in decoded user keys and encodes no owner range ID. | verified (Phase 1D) |
+| STORAGE-40 | An SSTable reader validates physical bounds, block envelopes and checksums before decoding or trusting persistent payload bytes. | verified (Phase 1E) |
+| STORAGE-41 | SSTable Seek returns exactly the first internal key not less than its target under `CompareInternal`; exact Get succeeds if and only if that key is comparator-equal. | verified (Phase 1E) |
+| STORAGE-42 | SSTable candidate lookup returns the newest version of the requested user key whose sequence is at most the target, preserving its value or deletion kind. | verified (Phase 1E) |
+| STORAGE-43 | SSTable full iteration yields every stored internal entry exactly once in authoritative order; user-key range iteration yields exactly all versions in its half-open bounds. | verified (Phase 1E) |
+| STORAGE-44 | Corrupt handles, lengths, canonical varints, restart points, block types and checksums cannot panic, overflow, loop without bound or drive allocation beyond format/resource limits. | verified (Phase 1E) |
+| STORAGE-45 | Every trusted index boundary equals its data block's reconstructed last key, and metadata counts and bounds equal the fully validated data stream. | verified (Phase 1E) |
+| STORAGE-46 | Tombstones are returned as stored entries and are never silently converted to absence by the SSTable reader. | verified (Phase 1E) |
+| STORAGE-47 | An SSTable reader never modifies, skips or repairs corrupt immutable bytes; corruption and I/O failures are surfaced to its caller. | verified (Phase 1E) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -96,6 +104,16 @@ round trips, restart and block boundaries, full index-to-data mapping,
 metadata/footer integrity, deterministic hashes, every-offset truncation,
 protected corruption, bounded malformed fields, I/O poisoning and the
 file-sync/rename/directory-sync publication sequence.
+
+STORAGE-4 and STORAGE-40 through STORAGE-47 are enforced by
+[`reader_test.go`](../internal/storage/sstable/reader_test.go) through the same
+production decoding paths used by Open, Seek and iteration. The suite covers
+complete streaming open validation, exact index-to-data boundaries, comparator
+lower-bound and version-candidate reference models, multi-block version groups,
+full/range iteration, hostile handles and varints, rechecksummed restart
+corruption, every-byte and seeded random mutations, every-offset truncation,
+injected I/O/short-read/close failures, caller ownership, concurrent reads and
+Close races. The opt-in 100,000-entry gate exercises 1,697 blocks.
 
 ## Raft
 

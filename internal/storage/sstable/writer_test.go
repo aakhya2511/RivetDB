@@ -396,7 +396,7 @@ func TestBlockAndFooterCorruptionDetected(t *testing.T) {
 		{name: "data payload", mutate: func(dataCopy []byte) { dataCopy[int(valid.dataBlocks[0].handle.Offset)] ^= 0x80 }, want: errTableChecksum},
 		{name: "data trailer", mutate: func(dataCopy []byte) {
 			dataCopy[int(valid.dataBlocks[0].handle.Offset+valid.dataBlocks[0].handle.Length)-BlockTrailerSize] ^= 1
-		}, want: errTableChecksum},
+		}, want: errUnsupportedTable},
 		{name: "index", mutate: func(dataCopy []byte) { dataCopy[int(valid.indexHandle.Offset)] ^= 1 }, want: errTableChecksum},
 		{name: "metadata", mutate: func(dataCopy []byte) { dataCopy[int(valid.metadataHandle.Offset)] ^= 1 }, want: errTableChecksum},
 		{name: "footer checksum", mutate: func(dataCopy []byte) { dataCopy[len(dataCopy)-FooterSize+footerChecksum] ^= 1 }, want: errTableChecksum},

@@ -97,13 +97,16 @@ separate 100,000-operation seeded structural gate. Concurrency tests mix 128
 writers with readers, lower-bound seeks and iterator snapshots under the race
 detector, and independently race all-or-nothing inserts against freeze.
 
-The Phase 1D SSTable writer is checked by a test-only structural decoder rather
-than a premature production reader. It reconstructs every prefix-compressed
-entry, validates restarts, full-key index handles, metadata, typed block CRCs
-and the fixed footer. Tests flip protected fields, rewrite structurally invalid
-fields with valid checksums, truncate a table at every offset, compare six
-seeded datasets with the source model, and build the same 100,000-entry table
-twice byte-for-byte.
+The Phase 1D SSTable writer and Phase 1E reader now share one production-safe
+decoder. Open streams every data block before trusting the resident sparse
+index, proving restart structure, full-key boundaries, cross-block order,
+metadata and typed block CRCs without retaining the whole file. Seek and
+candidate property tests compare 30,000 queries each against a sorted-slice
+model across six seeds; 3,000 half-open user-range queries compare exact entry
+sequences. Tests rewrite semantic fields with valid checksums, mutate every byte
+of a manageable table, run a separate seeded corruption campaign, truncate at
+every offset, inject short reads and I/O failures, race concurrent operations
+with Close, and explicitly validate a 100,000-entry/1,697-block table.
 
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the

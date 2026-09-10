@@ -1,16 +1,17 @@
 # Design Note: Local Storage Engine (Phase 1)
 
-**Status:** Phase 1A storage primitives, Phase 1B WAL, Phase 1C MemTable and
-Phase 1D SSTable format/writer are implemented and mechanically tested. The
-production SSTable reader and later engine layers are not implemented. The rest
-of this note specifies later Phase 1 work.
+**Status:** Phase 1A storage primitives, Phase 1B WAL, Phase 1C MemTable, Phase
+1D SSTable format/writer and Phase 1E production reader are implemented and
+mechanically tested. Later engine layers are not implemented. The rest of this
+note specifies later Phase 1 work.
 
 **Related:** [ADR-0001](design-decisions/0001-lsm-tree-over-b-tree.md) ·
 [ADR-0003](design-decisions/0003-explicit-internal-key-comparator.md) ·
 [ADR-0004](design-decisions/0004-wal-integrity-and-tail-recovery.md) ·
 [ADR-0005](design-decisions/0005-memtable-skip-list.md) ·
 [ADR-0006](design-decisions/0006-sstable-physical-format.md) ·
-[invariants.md](invariants.md) (STORAGE-1 … STORAGE-39) ·
+[ADR-0007](design-decisions/0007-sstable-reader-validation-and-seek.md) ·
+[invariants.md](invariants.md) (STORAGE-1 … STORAGE-47) ·
 [architecture.md](architecture.md) §3
 
 ---
@@ -463,6 +464,32 @@ ambiguous post-rename evidence is retained. Manifest installation remains
 deferred, so the published file is durable but not yet live in a version set.
 Creation through publication requires exclusive database-directory ownership;
 Phase 1's `LOCK` prevents a competing creator from replacing the same identity.
+
+**Production reader.** Phase 1E uses `os.File.ReadAt`, loads copied index and
+metadata state, and deliberately streams every data block during `Open`. This
+full validation is required before the sparse index is trusted: an ordered,
+rechecksummed but false last-key boundary could otherwise route Seek past the
+correct block. Open retains no data blocks and never reads the whole file into
+memory at once. Each later access rereads one block, verifies its envelope and
+CRC before semantic decoding, validates canonical lengths and restart points,
+then reconstructs keys under `CompareInternal`.
+
+Seek finds the first full index boundary not less than its target, binary
+searches independently decodable restart keys, and linearly decodes within one
+restart interval. After the mandatory O(block bytes) checksum pass, its search
+and decoding cost is O(log B + log R + I), with B data blocks, R restarts in
+the selected block and restart interval I. Exact lookup is Seek
+plus comparator equality. Candidate lookup constructs `(user key, target
+sequence, deletion)` once and preserves tombstones. Iterators retain one
+decoded block, cross blocks in physical order, and return copied key/value
+entries. User ranges are decoded half-open `[start,end)` bounds; nil is
+unbounded and a reversed range is rejected.
+
+Readers support concurrent read-only methods and independent iterators without
+a shared block cache. Close is idempotent and excludes active reads. A Reader
+must outlive its iterators; all operations fail with `ErrClosed` after it is
+closed. Bloom absence is understood but no Bloom lookup or construction exists.
+See [ADR-0007](design-decisions/0007-sstable-reader-validation-and-seek.md).
 
 **Ordering within a level.** L0 files may overlap, because they are flushed
 MemTables and each covers whatever keys happened to be in memory; they are

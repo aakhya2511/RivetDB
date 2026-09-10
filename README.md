@@ -8,17 +8,18 @@ Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 1 in progress — Phase 1A/1B/1C/1D complete.**
+> **Project status: Phase 1 in progress — Phase 1A/1B/1C/1D/1E complete.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
 > a durable checksummed WAL with streaming recovery and explicit tail repair,
-> a concurrent mutable/frozen skip-list MemTable, and a deterministic,
-> checksummed, atomically published SSTable writer.
+> a concurrent mutable/frozen skip-list MemTable, a deterministic checksummed
+> and atomically published SSTable writer, and a fully validating,
+> comparator-correct SSTable reader with seek and iteration.
 >
 > **There is no complete key-value engine, Raft, server or client yet.** The
-> SSTable reading, seeking and iteration are next. Everything else described
-> below is a design with a written specification, not working code — see
+> MemTable rotation and the SSTable flush pipeline are next. Everything else
+> described below is a design with a written specification, not working code — see
 > [Roadmap](docs/roadmap.md) for exactly what is built and what is not.
 >
 > RivetDB is a research and demonstration system. It is not production
@@ -164,7 +165,7 @@ a later phase cannot be tested honestly without it.
 |---|---|
 | [`internal/clock`](internal/clock) | `Clock` interface with a system implementation and a deterministic `Mock`. Raft elections, lease expiry, transaction timeouts and rebalancer cooldowns will take a `Clock`, so those subsystems can be tested in microseconds instead of by sleeping. |
 | [`internal/testutil`](internal/testutil) | Seeded randomness with an explicitly promoted failing-seed corpus, goroutine-leak detection, bounded polling helpers. |
-| [`internal/storage`](internal/storage) | Internal-key/write-batch codecs, Phase 1B WAL, Phase 1C skip-list MemTable, and Phase 1D SSTable format/writer with prefix-compressed restart blocks, full-key index, metadata, typed CRC32C blocks, fixed footer and fsync/rename/directory-fsync publication. No production SSTable reader yet. |
+| [`internal/storage`](internal/storage) | Internal-key/write-batch codecs, Phase 1B WAL, Phase 1C skip-list MemTable, Phase 1D SSTable format/writer, and Phase 1E production SSTable Open/Get/Seek/GetCandidate/full and half-open range iteration with complete streaming validation. |
 | [`internal/invariant`](internal/invariant) | Named, typed assertions so a violation identifies itself, plus an `Expensive()` tier for O(n) structural checks enabled in tests and chaos runs. |
 | [`internal/rlog`](internal/rlog) | Structured logging with canonical attribute keys (`node`, `range`, `term`, `index`, `txn`), context propagation, runtime-adjustable level, and a recorder so tests assert on structured events rather than substrings. |
 

@@ -13,14 +13,14 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 ## 1. Current state
 
 **Phase 0 and the pre-Phase-1 key audit are complete. Phase 1A/1B storage
-primitives and WAL, Phase 1C MemTable, and Phase 1D SSTable format/writer are
-implemented; Phase 1E (SSTable reader, seek and iteration) is next.**
+primitives and WAL, Phase 1C MemTable, Phase 1D SSTable format/writer, and Phase
+1E SSTable reader/seek/iteration are implemented; Phase 1F (MemTable rotation
+and SSTable flush pipeline) is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
-mutable/frozen MemTable and the deterministic SSTable writer under
-`internal/storage`. There is no production SSTable reader, complete storage
-engine, Raft, server or client.
+mutable/frozen MemTable and deterministic SSTable writer/reader under
+`internal/storage`. There is no complete storage engine, Raft, server or client.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
@@ -209,11 +209,13 @@ first:
 2. WAL record framing and replay (§5.1) — fragmentation across block
    boundaries and strict stop at corruption. Complete.
 3. MemTable. Complete.
-4. SSTable format and writer (§5.3). Complete. Reader, seek and iteration are
-   next; Bloom-filter construction/query remains deferred.
-5. Manifest and version set (§5.4).
-6. Levelled compaction.
-7. Recovery, then the crash-at-every-offset test.
+4. SSTable format and writer (§5.3). Complete.
+5. Production SSTable reader, seek and iteration. Complete. Bloom-filter
+   construction/query remains deferred.
+6. MemTable rotation and SSTable flush pipeline.
+7. Manifest and version set (§5.4).
+8. Levelled compaction.
+9. Recovery, then the crash-at-every-offset test.
 
 Two parts of the spec are load-bearing and should not be changed casually:
 
