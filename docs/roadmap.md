@@ -97,17 +97,20 @@ tombstones · forward iterators · `Get`/`Put`/`Delete`/`Scan`.
 7. A recorded baseline benchmark: sequential and random `Put`, point `Get`,
    `Scan`, with write amplification and space amplification measured.
 
-**Delivered so far — Phase 1A/1B:** authoritative internal-key and write-batch
+**Delivered so far — Phase 1A/1B/1C:** authoritative internal-key and write-batch
 codecs; versioned 32 KiB WAL block framing with independent header/content
 CRC32C; bounded streaming reader; `SyncBatch` and `SyncNone`; concurrent append
 serialization; clean restart; explicit truncated-tail repair; every-offset
 truncation, systematic corruption, random-byte and failure-injection tests; WAL
-microbenchmark baseline. Evidence:
-[`phase-1ab.md`](evidence/phase-1ab.md).
+microbenchmark baseline; concurrent skip-list MemTable with exact lookup,
+lower-bound and version-candidate seek, stable iteration, half-open user-key
+ranges, exact-key replacement, freeze and deterministic approximate memory
+accounting. Evidence: [`phase-1ab.md`](evidence/phase-1ab.md) and
+[`phase-1c.md`](evidence/phase-1c.md).
 
-**Remaining before Phase 1 is complete:** MemTable, immutable MemTable, SSTable,
-Bloom filter, manifest/version set, flush, compaction, engine-level recovery,
-Get/Put/Delete/Scan, iterator snapshot tests and the full Phase 1 benchmark.
+**Remaining before Phase 1 is complete:** SSTable, Bloom filter,
+manifest/version set, active-to-immutable rotation and flush, compaction,
+engine-level recovery, Get/Put/Delete/Scan and the full Phase 1 benchmark.
 
 ---
 

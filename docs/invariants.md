@@ -48,6 +48,14 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-20 | Explicit tail repair truncates only a rescanned, unchanged, structurally incomplete tail. Appending after repair cannot resurrect discarded bytes. | verified (Phase 1B) |
 | STORAGE-21 | Concurrent WAL appends are serialized into complete, non-interleaved logical records. A writer that encounters an I/O failure cannot acknowledge later appends as healthy. | verified (Phase 1B) |
 | STORAGE-22 | Write-batch encoding is unambiguous and all-or-nothing: sequence ranges cannot wrap, malformed batches return an error, and DELETE differs from PUT of an empty value. | verified (Phase 1A) |
+| STORAGE-23 | MemTable level-zero iteration is strictly ordered by `CompareInternal`, and every higher skip-list level is an ordered subsequence. | verified (Phase 1C) |
+| STORAGE-24 | The MemTable preserves every distinct internal-key version contiguously; only an exactly comparator-equal key replaces an entry. | verified (Phase 1C) |
+| STORAGE-25 | A MemTable owns inserted key and value bytes, and returned entries do not expose its mutable storage. | verified (Phase 1C) |
+| STORAGE-26 | Freeze is permanent: an insert racing with freeze is wholly accepted before it or rejected, and no insert succeeds after freeze returns. | verified (Phase 1C) |
+| STORAGE-27 | MemTable seek returns the `CompareInternal` lower bound, including for arbitrary binary and prefix-related keys. | verified (Phase 1C) |
+| STORAGE-28 | MemTable user-key range bounds are half-open and include either every version of a logical key or none. | verified (Phase 1C) |
+| STORAGE-29 | MemTable approximate size is monotonic while mutable, stable after freeze, and saturates rather than overflowing. | verified (Phase 1C) |
+| STORAGE-30 | MemTable reads, writes, iterator snapshots and freeze obey their documented linearizable synchronization contract without exposing partial mutations. | verified (Phase 1C) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -61,6 +69,14 @@ truncation, systematic protected-byte corruption, real-file restart/repair and
 injected write/sync/close failures. STORAGE-22 is enforced by
 [`batch_test.go`](../internal/storage/batch_test.go), including malformed-length
 and maximum-size cases.
+
+STORAGE-23 through STORAGE-30 are enforced by
+[`memtable_test.go`](../internal/storage/memtable/memtable_test.go), including
+binary and prefix counterexamples, exact replacement versus distinct versions,
+reference-model lower bounds, stable iterator/range snapshots, caller-buffer
+mutation, deterministic accounting, full structural validation, 100,000-entry
+stress, 128 concurrent writers/readers and insert-versus-freeze races under the
+race detector.
 
 ## Raft
 

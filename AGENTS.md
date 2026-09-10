@@ -13,11 +13,13 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 ## 1. Current state
 
 **Phase 0 and the pre-Phase-1 key audit are complete. Phase 1A/1B storage
-primitives and WAL are implemented; Phase 1C (MemTable) is next.**
+primitives and WAL plus Phase 1C MemTable are implemented; Phase 1D (SSTable
+format and writer) is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
-internal-key/write-batch primitives and the checksummed WAL under
-`internal/storage`. There is no complete storage engine, Raft, server or client.
+internal-key/write-batch primitives, the checksummed WAL and the concurrent
+mutable/frozen MemTable under `internal/storage`. There is no complete storage
+engine, Raft, server or client.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
@@ -184,24 +186,26 @@ Decisions recorded: [ADR-0001](docs/design-decisions/0001-lsm-tree-over-b-tree.m
 [ADR-0002](docs/design-decisions/0002-range-partitioning-over-hashing.md)
 (range partitioning over consistent hashing), and
 [ADR-0003](docs/design-decisions/0003-explicit-internal-key-comparator.md)
-(explicit internal-key comparison), and
+(explicit internal-key comparison),
 [ADR-0004](docs/design-decisions/0004-wal-integrity-and-tail-recovery.md)
-(WAL integrity and tail recovery). They list the rejected options' genuine
+(WAL integrity and tail recovery), and
+[ADR-0005](docs/design-decisions/0005-memtable-skip-list.md)
+(MemTable skip list). They list the rejected options' genuine
 advantages, not strawmen — keep that standard.
 
 ---
 
-## 7. Starting Phase 1
+## 7. Continuing Phase 1
 
 The spec is [docs/storage-engine.md](docs/storage-engine.md); §11 is the test
 list that constitutes the gate. Suggested build order, smallest correct unit
 first:
 
 1. Internal key encoding (§5.2) — with the ordering property tested against a
-   reference comparator over randomized inputs.
+   reference comparator over randomized inputs. Complete.
 2. WAL record framing and replay (§5.1) — fragmentation across block
    boundaries and strict stop at corruption. Complete.
-3. MemTable, then flush to SSTable.
+3. MemTable. Complete.
 4. SSTable block builder/reader, Bloom filter, index, footer (§5.3).
 5. Manifest and version set (§5.4).
 6. Levelled compaction.

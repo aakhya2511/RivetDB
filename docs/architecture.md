@@ -519,12 +519,13 @@ internal/clock/       time abstraction: real and deterministic mock
 internal/invariant/   safety assertions with named violations
 internal/rlog/        structured logging and a test recorder
 internal/testutil/    seeds and explicit failure-corpus promotion, leak detection, polling
-internal/storage/     key/batch primitives and Phase 1B WAL; no MemTable/SSTable
+internal/storage/     key/batch primitives, Phase 1B WAL and Phase 1C MemTable; no SSTable
 docs/                 this document, invariants, roadmap, ADRs
 ```
 
-Planned, in roadmap order: the remainder of `internal/storage` (`wal`,
-`sstable`, `memtable`), `internal/raft`, `internal/multiraft`, `internal/rangedesc`,
+Planned, in roadmap order: the remainder of `internal/storage` (`sstable`,
+manifest, compaction and engine coordination), `internal/raft`,
+`internal/multiraft`, `internal/rangedesc`,
 `internal/mvcc`, `internal/txn`, `internal/routing`, `internal/migration`,
 `internal/rebalance`, `internal/telemetry`, `internal/server`, plus `cmd/`,
 `api/proto`, `tests/` and `benchmarks/`.

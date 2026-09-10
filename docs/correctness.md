@@ -91,6 +91,12 @@ complete-record prefix. Its writer has narrow injected seams for short writes
 and write/sync/close failures. Later engine phases extend this method to flush,
 manifest and compaction operations.
 
+The Phase 1C MemTable compares randomized operation sequences with a trusted
+sorted-slice model, validates every skip-list level periodically, and runs a
+separate 100,000-operation seeded structural gate. Concurrency tests mix 128
+writers with readers, lower-bound seeks and iterator snapshots under the race
+detector, and independently race all-or-nothing inserts against freeze.
+
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the
 manifest, crash during a range split, crash while a transaction is prepared.

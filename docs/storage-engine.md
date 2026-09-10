@@ -1,14 +1,14 @@
 # Design Note: Local Storage Engine (Phase 1)
 
-**Status:** Phase 1A storage primitives and Phase 1B WAL implemented; the
-MemTable and later engine layers are not implemented. The internal-key contract
-in §5.2 and WAL contract in §5.1 have mechanical tests. The rest of this note
-specifies later Phase 1 work.
+**Status:** Phase 1A storage primitives, Phase 1B WAL and Phase 1C MemTable are
+implemented and mechanically tested. SSTables and later engine layers are not
+implemented. The rest of this note specifies later Phase 1 work.
 
 **Related:** [ADR-0001](design-decisions/0001-lsm-tree-over-b-tree.md) ·
 [ADR-0003](design-decisions/0003-explicit-internal-key-comparator.md) ·
 [ADR-0004](design-decisions/0004-wal-integrity-and-tail-recovery.md) ·
-[invariants.md](invariants.md) (STORAGE-1 … STORAGE-22) ·
+[ADR-0005](design-decisions/0005-memtable-skip-list.md) ·
+[invariants.md](invariants.md) (STORAGE-1 … STORAGE-30) ·
 [architecture.md](architecture.md) §3
 
 ---
@@ -95,6 +95,61 @@ in a levelled layout most point lookups touch one data block.
 applied to the MemTable. WAL-before-MemTable is what makes recovery possible:
 anything visible to a reader is already durable, so replay can only add, never
 subtract.
+
+### 4.1 MemTable
+
+The MemTable is a custom skip list ordered solely by `CompareInternal`. Its
+level-zero chain therefore contains every internal entry in exact future
+SSTable order: user key ascending, sequence descending, then kind ascending.
+It preserves different versions and kinds as different entries. Reinserting
+the exact same internal key atomically replaces its value; this makes replay or
+an idempotent apply retry converge without creating comparator-equal physical
+duplicates.
+
+The list has maximum height 20 and probability 1/4 of promotion at each level.
+Production topology uses a normal concurrency-safe randomness source and tests
+inject a seeded source. Topology changes performance and layout only. All
+searches and structural validation use the §5.2 comparator, never the encoded
+representation or a second comparison implementation. Expected complexity is
+O(log n) for insert, exact get, lower-bound seek and version-candidate lookup;
+a pathological topology is O(n). Forward iterator steps are O(1), iterator
+construction is O(n), and table memory is O(n).
+
+An exact `Get` looks for one complete internal key. A version-aware lookup
+constructs `(user key, target sequence, deletion)` and returns the comparator
+lower bound only if its user key is equal, yielding the newest candidate whose
+sequence is at most the target. It returns a value or tombstone without
+interpreting visibility beyond that candidate. General `Seek(K)` returns the
+first internal entry not less than `K`.
+
+Range bounds are decoded user keys. A half-open `[start,end)` iterator includes
+all versions and both kinds for each user key in that interval; nil denotes an
+unbounded side. Bounds are never converted to encoded internal keys for the
+upper-bound check, so no boundary can split a version group. Full and range
+iterators snapshot ordered entries while holding a read lock, then traverse the
+private snapshot without locks. An iterator is consequently stable across
+later inserts, replacement and freeze, at the cost of reader-local copying.
+
+One `sync.RWMutex` gives the Phase 1C object a linearizable concurrency
+contract. Writers serialize; readers, seeks and iterator snapshot construction
+may run concurrently. `Freeze` takes the write lock and is permanent and
+idempotent. An insert racing with freeze either completes wholly before freeze
+or returns `ErrFrozen`; after `Freeze` returns no insert can succeed. Reads and
+new iterators remain valid.
+
+Insertion copies the internal key and value. Reads and iterators also return
+copies, so caller mutation cannot change ordering or stored data. A tombstone
+is distinguished by its key kind and accepts no value; an empty PUT remains a
+value entry with a zero-length value.
+
+`SizeBytes` is a deterministic approximation rather than Go heap telemetry. It
+includes table and head-node overhead, node metadata, owned key bytes, retained
+value-buffer capacity and forward-link slots. Exact-key replacement reuses or
+grows the retained buffer, so the estimate is monotonic while mutable and
+stable after freeze. Saturating addition prevents wraparound. Reader-owned
+iterator snapshots are excluded. `ReachedSize(target)` reports whether a later
+rotation policy should act, but Phase 1C performs no automatic rotation or
+flush.
 
 ## 5. On-disk format
 
