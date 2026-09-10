@@ -14,13 +14,15 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 **Phase 0 and the pre-Phase-1 key audit are complete. Phase 1A/1B storage
 primitives and WAL, Phase 1C MemTable, Phase 1D SSTable format/writer, Phase 1E
-SSTable reader/seek/iteration, and Phase 1F MemTable rotation/flush pipeline are
-implemented; Phase 1G (Manifest and VersionSet) is next.**
+SSTable reader/seek/iteration, Phase 1F MemTable rotation/flush pipeline, and
+Phase 1G Manifest/VersionSet authority are implemented; Phase 1H (levelled
+compaction) is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
 mutable/frozen MemTable, deterministic SSTable writer/reader and bounded FIFO
-flush pipeline under `internal/storage`. There is no complete storage engine,
+flush pipeline and crash-safe Manifest/VersionSet under `internal/storage`.
+There is no complete storage engine,
 Raft, server or client.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
@@ -214,7 +216,8 @@ first:
 5. Production SSTable reader, seek and iteration. Complete. Bloom-filter
    construction/query remains deferred.
 6. MemTable rotation and SSTable flush pipeline. Complete.
-7. Manifest and version set (§5.4). Next.
+7. Manifest and version set (§5.4). Complete; see `docs/evidence/phase-1g.md`.
+8. Levelled compaction. Next.
 8. Levelled compaction.
 9. Recovery, then the crash-at-every-offset test.
 

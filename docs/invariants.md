@@ -85,6 +85,19 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-57 | Concurrent writes and rotations assign every acknowledged batch to exactly one monotonically ordered generation and non-overlapping sequence range. | verified (Phase 1F) |
 | STORAGE-58 | Shutdown stops and joins the flush worker, closes the WAL and leaves every acknowledged write recoverable from WAL or a retained representation. | verified (Phase 1F) |
 | STORAGE-59 | WAL replay validates and atomically reapplies complete batches through the same MemTable application contract, without interpreting flushed-state authority. | verified (Phase 1F) |
+| STORAGE-60 | Only SSTables referenced by the Version recovered from CURRENT's Manifest are logically live; a physically valid unlisted table remains an orphan. | verified (Phase 1G) |
+| STORAGE-61 | Every live file number is unique, and durable `NextFileNumber` is greater than every live, orphan or temporary SSTable number that may exist. | verified (Phase 1G) |
+| STORAGE-62 | `LastSequence` never decreases, and recovery never reuses a sequence present in the Manifest, retained WAL or a validated live SSTable. | verified (Phase 1G) |
+| STORAGE-63 | A VersionEdit either validates and installs every field atomically or leaves the current immutable Version unchanged. | verified (Phase 1G) |
+| STORAGE-64 | Manifest corruption, unsupported framing and checksum-valid semantic corruption are surfaced; only a provably incomplete final record may recover as a complete prefix. | verified (Phase 1G) |
+| STORAGE-65 | An SSTable becomes logically installed only after its AddFile VersionEdit is fsynced; failure before that point retains the immutable/WAL and leaves the table orphaned. | verified (Phase 1G) |
+| STORAGE-66 | The inclusive replay frontier advances only across a contiguous sequence prefix represented by authoritative installed flush spans; a gap stops advancement. | verified (Phase 1G) |
+| STORAGE-67 | The replay frontier never decreases, survives restart exactly and never splits an atomic WAL batch during replay. | verified (Phase 1G) |
+| STORAGE-68 | A missing, corrupt or metadata-mismatched live SSTable causes metadata recovery to fail rather than silently changing the authoritative Version. | verified (Phase 1G) |
+| STORAGE-69 | CURRENT names exactly one basename-valid Manifest and is replaced by temp-file fsync, rename and containing-directory fsync. | verified (Phase 1G) |
+| STORAGE-70 | Manifest replacement never deletes or invalidates the old recoverable Manifest before the new CURRENT switch is durable; ambiguous switches retain both candidates. | verified (Phase 1G) |
+| STORAGE-71 | Manifest replay and Version ordering are deterministic and independent of map iteration order. | verified (Phase 1G) |
+| STORAGE-72 | Physical WAL files are retained in Phase 1G even when the durable replay frontier proves a prefix logically redundant. | verified (Phase 1G) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -136,6 +149,18 @@ cross the rotation target, explicit lifecycle transitions, stable FIFO retry
 identity, bounded cancellable backpressure, post-rename ambiguity, concurrent
 accepted-write accounting, graceful shutdown, retained-WAL replay and exact
 Phase 1E validation of real Phase 1D flush outputs.
+
+STORAGE-60 through STORAGE-72 are enforced by
+[`manifest_test.go`](../internal/storage/manifest/manifest_test.go), the Phase
+1G installation states in `pipeline_test.go`, and the production WAL/SSTable
+validators. The suite covers deterministic bounded VersionEdit round trips,
+atomic invalid edits, duplicate behavior, 10,000-edit model replay,
+every-offset Manifest truncation, checksum and semantic corruption, every
+CURRENT publication failure boundary including directory fsync, immutable
+concurrent reads and serialized installs, orphan/temp collision recovery,
+missing/corrupt/mismatched live tables, conservative Manifest/WAL/live sequence
+maxima, contiguous-frontier gaps and restart, both sides of the durable AddFile
+crash boundary, snapshot rewrite and retained WAL.
 
 ## Raft
 

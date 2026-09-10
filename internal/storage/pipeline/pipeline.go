@@ -32,11 +32,23 @@ type Options struct {
 	SSTableOptions  sstable.Options
 	Clock           clock.Clock
 	Logger          *slog.Logger
+	FileAllocator   FileAllocator
+	TableInstaller  TableInstaller
 }
 
 type durableWAL interface {
 	Append([]byte) (wal.Position, error)
 	Close() error
+}
+
+// FileAllocator durably reserves an SSTable identity before publication.
+type FileAllocator interface {
+	AllocateFileNumber(context.Context) (uint64, error)
+}
+
+// TableInstaller makes a physically durable table logically authoritative.
+type TableInstaller interface {
+	InstallTable(context.Context, TableInstallation) error
 }
 
 type flushResult struct {
@@ -78,6 +90,8 @@ type Pipeline struct {
 	nextGeneration uint64
 	nextFile       uint64
 	flush          flushExecutor
+	allocator      FileAllocator
+	installer      TableInstaller
 	clock          clock.Clock
 	logger         *slog.Logger
 	stats          Stats
@@ -140,6 +154,7 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 		threshold: options.MemTableBytes, maxImmutable: options.MaxImmutables,
 		nextSequence: options.NextSequence, nextGeneration: firstGeneration + 1, nextFile: firstFile,
 		clock: options.Clock, logger: rlog.Component(options.Logger, "storage.pipeline"), accepting: true,
+		allocator: options.FileAllocator, installer: options.TableInstaller,
 	}
 	p.writeToken <- struct{}{}
 	p.active = &generation{id: firstGeneration, table: memtable.New(), state: StateActive}
@@ -181,14 +196,27 @@ func (p *Pipeline) Write(ctx context.Context, mutations []storage.Mutation) (Wri
 		p.mu.Unlock()
 		return WriteResult{}, failure
 	}
-	if err := p.rotationAvailableLocked(); err != nil {
+	if p.nextGeneration == 0 {
 		p.mu.Unlock()
-		return WriteResult{}, err
+		return WriteResult{}, ErrGenerationExhausted
 	}
 	count := uint64(len(mutations)) //nolint:gosec // nonempty slice length
 	if p.seqExhausted || p.nextSequence > math.MaxUint64-(count-1) {
 		p.mu.Unlock()
 		return WriteResult{}, storage.ErrSequenceOverflow
+	}
+	p.mu.Unlock()
+	if err := p.ensureActiveFile(ctx); err != nil {
+		return WriteResult{}, err
+	}
+	p.mu.Lock()
+	if !p.accepting {
+		p.mu.Unlock()
+		return WriteResult{}, ErrClosed
+	}
+	if failure := p.flushFailureLocked(); failure != nil {
+		p.mu.Unlock()
+		return WriteResult{}, failure
 	}
 	first := p.nextSequence
 	generationID := p.active.id
@@ -278,15 +306,25 @@ func (p *Pipeline) Rotate(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	p.mu.Lock()
+	if !p.accepting {
+		p.mu.Unlock()
+		return false, ErrClosed
+	}
+	if failure := p.flushFailureLocked(); failure != nil {
+		p.mu.Unlock()
+		return false, failure
+	}
+	p.mu.Unlock()
+	if err := p.ensureActiveFile(ctx); err != nil {
+		return false, err
+	}
+	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.accepting {
 		return false, ErrClosed
 	}
 	if failure := p.flushFailureLocked(); failure != nil {
 		return false, failure
-	}
-	if err := p.rotationAvailableLocked(); err != nil {
-		return false, err
 	}
 	p.rotateLocked()
 	p.validateIfEnabledLocked()
@@ -298,12 +336,10 @@ func (p *Pipeline) rotateLocked() {
 	old := p.active
 	invariant.Assert(old.table.Len() != 0, "STORAGE-50", "rotate empty active generation %d", old.id)
 	invariant.Assert(len(p.immutables) < p.maxImmutable, "STORAGE-55", "immutable backlog %d exceeds limit %d", len(p.immutables), p.maxImmutable)
-	invariant.Assert(p.nextFile > 0 && p.nextFile <= sstable.MaxFileNumber, "STORAGE-57", "file number %d invalid", p.nextFile)
+	invariant.Assert(old.fileNumber > 0 && old.fileNumber <= sstable.MaxFileNumber, "STORAGE-61", "file number %d invalid", old.fileNumber)
 	p.logger.Info("memtable rotation started", slog.Uint64("generation", old.id), slog.Int("entries", old.table.Len()), slog.Uint64("bytes", old.table.SizeBytes()))
 	old.table.Freeze()
 	p.logger.Info("memtable frozen", slog.Uint64("generation", old.id), slog.Uint64("smallest_sequence", old.smallestSeq), slog.Uint64("largest_sequence", old.largestSeq))
-	old.fileNumber = p.nextFile
-	p.nextFile++
 	if err := old.transition(StateQueued); err != nil {
 		invariant.Assert(false, "STORAGE-50", "%v", err)
 	}
@@ -315,13 +351,37 @@ func (p *Pipeline) rotateLocked() {
 	p.logger.Info("memtable created", slog.Uint64("generation", p.active.id))
 }
 
-func (p *Pipeline) rotationAvailableLocked() error {
+func (p *Pipeline) ensureActiveFile(ctx context.Context) error {
+	p.mu.Lock()
 	if p.nextGeneration == 0 {
+		p.mu.Unlock()
 		return ErrGenerationExhausted
 	}
-	if p.nextFile == 0 || p.nextFile > sstable.MaxFileNumber {
+	if p.active.fileNumber != 0 {
+		p.mu.Unlock()
+		return nil
+	}
+	if p.allocator == nil {
+		if p.nextFile == 0 || p.nextFile > sstable.MaxFileNumber {
+			p.mu.Unlock()
+			return ErrFileNumberExhausted
+		}
+		p.active.fileNumber = p.nextFile
+		p.nextFile++
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
+	number, err := p.allocator.AllocateFileNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("reserve active MemTable file number: %w", err)
+	}
+	if number == 0 || number > sstable.MaxFileNumber {
 		return ErrFileNumberExhausted
 	}
+	p.mu.Lock()
+	p.active.fileNumber = number
+	p.mu.Unlock()
 	return nil
 }
 

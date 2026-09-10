@@ -178,7 +178,7 @@ An LSM tree, implemented in this repository. Rationale versus a B+ tree is in
         │ sealed when full (writes continue into a fresh MemTable)
         ▼
    ┌──────────────────┐
-   │ Immutable MemTable│  ──flush──►  SSTable in L0
+   │ Immutable MemTable│  ──flush──► durable SSTable ──Manifest fsync──► L0
    └──────────────────┘
                                           │
                                      compaction
@@ -466,8 +466,11 @@ The general shape:
   synchronous WAL append, atomic MemTable batch apply and rotation with one
   admission token. One separate worker owns the bounded FIFO immutable queue;
   it performs Phase 1D publication without holding write admission, retains a
-  failed head, and joins on shutdown. Phase 1G will add manifest authority
-  without moving sequence assignment into a per-range interface.
+  failed head, and joins on shutdown. Phase 1G gives that worker a narrow
+  durable file allocator and table installer: physical publication precedes
+  the AddFile Manifest fsync, and only then is the immutable Version published.
+  The interface remains engine-scoped and does not foreclose a future shared
+  WAL across ranges.
 - **Explicit lifecycle.** Every component that starts goroutines exposes
   `Close`, cancels a context, and waits for its goroutines to exit.
   [`testutil.NoLeaks`](../internal/testutil/leak.go) enforces this in tests: a

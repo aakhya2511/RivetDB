@@ -15,7 +15,7 @@ find than to prevent.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: docs, module, build, CI, logging, test harness | ✅ |
-| 1 | Local LSM storage engine | 🔨 in progress (1A–1F) |
+| 1 | Local LSM storage engine | 🔨 in progress (1A–1G) |
 | 2 | Single Raft group | ⬜ |
 | 3 | Durable replicated range (Raft + storage) | ⬜ |
 | 4 | Multi-Raft and range routing | ⬜ |
@@ -29,7 +29,7 @@ find than to prevent.
 | 12 | Optional AI operator | ⬜ |
 
 **What exists right now:** Phase 0, the pre-Phase-1 internal-key contract and
-Phase 1A through 1F storage units. There is no complete key-value engine, Raft,
+Phase 1A through 1G storage units. There is no complete key-value engine, Raft,
 server or client. Anything else described in
 [architecture.md](architecture.md) is a design, clearly marked as such.
 
@@ -97,7 +97,7 @@ tombstones · forward iterators · `Get`/`Put`/`Delete`/`Scan`.
 7. A recorded baseline benchmark: sequential and random `Put`, point `Get`,
    `Scan`, with write amplification and space amplification measured.
 
-**Delivered so far — Phase 1A/1B/1C/1D/1E/1F:** authoritative internal-key and write-batch
+**Delivered so far — Phase 1A/1B/1C/1D/1E/1F/1G:** authoritative internal-key and write-batch
 codecs; versioned 32 KiB WAL block framing with independent header/content
 CRC32C; bounded streaming reader; `SyncBatch` and `SyncNone`; concurrent append
 serialization; clean restart; explicit truncated-tail repair; every-offset
@@ -112,15 +112,18 @@ SSTable Open/Get/Seek/GetCandidate/full and range iteration with resident
 validated indexes, restart search, concurrent reads and explicit Close;
 serialized WAL-before-apply batches, atomic threshold rotation, a bounded FIFO
 immutable worker, exact validated flush output, conservative failure retention
-and retained-WAL replay. Evidence:
+and retained-WAL replay; deterministic binary VersionEdits, append-only
+Manifest recovery, crash-safe CURRENT, immutable Version installation,
+collision-safe file/sequence recovery, live-table cross-checking and a durable
+inclusive contiguous WAL replay frontier. Evidence:
 [`phase-1ab.md`](evidence/phase-1ab.md),
 [`phase-1c.md`](evidence/phase-1c.md),
 [`phase-1d.md`](evidence/phase-1d.md),
-[`phase-1e.md`](evidence/phase-1e.md), and
-[`phase-1f.md`](evidence/phase-1f.md).
+[`phase-1e.md`](evidence/phase-1e.md),
+[`phase-1f.md`](evidence/phase-1f.md), and
+[`phase-1g.md`](evidence/phase-1g.md).
 
-**Remaining before Phase 1 is complete:** Bloom filter, manifest/version set,
-compaction, engine-level recovery,
+**Remaining before Phase 1 is complete:** Bloom filter, compaction, engine-level recovery,
 Get/Put/Delete/Scan and the full Phase 1 benchmark.
 
 ---

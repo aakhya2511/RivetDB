@@ -412,9 +412,10 @@ func TestFlushStateTransitionTableAndRandomModel(t *testing.T) {
 	valid := map[[2]FlushState]bool{
 		{StateActive, StateQueued}: true, {StateQueued, StateFlushing}: true,
 		{StateFlushing, StateFailed}: true, {StateFlushing, StateDurable}: true,
-		{StateFailed, StateQueued}: true,
+		{StateDurable, StateInstalling}: true, {StateInstalling, StateInstalled}: true,
+		{StateInstalling, StateFailed}: true, {StateFailed, StateQueued}: true,
 	}
-	states := []FlushState{StateActive, StateQueued, StateFlushing, StateFailed, StateDurable}
+	states := []FlushState{StateActive, StateQueued, StateFlushing, StateFailed, StateDurable, StateInstalling, StateInstalled}
 	for _, from := range states {
 		for _, to := range states {
 			g := &generation{id: 7, state: from}
@@ -423,6 +424,10 @@ func TestFlushStateTransitionTableAndRandomModel(t *testing.T) {
 				t.Fatalf("transition %s -> %s error = %v", from, to, err)
 			}
 		}
+	}
+	physicalFailure := &generation{id: 2, state: StateFailed, physical: true}
+	if err := physicalFailure.transition(StateQueued); err == nil {
+		t.Fatal("physically published generation was retryable")
 	}
 	fresh := testutil.Seed(t)
 	for _, initialSeed := range []uint64{0, 1, math.MaxUint64, uint64(fresh)} {

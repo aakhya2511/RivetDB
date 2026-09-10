@@ -17,7 +17,7 @@ func (p *Pipeline) validateIfEnabledLocked() {
 		seen[item.id] = struct{}{}
 		invariant.Assert(item.table.Frozen(), "STORAGE-51", "immutable generation %d is mutable", item.id)
 		invariant.Assert(item.haveSeq && item.smallestSeq <= item.largestSeq, "STORAGE-57", "immutable generation %d has invalid sequence range", item.id)
-		invariant.Assert(item.state == StateQueued || item.state == StateFlushing || item.state == StateFailed, "STORAGE-51", "live immutable %d has state %s", item.id, item.state)
+		invariant.Assert(item.state == StateQueued || item.state == StateFlushing || item.state == StateInstalling || item.state == StateFailed, "STORAGE-51", "live immutable %d has state %s", item.id, item.state)
 		if index > 0 {
 			invariant.Assert(p.immutables[index-1].id < item.id, "STORAGE-57", "generation FIFO is unordered")
 			invariant.Assert(p.immutables[index-1].largestSeq < item.smallestSeq, "STORAGE-57", "generation sequence ranges overlap")

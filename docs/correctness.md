@@ -5,7 +5,7 @@ This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
 **Current scope:** Phase 0, the pre-Phase-1 key contract and Phase 1A through
-1F storage units exist. No database consistency claims are made because there is
+1G storage units exist. No database consistency claims are made because there is
 not yet a complete key-value engine. This document describes the strategy the
 remaining implementation will be held to; sections marked *planned* are plans,
 not results.
@@ -120,6 +120,17 @@ close, rename, directory-sync and reader-validation outcomes; failed or
 ambiguous generations remain retained. Real-filesystem tests reopen every
 flush through the production reader and replay the never-reclaimed WAL,
 including the crash boundary after WAL durability and before MemTable apply.
+
+Phase 1G establishes the metadata authority. Tests truncate a multi-edit
+Manifest at every byte offset, reject middle corruption and malformed or
+semantically invalid edits, and replay a deterministic 10,000-edit reference
+model. CURRENT publication injects failure at temporary write/fsync/close,
+rename and directory open/fsync/close. Filesystem integration proves that a
+pre-Manifest table is an orphan, a post-Manifest-fsync table recovers as live,
+missing/corrupt/mismatched live tables fail, old Manifests survive rewrite, and
+WAL replay skips only complete batches at or below the durable inclusive
+contiguous frontier. Concurrent readers run under the race detector against
+immutable Versions.
 
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the

@@ -32,7 +32,13 @@ func (p *Pipeline) runWorker() {
 		started := p.clock.Now()
 		p.logger.Info("flush started", slog.Uint64("generation", item.id), slog.Uint64("file", item.fileNumber), slog.Uint64("smallest_sequence", item.smallestSeq), slog.Uint64("largest_sequence", item.largestSeq), slog.Int("entries", item.table.Len()), slog.Uint64("bytes", item.table.SizeBytes()))
 		result, err := p.flush(p.ctx, item)
-		p.finishFlush(item, result, err, p.clock.Since(started))
+		duration := p.clock.Since(started)
+		installation, install := p.finishPhysicalFlush(item, result, err, duration)
+		if !install {
+			continue
+		}
+		installErr := p.installer.InstallTable(p.ctx, installation)
+		p.finishInstallation(item, installErr)
 	}
 }
 
@@ -50,7 +56,7 @@ func (p *Pipeline) claimFlush() *generation {
 	return item
 }
 
-func (p *Pipeline) finishFlush(item *generation, result flushResult, flushErr error, duration time.Duration) {
+func (p *Pipeline) finishPhysicalFlush(item *generation, result flushResult, flushErr error, duration time.Duration) (TableInstallation, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	invariant.Assert(len(p.immutables) != 0 && p.immutables[0] == item, "STORAGE-51", "flush completion for non-head generation %d", item.id)
@@ -63,11 +69,12 @@ func (p *Pipeline) finishFlush(item *generation, result flushResult, flushErr er
 		p.stats.FlushFailures++
 		p.logger.Error("flush failed", slog.Uint64("generation", item.id), slog.Uint64("file", item.fileNumber), slog.Int64("duration_ns", duration.Nanoseconds()), slog.Bool("ambiguous", item.ambiguous), slog.String("error_class", fmt.Sprintf("%T", flushErr)), rlog.Err(flushErr))
 		p.notify(p.changed)
-		return
+		return TableInstallation{}, false
 	}
 	if err := item.transition(StateDurable); err != nil {
 		invariant.Assert(false, "STORAGE-53", "%v", err)
 	}
+	item.physical = true
 	p.outputs = append(p.outputs, FlushOutput{
 		Generation: item.id, FileNumber: item.fileNumber, SmallestSeq: item.smallestSeq,
 		LargestSeq: item.largestSeq, Metadata: result.metadata, Path: result.path,
@@ -77,8 +84,45 @@ func (p *Pipeline) finishFlush(item *generation, result flushResult, flushErr er
 	if duration > 0 {
 		p.stats.FlushNanos += uint64(duration) //nolint:gosec // positive duration fits uint64
 	}
-	p.immutables = p.immutables[1:]
 	p.logger.Info("flush completed", slog.Uint64("generation", item.id), slog.Uint64("file", item.fileNumber), slog.Int64("duration_ns", duration.Nanoseconds()), slog.Uint64("bytes", result.metadata.FileSize), slog.Uint64("entries", result.metadata.EntryCount))
+	if p.installer == nil {
+		p.immutables = p.immutables[1:]
+		p.validateIfEnabledLocked()
+		p.notify(p.changed)
+		p.notify(p.wake)
+		return TableInstallation{}, false
+	}
+	if err := item.transition(StateInstalling); err != nil {
+		invariant.Assert(false, "STORAGE-65", "%v", err)
+	}
+	p.validateIfEnabledLocked()
+	return TableInstallation{
+		Generation: item.id, SmallestSequence: item.smallestSeq,
+		LargestSequence: item.largestSeq, Metadata: result.metadata, Path: result.path,
+	}, true
+}
+
+func (p *Pipeline) finishInstallation(item *generation, installErr error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	invariant.Assert(len(p.immutables) != 0 && p.immutables[0] == item, "STORAGE-65", "installation completion for non-head generation %d", item.id)
+	if installErr != nil {
+		if err := item.transition(StateFailed); err != nil {
+			invariant.Assert(false, "STORAGE-65", "%v", err)
+		}
+		item.flushErr = installErr
+		item.ambiguous = true
+		p.stats.FlushFailures++
+		p.logger.Error("table installation failed", slog.Uint64("generation", item.id), slog.Uint64("file", item.fileNumber), rlog.Err(installErr))
+		p.notify(p.changed)
+		return
+	}
+	if err := item.transition(StateInstalled); err != nil {
+		invariant.Assert(false, "STORAGE-65", "%v", err)
+	}
+	p.stats.Installs++
+	p.immutables = p.immutables[1:]
+	p.logger.Info("table installed", slog.Uint64("generation", item.id), slog.Uint64("file", item.fileNumber))
 	p.validateIfEnabledLocked()
 	p.notify(p.changed)
 	p.notify(p.wake)

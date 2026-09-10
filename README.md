@@ -8,7 +8,7 @@ Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 1 in progress — Phase 1A through Phase 1F complete.**
+> **Project status: Phase 1 in progress — Phase 1A through Phase 1G complete.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -16,10 +16,11 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > a concurrent mutable/frozen skip-list MemTable, a deterministic checksummed
 > and atomically published SSTable writer, and a fully validating,
 > comparator-correct SSTable reader with seek and iteration, and a bounded
-> active-to-immutable MemTable rotation/flush pipeline with retained-WAL replay.
+> active-to-immutable MemTable rotation/flush pipeline, and the crash-safe
+> Manifest/immutable VersionSet authority with durable table installation.
 >
 > **There is no complete key-value engine, Raft, server or client yet.** The
-> manifest and VersionSet are next. Everything else
+> levelled compaction is next. Everything else
 > described below is a design with a written specification, not working code — see
 > [Roadmap](docs/roadmap.md) for exactly what is built and what is not.
 >
@@ -111,9 +112,8 @@ that the implementation and its tests are held to.
 | [roadmap.md](docs/roadmap.md) | The twelve phases and the gate each must pass |
 | [ADRs](docs/design-decisions/) | Contested decisions with the alternatives that were rejected and why |
 
-Two decisions are recorded so far:
-[LSM tree over B+ tree](docs/design-decisions/0001-lsm-tree-over-b-tree.md) and
-[range partitioning over consistent hashing](docs/design-decisions/0002-range-partitioning-over-hashing.md).
+The [ADR index](docs/design-decisions/) records the accepted choices and the
+real advantages of their rejected alternatives.
 
 ---
 
@@ -166,7 +166,7 @@ a later phase cannot be tested honestly without it.
 |---|---|
 | [`internal/clock`](internal/clock) | `Clock` interface with a system implementation and a deterministic `Mock`. Raft elections, lease expiry, transaction timeouts and rebalancer cooldowns will take a `Clock`, so those subsystems can be tested in microseconds instead of by sleeping. |
 | [`internal/testutil`](internal/testutil) | Seeded randomness with an explicitly promoted failing-seed corpus, goroutine-leak detection, bounded polling helpers. |
-| [`internal/storage`](internal/storage) | Internal-key/write-batch codecs, Phase 1B WAL, Phase 1C skip-list MemTable, Phase 1D/1E SSTable writer/reader, and the Phase 1F bounded MemTable rotation, FIFO flush, exact-output validation and retained-WAL replay pipeline. |
+| [`internal/storage`](internal/storage) | Internal-key/write-batch codecs, WAL, skip-list MemTable, SSTable writer/reader, bounded FIFO flush pipeline, and the Phase 1G Manifest/immutable VersionSet authority with crash-safe CURRENT, conservative allocation and replay-frontier recovery. |
 | [`internal/invariant`](internal/invariant) | Named, typed assertions so a violation identifies itself, plus an `Expensive()` tier for O(n) structural checks enabled in tests and chaos runs. |
 | [`internal/rlog`](internal/rlog) | Structured logging with canonical attribute keys (`node`, `range`, `term`, `index`, `txn`), context propagation, runtime-adjustable level, and a recorder so tests assert on structured events rather than substrings. |
 

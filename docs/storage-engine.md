@@ -534,6 +534,13 @@ searches the level and reads at most one file.
 
 ### 5.4 Manifest and version set
 
+Phase 1G implements this section according to
+[ADR-0009](design-decisions/0009-manifest-versionset-and-replay-frontier-authority.md).
+Physical SSTable presence is never authority: CURRENT selects one Manifest,
+Manifest replay constructs one immutable Version, and only its listed tables
+are live. Directory scanning classifies orphans/temporaries and raises the
+allocation floor, but never adds a table.
+
 A *version* is the immutable set of files at each level. The manifest is an
 append-only log — reusing the WAL's block framing (§5.1) — of *version edits*:
 
@@ -550,8 +557,50 @@ append-only log — reusing the WAL's block framing (§5.1) — of *version edit
 
 Recovery reads `CURRENT`, opens the named manifest, and replays every edit to
 rebuild the current version. The set of files that exist and the set the
-manifest describes must match exactly (STORAGE-9); a mismatch is corruption and
-is reported.
+manifest describes is authoritative: missing or mismatched live files are
+corruption, while unlisted physical files are reported as orphans and retained.
+
+The Phase 1G edit payload is deterministic binary TLV inside the WAL framing.
+It persists comparator identity, AddFile/DeleteFile operations, monotonic next
+file and last-sequence fields, and an optional inclusive replay frontier. Each
+added table includes Phase 1D metadata plus its flush generation and contiguous
+sequence span. Candidate Version construction and semantic validation precede
+Manifest append/fsync; the immutable current pointer changes only afterward.
+L0 is deterministically newest-first and may overlap. Higher levels are
+represented and require non-overlap when populated, but Phase 1G executes no
+compaction.
+
+The VersionEdit v1 payload is byte-exact:
+
+```text
+offset  size  field
+0       4     magic 0x44455652 little-endian (bytes "RVED")
+4       2     version = 1, little-endian
+6       2     field count, little-endian
+8       ...   repeated: tag u8, payload length u32 LE, payload bytes
+```
+
+Known tags are comparator `1` (bytes treated as an opaque identity,
+maximum 128 bytes), next file `2`, last sequence `3`, replay frontier `4`
+(each an LE64), DeleteFile `5` (`level LE32, file LE64`) and AddFile `6`.
+Tags with the high bit clear are required and unknown values reject the edit;
+unknown high-bit tags are optional and skipped by their bounded length.
+
+An AddFile payload is, in order: `level LE32`; six LE64 values for file number,
+flush generation, file size, entry count, deletion count and raw key/value
+bytes; data-block count LE32; smallest and largest sequence LE64; then four
+`length LE32 + bytes` values for smallest internal key, largest internal key,
+smallest user key and largest user key. Internal keys retain §5.2's explicit
+encoding/comparator contract. An edit is at most 16 MiB, contains at most 4,096
+adds and 4,096 deletes, and uses levels 0 through 7. Scalar tags occur at most
+once. Encoders sort deletes and adds by `(level,file)` so equivalent edits have
+identical bytes.
+
+The replay frontier means every complete batch ending at or below it is already
+represented by authoritative installed state. It advances only through
+gap-free installed flush spans; later installed spans beyond a gap do not move
+it. A batch crossing the boundary is an error rather than a partial replay.
+The frontier is durable metadata only: Phase 1G does not delete WAL files.
 
 `CURRENT` is replaced by writing a temporary file, fsyncing it, renaming it over
 `CURRENT`, and then **fsyncing the containing directory**. The last step is the

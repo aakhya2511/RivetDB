@@ -16,6 +16,8 @@ const (
 	StateFlushing
 	StateFailed
 	StateDurable
+	StateInstalling
+	StateInstalled
 )
 
 func (s FlushState) String() string {
@@ -30,6 +32,10 @@ func (s FlushState) String() string {
 		return "failed"
 	case StateDurable:
 		return "durable"
+	case StateInstalling:
+		return "installing"
+	case StateInstalled:
+		return "installed"
 	default:
 		return fmt.Sprintf("unknown(%d)", s)
 	}
@@ -45,13 +51,16 @@ type generation struct {
 	largestSeq  uint64
 	flushErr    error
 	ambiguous   bool
+	physical    bool
 }
 
 func (g *generation) transition(next FlushState) error {
 	valid := g.state == StateActive && next == StateQueued ||
 		g.state == StateQueued && next == StateFlushing ||
 		g.state == StateFlushing && (next == StateDurable || next == StateFailed) ||
-		g.state == StateFailed && next == StateQueued
+		g.state == StateDurable && next == StateInstalling ||
+		g.state == StateInstalling && (next == StateInstalled || next == StateFailed) ||
+		g.state == StateFailed && next == StateQueued && !g.physical
 	if !valid {
 		return fmt.Errorf("%w: generation %d %s -> %s", ErrInvalidTransition, g.id, g.state, next)
 	}
@@ -70,6 +79,16 @@ type FlushOutput struct {
 	Path        string
 }
 
+// TableInstallation is a physically durable, validated SSTable awaiting
+// logical installation by a Manifest authority.
+type TableInstallation struct {
+	Generation       uint64
+	SmallestSequence uint64
+	LargestSequence  uint64
+	Metadata         sstable.Metadata
+	Path             string
+}
+
 // Stats is a point-in-time copy of pipeline lifecycle counters and memory.
 type Stats struct {
 	ActiveGeneration   uint64
@@ -80,6 +99,7 @@ type Stats struct {
 	SequenceExhausted  bool
 	Rotations          uint64
 	Flushes            uint64
+	Installs           uint64
 	FlushFailures      uint64
 	FlushNanos         uint64
 	SSTableBytes       uint64

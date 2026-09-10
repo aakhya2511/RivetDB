@@ -37,6 +37,7 @@ Phase:    which phase this governs
 | [0006](0006-sstable-physical-format.md) | SSTable block, index, footer and publication format | Accepted | 1D |
 | [0007](0007-sstable-reader-validation-and-seek.md) | SSTable reader validation and seek strategy | Accepted | 1E |
 | [0008](0008-memtable-rotation-and-flush-lifecycle.md) | MemTable rotation and flush lifecycle | Accepted | 1F |
+| [0009](0009-manifest-versionset-and-replay-frontier-authority.md) | Manifest, VersionSet and replay-frontier authority | Accepted | 1G |
 
 ## Planned
 
