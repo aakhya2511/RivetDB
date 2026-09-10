@@ -4,10 +4,11 @@ A distributed database is only as credible as the evidence that it is correct.
 This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
-**Current scope:** only the Phase 0 foundation exists. No consistency claims
-are made about RivetDB, because there is no database yet. This document
-describes the strategy the implementation will be held to, and the sections
-marked *planned* are plans, not results.
+**Current scope:** Phase 0, the pre-Phase-1 key contract and Phase 1A/1B storage
+primitives/WAL exist. No database consistency claims are made because there is
+not yet a complete key-value engine. This document describes the strategy the
+remaining implementation will be held to; sections marked *planned* are plans,
+not results.
 
 ---
 
@@ -83,12 +84,12 @@ This matters more than it might appear. It means:
 
 ### 2.4 Crash and recovery tests
 
-Durability is not testable by a normal test, because a normal test never stops
-at an arbitrary instruction. RivetDB tests it by making the crash point
-explicit: the storage engine's file operations go through an injectable layer
-that can fail or stop at a chosen write offset, so a test can crash the engine
-at every offset in a WAL segment and assert the recovered state is a valid
-prefix at each one.
+Durability is not testable by an ordinary happy-path test. The Phase 1B WAL
+makes the crash point explicit by truncating a multi-block encoded segment at
+every byte offset and asserting that recovery returns exactly the maximal
+complete-record prefix. Its writer has narrow injected seams for short writes
+and write/sync/close failures. Later engine phases extend this method to flush,
+manifest and compaction operations.
 
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the
@@ -144,8 +145,11 @@ The mechanism, implemented today:
 
 - Every randomized test takes its seed from
   [`testutil.Seed`](../internal/testutil/seed.go), which logs it on every run.
-- A failure appends the seed to `testdata/seeds/<TestName>.seeds` and prints
-  the exact replay command.
+- A failure prints the seed, the exact replay command, and an explicit
+  `make promote-seed PACKAGE=... TEST=... SEED=...` command. It does not write
+  repository files.
+- After reproducing and fixing the failure, a developer runs that promotion
+  command to append the seed to `testdata/seeds/<TestName>.seeds`.
 - Those files are committed. `testutil.SeedCorpus` reads them so a test replays
   every historical failure before exploring new ground.
 - `RIVETDB_SEED=<n> go test ...` (or `make seed SEED=<n> RUN=<pattern>`) forces

@@ -94,6 +94,15 @@ seed: ## Replay a randomized test with a fixed seed (SEED=... RUN=...)
 	RIVETDB_SEED=$(SEED) $(GO) test -count=1 -timeout $(TEST_TIMEOUT) \
 		$(if $(RUN),-run '$(RUN)',) $(PKGS)
 
+.PHONY: promote-seed
+promote-seed: ## Promote a reproduced failure (PACKAGE=... TEST=... SEED=...)
+	@if [[ -z "$${PACKAGE:-}" || -z "$${TEST:-}" || -z "$${SEED:-}" ]]; then \
+		echo "usage: make promote-seed PACKAGE=./internal/pkg TEST=TestName SEED=<int64>"; \
+		exit 1; \
+	fi
+	$(GO) run ./internal/testutil/cmd/promote-seed \
+		-package "$(PACKAGE)" -test "$(TEST)" -seed "$(SEED)"
+
 ## --- Build ------------------------------------------------------------------
 
 .PHONY: build

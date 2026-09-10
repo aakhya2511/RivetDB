@@ -31,6 +31,8 @@ Phase:    which phase this governs
 |---|---|---|---|
 | [0001](0001-lsm-tree-over-b-tree.md) | LSM tree over B+ tree for the storage engine | Accepted | 1 |
 | [0002](0002-range-partitioning-over-hashing.md) | Range partitioning over consistent hashing | Accepted | 4 |
+| [0003](0003-explicit-internal-key-comparator.md) | Explicit internal-key comparator | Accepted | 1 |
+| [0004](0004-wal-integrity-and-tail-recovery.md) | WAL fragment integrity and explicit tail recovery | Accepted | 1 |
 
 ## Planned
 

@@ -26,9 +26,9 @@ is updated as part of the phase gate, not afterwards.
 
 | ID | Invariant | Status |
 |---|---|---|
-| STORAGE-1 | A write acknowledged in a durability mode that promises persistence is present after a crash at any point after the acknowledgement. | planned (Phase 1) |
-| STORAGE-2 | Every WAL record's checksum is verified on replay. A record whose checksum fails is not applied. | planned (Phase 1) |
-| STORAGE-3 | A partially written trailing WAL record is truncated, not applied. A crash mid-append loses only the in-flight record, never an earlier one. | planned (Phase 1) |
+| STORAGE-1 | A write acknowledged in a durability mode that promises persistence is present after a crash at any point after the acknowledgement. | verified for WAL (Phase 1B, filesystem contract) |
+| STORAGE-2 | Every WAL record's checksum is verified on replay. A record whose checksum fails is not applied. | verified (Phase 1B) |
+| STORAGE-3 | A partially written trailing WAL record is truncated, not applied. A crash mid-append loses only the in-flight record, never an earlier one. | verified (Phase 1B) |
 | STORAGE-4 | Keys within an SSTable are strictly ascending, with no duplicates of the same `(key, timestamp)` pair. | planned (Phase 1) |
 | STORAGE-5 | A read returns the newest version of a key visible to it, considering the MemTable, the immutable MemTable and every SSTable level. | planned (Phase 1) |
 | STORAGE-6 | Compaction never resurrects a deleted key: a tombstone is dropped only when no older version of that key can survive in any remaining file, and no live reader can be positioned before it. | planned (Phase 1) |
@@ -37,6 +37,30 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-9 | The manifest describes exactly the set of SSTables that exist and are reachable. Recovery never opens a file absent from the manifest, and never misses one present in it. | planned (Phase 1) |
 | STORAGE-10 | An iterator observes a fixed, consistent view of the engine for its whole lifetime. Concurrent flushes and compactions do not change what it yields. | planned (Phase 1) |
 | STORAGE-11 | A file is made visible to readers only after its contents and its directory entry are durable. No reader ever observes a torn or partial SSTable. | planned (Phase 1) |
+| STORAGE-12 | Different internal keys are ordered first and solely by lexicographic user-key bytes; sequence and kind cannot reverse the order of distinct user keys. | verified (pre-Phase-1) |
+| STORAGE-13 | For one user key, a higher sequence number sorts before a lower sequence number. | verified (pre-Phase-1) |
+| STORAGE-14 | Internal-key comparison is a strict total order: it is antisymmetric and transitive, and equality means user key, sequence and kind are all equal. | verified (pre-Phase-1) |
+| STORAGE-15 | Every version of one user key is contiguous in internal-key order. | verified (pre-Phase-1) |
+| STORAGE-16 | Range bounds are user keys, and no range boundary can split the internal versions of one logical user key. | design contract (pre-Phase-1) |
+| STORAGE-17 | WAL recovery returns only complete, checksum-valid logical records, in original append order, and its valid-end offset is the maximal proven record boundary. | verified (Phase 1B) |
+| STORAGE-18 | WAL decoding validates header integrity and physical/logical size bounds before trusting lengths or growing buffers. Malformed input cannot cause overflow or unbounded allocation. | verified (Phase 1B) |
+| STORAGE-19 | A checksum failure, invalid format/type, impossible fragment sequence or nonzero padding is corruption and is never silently skipped or repaired as a truncated tail. | verified (Phase 1B) |
+| STORAGE-20 | Explicit tail repair truncates only a rescanned, unchanged, structurally incomplete tail. Appending after repair cannot resurrect discarded bytes. | verified (Phase 1B) |
+| STORAGE-21 | Concurrent WAL appends are serialized into complete, non-interleaved logical records. A writer that encounters an I/O failure cannot acknowledge later appends as healthy. | verified (Phase 1B) |
+| STORAGE-22 | Write-batch encoding is unambiguous and all-or-nothing: sequence ranges cannot wrap, malformed batches return an error, and DELETE differs from PUT of an empty value. | verified (Phase 1A) |
+
+STORAGE-12 through STORAGE-15 are enforced by
+[`internal_key_test.go`](../internal/storage/internal_key_test.go), including
+deterministic binary/prefix cases and seeded property tests. STORAGE-16 is a
+contract for the range and split implementations in Phases 4 and 7; those
+phases must add end-to-end enforcement tests before marking it verified.
+
+STORAGE-1 through STORAGE-3 and STORAGE-17 through STORAGE-21 are enforced by
+[`wal_test.go`](../internal/storage/wal/wal_test.go), including every-offset
+truncation, systematic protected-byte corruption, real-file restart/repair and
+injected write/sync/close failures. STORAGE-22 is enforced by
+[`batch_test.go`](../internal/storage/batch_test.go), including malformed-length
+and maximum-size cases.
 
 ## Raft
 
@@ -121,7 +145,7 @@ These concern the Phase 0 infrastructure and are enforced today.
 | ID | Invariant | Status | Test |
 |---|---|---|---|
 | FOUND-1 | A recorded seed replays the identical random stream, so a persisted failing seed reproduces its failure. | foundation | [`TestRandIsReproducible`](../internal/testutil/testutil_test.go) |
-| FOUND-2 | A seed derived from a failing test is persisted to the corpus and is not duplicated on repeat failures. | foundation | [`TestRecordFailingSeedAppendsAndDeduplicates`](../internal/testutil/testutil_internal_test.go) |
+| FOUND-2 | A deliberately promoted failing seed is persisted to the corpus and is not duplicated on repeat promotion. Ordinary test and CI execution never modifies the corpus. | foundation | [`TestPromoteSeedAppendsAndDeduplicates`](../internal/testutil/testutil_internal_test.go) |
 | FOUND-3 | A corpus path derived from a test name always resolves inside `testdata/seeds`, whatever the name contains. | foundation | [`TestSanitizeTestNameCannotEscapeCorpusDir`](../internal/testutil/testutil_internal_test.go) |
 | FOUND-4 | Mock clock timers fire in deadline order, and `Now` during a fire is never behind that timer's deadline. | foundation | [`TestMockFiresInDeadlineOrder`](../internal/clock/mock_test.go), [`TestMockNowDuringFireIsDeadline`](../internal/clock/mock_test.go) |
 | FOUND-5 | Mock clock time advances only when a test advances it. | foundation | [`TestMockStartsAtEpochAndDoesNotDrift`](../internal/clock/mock_test.go) |

@@ -1,10 +1,10 @@
 // Package testutil is RivetDB's shared test harness.
 //
 // It holds the pieces every level of the test pyramid needs: reproducible
-// randomness with a persisted failure corpus, goroutine-leak detection, and
-// bounded polling helpers. Higher-level harnesses (the fault injector, the
-// chaos runner, the history checker) are built on these and live with the
-// subsystems they exercise.
+// randomness with an explicitly promoted failure corpus, goroutine-leak
+// detection, and bounded polling helpers. Higher-level harnesses (the fault
+// injector, the chaos runner, the history checker) are built on these and live
+// with the subsystems they exercise.
 //
 // The package imports testing and is only ever imported by _test.go files.
 package testutil
@@ -36,17 +36,16 @@ const EnvSeed = "RIVETDB_SEED"
 const seedCorpusDir = "testdata/seeds"
 
 // Seed returns the seed for a randomized test and arranges for it to be
-// reported and preserved.
+// reported with exact replay and corpus-promotion commands on failure.
 //
 // The seed comes from RIVETDB_SEED when set, and is otherwise drawn from the
 // system CSPRNG so that repeated CI runs explore different interleavings — a
 // randomized test that runs the same schedule every night is a fixed test
 // wearing a costume.
 //
-// The seed is always logged, and on failure it is appended to this package's
-// seed corpus along with the exact command to replay it. That closes the loop
-// that makes randomized testing usable: a nightly chaos failure arrives with a
-// seed, the seed is committed, and it runs on every subsequent build.
+// Normal test execution never modifies the corpus. On failure, a developer
+// first replays the seed and then deliberately promotes it with make
+// promote-seed. This keeps CI and ordinary tests from modifying tracked files.
 func Seed(t testing.TB) int64 {
 	t.Helper()
 
@@ -66,13 +65,11 @@ func Seed(t testing.TB) int64 {
 		if !t.Failed() {
 			return
 		}
-		path, err := recordFailingSeed(t.Name(), seed)
-		if err != nil {
-			t.Logf("could not persist failing seed %d: %v", seed, err)
-			return
-		}
-		t.Logf("recorded failing seed %d in %s; replay with %s=%d go test -run '^%s$' ./...",
-			seed, path, EnvSeed, seed, t.Name())
+		pkg := currentPackagePath()
+		t.Logf("failing seed %d; replay: %s=%d go test -run '^%s$' %s",
+			seed, EnvSeed, seed, t.Name(), pkg)
+		t.Logf("after reproducing, promote explicitly: make promote-seed PACKAGE=%s TEST=%s SEED=%d",
+			pkg, t.Name(), seed)
 	})
 
 	return seed
@@ -155,13 +152,19 @@ func randomSeed(t testing.TB) int64 {
 	return int64(binary.LittleEndian.Uint64(b[:])) //nolint:gosec // reinterpretation, not conversion
 }
 
-// recordFailingSeed appends seed to the corpus for name, skipping seeds that
-// are already present, and returns the corpus path.
-func recordFailingSeed(name string, seed int64) (string, error) {
-	// corpusPath sanitises name, so the path is always inside seedCorpusDir
-	// even for a subtest name containing separators; see
+// PromoteSeed appends seed to the corpus for name under packageDir, skipping a
+// seed already present. It is intentionally separate from Seed so only an
+// explicit developer command can modify the permanent regression corpus.
+func PromoteSeed(packageDir, name string, seed int64) (string, error) {
+	path := filepath.Join(packageDir, corpusPath(name))
+	return recordFailingSeed(path, seed)
+}
+
+// recordFailingSeed appends seed to path, skipping seeds already present.
+func recordFailingSeed(path string, seed int64) (string, error) {
+	// PromoteSeed builds this path with corpusPath, so the test-name portion
+	// cannot escape packageDir even when a subtest name contains separators; see
 	// TestSanitizeTestNameCannotEscapeCorpusDir.
-	path := corpusPath(name)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return "", fmt.Errorf("create seed corpus directory: %w", err)
 	}
@@ -187,6 +190,29 @@ func recordFailingSeed(name string, seed int64) (string, error) {
 		return "", fmt.Errorf("close seed corpus %s: %w", path, err)
 	}
 	return path, nil
+}
+
+func currentPackagePath() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+
+	root := cwd
+	for {
+		if _, statErr := os.Stat(filepath.Join(root, "go.mod")); statErr == nil {
+			rel, relErr := filepath.Rel(root, cwd)
+			if relErr != nil || rel == "." {
+				return "."
+			}
+			return "./" + filepath.ToSlash(rel)
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return "."
+		}
+		root = parent
+	}
 }
 
 func existingSeeds(path string) ([]int64, error) {

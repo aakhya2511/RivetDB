@@ -12,19 +12,19 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phase 0 of 12 is complete. Phase 1 (the LSM storage engine) is next and has
-not been started.**
+**Phase 0 and the pre-Phase-1 key audit are complete. Phase 1A/1B storage
+primitives and WAL are implemented; Phase 1C (MemTable) is next.**
 
-What exists: the design documents, the build and CI gate, and four foundation
-packages under `internal/`. There is no storage engine, no Raft, no server, no
-client, no `cmd/`, no `api/`, no `tests/` and no `benchmarks/` directory.
+What exists: the design documents, build/CI gate, foundation packages,
+internal-key/write-batch primitives and the checksummed WAL under
+`internal/storage`. There is no complete storage engine, Raft, server or client.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
 infrastructure concerns (RPC, protobuf, metrics) but every one must solve a real
 requirement.
 
-Git: branch `main`, two commits, **no remote configured**.
+Git: branch `main`, **no remote configured**.
 
 ---
 
@@ -77,6 +77,13 @@ Replaying a randomized failure:
 ```bash
 make seed SEED=8134472901 RUN=TestSomething
 RIVETDB_SEED=8134472901 go test -run TestSomething ./...
+```
+
+Normal tests never modify the committed seed corpus. After reproducing a
+failure, promote it explicitly:
+
+```bash
+make promote-seed PACKAGE=./internal/package TEST=TestSomething SEED=8134472901
 ```
 
 ---
@@ -166,17 +173,21 @@ Design is written before the code it governs.
 | Document | What it settles |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Layer boundaries, control plane, failure model, concurrency model, and §14's open questions |
-| [docs/invariants.md](docs/invariants.md) | All 47 safety properties, with the IDs assertions and tests reference |
+| [docs/invariants.md](docs/invariants.md) | Safety properties, with the IDs assertions and tests reference |
 | [docs/storage-engine.md](docs/storage-engine.md) | Phase 1 spec: byte-level on-disk formats, durability modes, crash-scenario table, test list |
 | [docs/correctness.md](docs/correctness.md) | Test strategy, reproducibility mechanism, and §5's explicit list of what is *not* tested |
 | [docs/roadmap.md](docs/roadmap.md) | The twelve phases and each gate |
 | [docs/design-decisions/](docs/design-decisions/) | ADRs. An ADR records a contested decision with the alternatives that lost, and is superseded rather than rewritten. |
 
 Decisions recorded: [ADR-0001](docs/design-decisions/0001-lsm-tree-over-b-tree.md)
-(LSM over B+ tree) and
+(LSM over B+ tree),
 [ADR-0002](docs/design-decisions/0002-range-partitioning-over-hashing.md)
-(range partitioning over consistent hashing). Both list the rejected option's
-genuine advantages, not strawmen — keep that standard.
+(range partitioning over consistent hashing), and
+[ADR-0003](docs/design-decisions/0003-explicit-internal-key-comparator.md)
+(explicit internal-key comparison), and
+[ADR-0004](docs/design-decisions/0004-wal-integrity-and-tail-recovery.md)
+(WAL integrity and tail recovery). They list the rejected options' genuine
+advantages, not strawmen — keep that standard.
 
 ---
 
@@ -189,7 +200,7 @@ first:
 1. Internal key encoding (§5.2) — with the ordering property tested against a
    reference comparator over randomized inputs.
 2. WAL record framing and replay (§5.1) — fragmentation across block
-   boundaries, resync after a corrupt record.
+   boundaries and strict stop at corruption. Complete.
 3. MemTable, then flush to SSTable.
 4. SSTable block builder/reader, Bloom filter, index, footer (§5.3).
 5. Manifest and version set (§5.4).
@@ -198,10 +209,11 @@ first:
 
 Two parts of the spec are load-bearing and should not be changed casually:
 
-- **§5.2's key encoding.** The complemented sequence number means a plain
-  `bytes.Compare` sorts user keys ascending and versions newest-first, so no
-  custom comparator exists anywhere. Phase 5's MVCC inherits it — "read at
-  timestamp T" becomes a seek to `(key, ^T)` with no format change.
+- **§5.2's key encoding and comparator.** The complemented sequence number
+  makes versions newest-first only after user-key equality is established.
+  Arbitrary-length user keys require the explicit comparator in ADR-0003; raw
+  `bytes.Compare` on encoded internal keys is forbidden. Phase 5's MVCC
+  inherits this contract and file format.
 - **§5.4's durability ordering.** Contents fsynced, *then the containing
   directory fsynced*, and only then referenced from the manifest. The directory
   fsync is the step usually forgotten, and without it a rename can be lost

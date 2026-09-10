@@ -15,7 +15,7 @@ find than to prevent.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: docs, module, build, CI, logging, test harness | ✅ |
-| 1 | Local LSM storage engine | ⬜ next |
+| 1 | Local LSM storage engine | 🔨 in progress (1A/1B) |
 | 2 | Single Raft group | ⬜ |
 | 3 | Durable replicated range (Raft + storage) | ⬜ |
 | 4 | Multi-Raft and range routing | ⬜ |
@@ -28,8 +28,9 @@ find than to prevent.
 | 11 | Performance engineering | ⬜ |
 | 12 | Optional AI operator | ⬜ |
 
-**What exists right now:** the Phase 0 foundation only. There is no storage
-engine, no Raft, no server and no client. Anything else described in
+**What exists right now:** Phase 0, the pre-Phase-1 internal-key contract and
+Phase 1A/1B storage primitives/WAL. There is no complete key-value engine, Raft,
+server or client. Anything else described in
 [architecture.md](architecture.md) is a design, clearly marked as such.
 
 ---
@@ -52,9 +53,9 @@ before there is anything complicated to gate.
   sleeping.
 - [`internal/invariant`](../internal/invariant) — named, typed assertions with
   an `Expensive()` tier for O(n) structural checks.
-- [`internal/testutil`](../internal/testutil) — seeded randomness with a
-  persisted failing-seed corpus, goroutine-leak detection, and bounded polling
-  helpers.
+- [`internal/testutil`](../internal/testutil) — seeded randomness with an
+  explicitly promoted failing-seed corpus, goroutine-leak detection, and
+  bounded polling helpers.
 - `make check` running format, vet, lint, tests and race tests; GitHub Actions
   running the same on Linux and macOS, plus a nightly job that explores fresh
   seeds.
@@ -95,6 +96,18 @@ tombstones · forward iterators · `Get`/`Put`/`Delete`/`Scan`.
 6. Iterators are unaffected by concurrent flush and compaction (STORAGE-10).
 7. A recorded baseline benchmark: sequential and random `Put`, point `Get`,
    `Scan`, with write amplification and space amplification measured.
+
+**Delivered so far — Phase 1A/1B:** authoritative internal-key and write-batch
+codecs; versioned 32 KiB WAL block framing with independent header/content
+CRC32C; bounded streaming reader; `SyncBatch` and `SyncNone`; concurrent append
+serialization; clean restart; explicit truncated-tail repair; every-offset
+truncation, systematic corruption, random-byte and failure-injection tests; WAL
+microbenchmark baseline. Evidence:
+[`phase-1ab.md`](evidence/phase-1ab.md).
+
+**Remaining before Phase 1 is complete:** MemTable, immutable MemTable, SSTable,
+Bloom filter, manifest/version set, flush, compaction, engine-level recovery,
+Get/Put/Delete/Scan, iterator snapshot tests and the full Phase 1 benchmark.
 
 ---
 
@@ -164,8 +177,8 @@ anomaly table stating exactly which anomalies are prevented and which are
 permitted, each entry backed by a test that demonstrates the behaviour · GC
 never removes a version a live reader could see · restart preserves visibility.
 
-**Also decides:** timestamp allocation (ADR-0003) and isolation level
-(ADR-0004).
+**Also decides:** timestamp allocation (ADR-0005) and isolation level
+(ADR-0006).
 
 ---
 

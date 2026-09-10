@@ -41,19 +41,19 @@ func TestSanitizeTestNameCannotEscapeCorpusDir(t *testing.T) {
 	}
 }
 
-func TestRecordFailingSeedAppendsAndDeduplicates(t *testing.T) {
-	// Not parallel: chdir is process-wide.
-	chdirTemp(t)
+func TestPromoteSeedAppendsAndDeduplicates(t *testing.T) {
+	t.Parallel()
 
-	path, err := recordFailingSeed("TestExample", 42)
+	packageDir := t.TempDir()
+	path, err := PromoteSeed(packageDir, "TestExample", 42)
 	if err != nil {
-		t.Fatalf("recordFailingSeed: %v", err)
+		t.Fatalf("PromoteSeed: %v", err)
 	}
-	if _, dupErr := recordFailingSeed("TestExample", 42); dupErr != nil {
-		t.Fatalf("recordFailingSeed (duplicate): %v", dupErr)
+	if _, dupErr := PromoteSeed(packageDir, "TestExample", 42); dupErr != nil {
+		t.Fatalf("PromoteSeed (duplicate): %v", dupErr)
 	}
-	if _, secondErr := recordFailingSeed("TestExample", -7); secondErr != nil {
-		t.Fatalf("recordFailingSeed (second seed): %v", secondErr)
+	if _, secondErr := PromoteSeed(packageDir, "TestExample", -7); secondErr != nil {
+		t.Fatalf("PromoteSeed (second seed): %v", secondErr)
 	}
 
 	data, err := os.ReadFile(path)

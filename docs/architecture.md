@@ -518,12 +518,13 @@ begins.
 internal/clock/       time abstraction: real and deterministic mock
 internal/invariant/   safety assertions with named violations
 internal/rlog/        structured logging and a test recorder
-internal/testutil/    seeds and failure corpus, leak detection, polling
+internal/testutil/    seeds and explicit failure-corpus promotion, leak detection, polling
+internal/storage/     key/batch primitives and Phase 1B WAL; no MemTable/SSTable
 docs/                 this document, invariants, roadmap, ADRs
 ```
 
-Planned, in roadmap order: `internal/storage` (with `wal`, `sstable`,
-`memtable`), `internal/raft`, `internal/multiraft`, `internal/rangedesc`,
+Planned, in roadmap order: the remainder of `internal/storage` (`wal`,
+`sstable`, `memtable`), `internal/raft`, `internal/multiraft`, `internal/rangedesc`,
 `internal/mvcc`, `internal/txn`, `internal/routing`, `internal/migration`,
 `internal/rebalance`, `internal/telemetry`, `internal/server`, plus `cmd/`,
 `api/proto`, `tests/` and `benchmarks/`.
@@ -537,7 +538,7 @@ Recorded here rather than silently deferred:
 1. **Timestamp allocation.** A single timestamp oracle is simple but is a
    cluster-wide bottleneck and a failure domain; per-node hybrid logical clocks
    remove it but bound the achievable isolation guarantees. Undecided; will
-   become ADR-0003 at Phase 5.
+   become ADR-0005 at Phase 5.
 2. **Read path.** Routing every read through Raft is obviously correct but
    costs a round trip. ReadIndex avoids the log write; leader leases avoid the
    round trip entirely but make safety depend on clock bounds, which §11 says

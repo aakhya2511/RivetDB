@@ -1,11 +1,14 @@
 # Design Note: Local Storage Engine (Phase 1)
 
-**Status:** design, not implemented. This note specifies what Phase 1 builds.
-It is written before the code so the on-disk format is a decision rather than
-an accident.
+**Status:** Phase 1A storage primitives and Phase 1B WAL implemented; the
+MemTable and later engine layers are not implemented. The internal-key contract
+in §5.2 and WAL contract in §5.1 have mechanical tests. The rest of this note
+specifies later Phase 1 work.
 
 **Related:** [ADR-0001](design-decisions/0001-lsm-tree-over-b-tree.md) ·
-[invariants.md](invariants.md) (STORAGE-1 … STORAGE-11) ·
+[ADR-0003](design-decisions/0003-explicit-internal-key-comparator.md) ·
+[ADR-0004](design-decisions/0004-wal-integrity-and-tail-recovery.md) ·
+[invariants.md](invariants.md) (STORAGE-1 … STORAGE-22) ·
 [architecture.md](architecture.md) §3
 
 ---
@@ -97,7 +100,8 @@ subtract.
 
 Fixed-width integers are **little-endian**, except where big-endian is required
 so that lexicographic byte order matches numeric order. Variable-length
-integers are LEB128. Checksums are **CRC32C** (Castagnoli), chosen for hardware
+integers are shortest-form unsigned LEB128; non-canonical alternatives are
+rejected. Checksums are **CRC32C** (Castagnoli), chosen for hardware
 acceleration on both amd64 and arm64.
 
 Files in the data directory:
@@ -112,51 +116,105 @@ Files in the data directory:
 
 ### 5.1 WAL
 
-A WAL segment is a sequence of 32 KiB blocks. Records are framed within blocks
-and fragmented across them when needed:
+A WAL segment is a sequence of 32 KiB blocks. Logical records are framed within
+blocks and fragmented across them when needed:
 
 ```text
- 0        4        6      7                      7+len
- ┌────────┬────────┬──────┬──────────────────────┐
- │ CRC32C │ length │ type │        payload       │
- │  u32   │  u16   │  u8  │       len bytes      │
- └────────┴────────┴──────┴──────────────────────┘
+ 0           4          8        10     11                    11+len
+ ┌───────────┬──────────┬────────┬──────┬──────────────────────┐
+ │content CRC│header CRC│ length │ type │       payload        │
+ │    u32    │   u32    │  u16   │  u8  │      len bytes       │
+ └───────────┴──────────┴────────┴──────┴──────────────────────┘
 
- type:  1 FULL    the whole record is in this fragment
-        2 FIRST   the first fragment of a record
-        3 MIDDLE  a middle fragment
-        4 LAST    the final fragment
+ type low nibble:  1 FULL    the whole record is in this fragment
+                   2 FIRST   the first fragment of a record
+                   3 MIDDLE  a middle fragment
+                   4 LAST    the final fragment
+ type high nibble: format version, 0 for this format
 ```
 
-The CRC covers the type byte and the payload. A block's trailing bytes are
-zero-padded when fewer than 7 remain, and a reader skips the padding.
+Both checksums are CRC32C. Header CRC covers the two encoded length bytes and
+the type byte. It is checked before length or type is trusted. Content CRC
+covers those same three bytes followed by the fragment payload. Thus corruption
+of either checksum, length, type/version or payload is detected. A block's
+trailing bytes are zero-padded when fewer than 11 remain; a reader accepts only
+zero padding there.
 
-*Why block framing rather than a plain length-prefixed stream:* corruption in a
-length-prefixed stream is unrecoverable, because a corrupt length makes every
-subsequent offset wrong. With fixed blocks, a reader that hits a bad record
-resynchronises at the next block boundary. This matters most for the manifest,
-where losing the tail loses the database.
+The independent header checksum is load-bearing. Without it, a corrupted
+length that extends beyond EOF is indistinguishable from a crash-truncated
+payload because the content checksum cannot be computed. Fixed blocks also
+bound every physical fragment and keep malformed lengths from moving parsing
+outside the current block. A corrupt fragment is never skipped or
+resynchronised past during recovery: the valid-prefix proof ends there.
+
+The maximum logical record is 64 MiB. Physical fragment length is additionally
+bounded by its containing block. Readers validate both limits before growing a
+buffer, so persisted length fields cannot cause overflow or unbounded
+allocation. Zero-length logical records are valid at the framing layer.
 
 The payload of a FULL/FIRST fragment is a write batch:
 
 ```text
- ┌───────────────┬───────┬──────────────────────────────┐
- │ first seq u64 │ count │  count × (kind, key, value)  │
- └───────────────┴───────┴──────────────────────────────┘
+ ┌───────────────┬───────────┬──────────────────────────────┐
+ │ first seq u64 │ count u32 │  count × (kind, key, value)  │
+ └───────────────┴───────────┴──────────────────────────────┘
 
  entry:  kind u8   (0 = delete, 1 = value)
          key       varint length + bytes
          value     varint length + bytes (absent when kind = delete)
 ```
 
-A batch is the unit of atomicity: replay applies all of it or none of it.
+The fixed fields are little-endian. A batch contains at least one entry. The
+caller supplies `first sequence`; entry `i` has sequence `first+i`, and a batch
+whose range would overflow `uint64` is rejected. Empty user keys and empty PUT
+values are valid. DELETE has no value-length field, so it is distinct from PUT
+of an empty value. A batch is the unit of atomicity: decoding produces all
+entries or an error, and replay applies all of it or none of it.
 
-**Recovery** reads segments in order, applies each intact batch to a fresh
-MemTable, and stops at the first record that fails its checksum or is
-incomplete. Everything after that point is discarded, because a crash can only
-have truncated the tail (STORAGE-3). A checksum failure in the *middle* of a
-segment is different — that is corruption, not truncation — and is reported as
-an error rather than silently truncated (STORAGE-2).
+**Recovery and offsets.** Every returned logical record includes the physical
+offset of its first fragment header and the exclusive end offset of its last
+fragment. Recovery returns records in that order and reports `valid end`, the
+exclusive file offset through the last complete logical record. It streams
+records to a callback and does not load the whole segment.
+
+Exact EOF after a complete record is clean. EOF in a header, authenticated
+payload, block padding, or fragmented logical record is a recoverable truncated
+tail: the incomplete logical record is not returned and `valid end` points to
+its first fragment (or the preceding record for incomplete padding). A checksum
+failure, invalid type/version, nonzero padding, impossible fragment sequence or
+authenticated out-of-block length is corruption at any position, including
+the file tail. Recovery stops and returns the error; it never skips the region
+or destroys evidence.
+
+Reading never mutates a WAL. Tail repair is explicit and accepts a recovery
+result only after rescanning the unchanged file. It truncates to `valid end`
+and fsyncs the file. Corrupt WALs are never repairable through this operation.
+After repair, a writer may append without resurrecting discarded fragment
+bytes. Repair requires exclusive ownership of the database directory and no
+open WAL writer; Phase 1's `LOCK` file supplies that cross-process exclusion
+when the engine is assembled.
+
+**Writer and durability contract.** A writer serialises concurrent `Append`
+calls. It handles short writes until the fragment is complete. Any write or
+sync failure poisons the writer so later appends cannot pretend the stream is
+healthy; `Close` remains available and is idempotent. Append and Sync after
+Close return a sentinel error.
+
+`SyncBatch` is the default: `Append` acknowledges only after all fragments and
+padding have been written and the WAL file's `fsync` succeeds. For a newly
+created segment, its first durability boundary then fsyncs the containing
+directory before acknowledging, so the filename itself survives a crash.
+`SyncNone` acknowledges after the complete logical record has reached the OS
+through successful writes; a later explicit `Sync` establishes a durability
+boundary for all prior successful appends. `SyncInterval` remains deferred
+because it requires asynchronous group-commit policy not needed in Phase 1B.
+
+The contract assumes successful writes update the file in order, `fsync`
+persists preceding file data and size metadata across process/machine restart,
+and the filesystem/device honors that success. `Close` alone is not a
+durability boundary. Hardware that loses or silently rewrites successfully
+synced data is outside this guarantee; checksums detect corruption except for
+the inherent possibility of a CRC collision.
 
 ### 5.2 Internal keys
 
@@ -170,18 +228,52 @@ Every key stored in a MemTable or SSTable carries a trailer:
    kind      0 = deletion (tombstone), 1 = value
 ```
 
-The complement is the point. With it, a plain `bytes.Compare` sorts by user key
-ascending and, within one user key, by sequence **descending** — newest first.
-So no custom comparator is needed anywhere: the ordering invariant (STORAGE-4)
-is checkable with `bytes.Compare`, and a seek to `(key, ^seq)` lands directly on
-the newest version visible at that sequence.
+This encoding is self-parsing because the trailer is fixed-width, but it is
+**not** order-preserving under a raw `bytes.Compare`. For example, with
+sequence 0 and deletion kind, the encoding of user key `"a"` begins
+`61 ff`, while the encoding of user key `"aa"` begins `61 61`. Raw comparison
+therefore reverses the user-key order. The trailer of a shorter key must never
+be compared with a byte remaining in a longer, prefix-related user key.
+
+All sorted components use one explicit internal-key comparator:
+
+1. compare user keys with `bytes.Compare`;
+2. if equal, compare sequence numbers descending (higher/newer first);
+3. if still equal, compare kind ascending (`deletion` before `value`).
+
+The third step makes the comparator a strict total order even though sequence
+numbers are unique per write and a valid engine state ordinarily cannot have
+both kinds at one `(user key, sequence)`. The complemented big-endian sequence
+stays in the encoded representation: it gives the desired byte order within an
+already-established equal-user-key group and keeps the format compact and easy
+to inspect. It does not replace the comparator. These rules are invariants
+STORAGE-12 through STORAGE-15 and are mechanically enforced before Phase 1.
 
 This is also the hook for MVCC (R5). In Phase 5 commit timestamps map onto the
-sequence space, and "read at timestamp T" becomes "seek to `(key, ^T)` and take
-the first entry" — no change to the file format.
+sequence space. A snapshot lookup at `T` constructs logical seek key
+`(user key, T, deletion)` and takes the comparator lower bound; using the
+minimum kind ensures a value or tombstone exactly at `T` is not skipped. All
+versions of one user key are contiguous, so iteration and skipping older
+versions compare the decoded user-key field. No file-format change is needed.
 
 A tombstone is an ordinary entry with `kind = 0` and no value. It shadows older
 versions until compaction can prove they are unreachable.
+
+**Range boundaries are user keys.** A range `[a, m)` contains every internal
+version whose user key is in that interval. Split selection, routing, scan
+bounds and shared-SSTable filtering never compare a range boundary with an
+encoded internal key. A split therefore cannot divide the versions of one
+logical key (STORAGE-16).
+
+**SSTable comparator contract.** Data blocks and sparse indexes are ordered by
+the explicit comparator. Phase 1 initially stores each data block's full last
+internal key in the index. A seek binary-searches for the first index key not
+less than its logical internal seek key, then uses the same comparator within
+that block. Short separators are optional; if later added, they must be
+constructed at the user-key layer and proved to preserve these lower-bound
+semantics. Lower range bounds use `(user key, max sequence, deletion)`; upper
+bounds are enforced by comparing decoded user keys, which also handles a bound
+with no finite bytewise successor such as an all-`ff` key.
 
 ### 5.3 SSTable
 
@@ -232,10 +324,12 @@ independent hashes at the cost of one. **False negatives are impossible by
 construction** (STORAGE-8); false positives cost a wasted block read and
 nothing else.
 
-**Index block.** One entry per data block: the block's last key (or a shorter
-separator between it and the next block's first key, which shrinks the index)
-and the block's offset and length. The index is sparse — it locates a block,
-not a key — so it stays small enough to keep resident.
+**Index block.** One entry per data block: initially the block's full last
+internal key, plus the block's offset and length. The index is sparse — it
+locates a block, not a key — so it stays small enough to keep resident. Index
+binary search uses the §5.2 internal-key comparator, never raw encoded-byte
+comparison. A future user-key-aware shorter separator is permitted only with a
+proof that it preserves lower-bound lookup semantics.
 
 **Footer.** Fixed size, read with one 48-byte pread from the end of the file:
 
@@ -291,12 +385,12 @@ directory fsynced, and only then is the file referenced from the manifest
 |---|---|---|---|
 | `SyncNone` | write to the OS page cache, no fsync | recent writes | bulk load, benchmarks |
 | `SyncBatch` | fsync before acknowledging each batch | nothing | Raft log, default |
-| `SyncInterval(d)` | fsync at most every `d` | up to `d` of writes | throughput-oriented |
+| `SyncInterval(d)` | deferred; future asynchronous group commit | up to `d` of writes | throughput-oriented |
 
 `SyncBatch` is the default because the engine's main consumer is a Raft log,
-where "acknowledged" must mean "durable" or RAFT-10 is violated. The other
-modes exist so that benchmarks can quantify what fsync costs, and the mode in
-use is always reported alongside a benchmark number.
+where "acknowledged" must mean "durable" or RAFT-10 is violated. `SyncNone`
+exists so benchmarks and bulk loading can quantify or accept the fsync tradeoff;
+the mode in use is always reported alongside a benchmark number.
 
 Process-crash versus machine-crash is distinguished explicitly: a write in the
 page cache survives a process crash but not a power loss, and a document that
@@ -306,7 +400,7 @@ conflates the two is describing a guarantee it does not have.
 
 | Scenario | Handling | Invariant |
 |---|---|---|
-| Crash mid-WAL-append | the torn trailing record fails its checksum and is truncated; earlier records replay | STORAGE-3 |
+| Crash mid-WAL-append | a structurally incomplete trailing record is reported as a repairable tail; earlier complete records replay | STORAGE-3 |
 | Crash after WAL fsync, before MemTable apply | replay re-applies the batch | STORAGE-1 |
 | Crash during flush | the partial SSTable is never in the manifest, so it is ignored and deleted; the WAL still holds the data | STORAGE-9, STORAGE-11 |
 | Crash during compaction | inputs remain live because the version edit was never applied; the partial output is orphaned and removed | STORAGE-7 |
@@ -413,8 +507,8 @@ The Phase 1 gate. Every item is a test that must exist and pass.
 **Unit**
 - Internal key encode/decode round-trip; ordering property verified over
   randomized key and sequence pairs against a reference comparator.
-- WAL record framing: fragmentation across block boundaries, padding, resync
-  after a corrupt record.
+- WAL record framing: fragmentation across block boundaries, padding, strict
+  stop at corruption, and bounded decoding.
 - Block builder and reader: prefix compression, restart points, binary search
   within a block.
 - Bloom filter: no false negatives over a large randomized key set; measured

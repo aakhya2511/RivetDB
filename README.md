@@ -8,15 +8,15 @@ Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 0 of 12 — foundation only.**
+> **Project status: Phase 1 in progress — Phase 1A/1B complete.**
 >
-> What exists today is the documented design, the build and CI gate, and the
-> testing foundation (deterministic clock, seeded randomness with a persisted
-> failing-seed corpus, goroutine-leak detection, structured logging, invariant
-> assertions).
+> What exists today is the documented design, the build and CI gate, the
+> testing foundation, the authoritative internal-key/write-batch primitives,
+> and a durable checksummed WAL with streaming recovery and explicit tail
+> repair.
 >
-> **There is no storage engine, no Raft, no server and no client yet.** The
-> storage engine is next. Everything else described below is a design with a
+> **There is no complete key-value engine, Raft, server or client yet.** The
+> MemTable is next. Everything else described below is a design with a
 > written specification, not working code — see [Roadmap](docs/roadmap.md) for
 > exactly what is built and what is not.
 >
@@ -132,8 +132,9 @@ green pipeline.
 
 ### Reproducing a randomized failure
 
-Randomized tests log their seed, and a failing seed is appended to
-`testdata/seeds/` next to the package that failed. Replay it with:
+Randomized tests log their seed. A failure prints exact commands to replay it
+and, after reproduction, explicitly promote it into `testdata/seeds/` next to
+the package that failed. Replay it with:
 
 ```bash
 make seed SEED=8134472901 RUN=TestSomething
@@ -141,8 +142,15 @@ make seed SEED=8134472901 RUN=TestSomething
 RIVETDB_SEED=8134472901 go test -run TestSomething ./...
 ```
 
+After reproducing the failure, promote it deliberately:
+
+```bash
+make promote-seed PACKAGE=./internal/storage TEST=TestSomething SEED=8134472901
+```
+
 Committed seeds are replayed by the tests that recorded them, so a bug found
-once by chance becomes a deterministic regression test.
+once by chance becomes a deterministic regression test without ordinary test
+or CI execution modifying the working tree.
 
 ---
 
@@ -154,7 +162,8 @@ tested honestly without it.
 | Package | Purpose |
 |---|---|
 | [`internal/clock`](internal/clock) | `Clock` interface with a system implementation and a deterministic `Mock`. Raft elections, lease expiry, transaction timeouts and rebalancer cooldowns will take a `Clock`, so those subsystems can be tested in microseconds instead of by sleeping. |
-| [`internal/testutil`](internal/testutil) | Seeded randomness with a persisted failing-seed corpus, goroutine-leak detection, bounded polling helpers. |
+| [`internal/testutil`](internal/testutil) | Seeded randomness with an explicitly promoted failing-seed corpus, goroutine-leak detection, bounded polling helpers. |
+| [`internal/storage`](internal/storage) | Internal-key and write-batch codecs plus the Phase 1B WAL: dual CRC32C framing, bounded streaming recovery, durability modes and explicit safe-tail repair. No MemTable or SSTable yet. |
 | [`internal/invariant`](internal/invariant) | Named, typed assertions so a violation identifies itself, plus an `Expensive()` tier for O(n) structural checks enabled in tests and chaos runs. |
 | [`internal/rlog`](internal/rlog) | Structured logging with canonical attribute keys (`node`, `range`, `term`, `index`, `txn`), context propagation, runtime-adjustable level, and a recorder so tests assert on structured events rather than substrings. |
 
