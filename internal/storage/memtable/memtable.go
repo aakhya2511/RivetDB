@@ -2,6 +2,7 @@ package memtable
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"math/bits"
 	"math/rand/v2"
@@ -79,13 +80,57 @@ func (m *MemTable) Insert(key storage.InternalKey, value []byte) error {
 	if key.Kind() == storage.KindDelete && len(value) != 0 {
 		return ErrDeleteHasValue
 	}
+	m.insertLocked(key, value)
+	m.validateIfEnabledLocked()
+	return nil
+}
+
+// ApplyBatch atomically inserts every mutation with its assigned contiguous
+// sequence. Validation completes before the write lock is taken; readers see
+// either none or all of the batch.
+func (m *MemTable) ApplyBatch(batch storage.WriteBatch) error {
+	if len(batch.Mutations) == 0 {
+		return storage.ErrEmptyBatch
+	}
+	count := uint64(len(batch.Mutations)) //nolint:gosec // slice length is non-negative
+	if batch.FirstSequence > math.MaxUint64-(count-1) {
+		return storage.ErrSequenceOverflow
+	}
+	type stagedEntry struct {
+		key   storage.InternalKey
+		value []byte
+	}
+	staged := make([]stagedEntry, len(batch.Mutations))
+	for index, mutation := range batch.Mutations {
+		key, err := storage.NewInternalKey(mutation.Key, batch.FirstSequence+uint64(index), mutation.Kind) //nolint:gosec // batch sequence range checked above
+		if err != nil {
+			return fmt.Errorf("mutation %d key: %w", index, err)
+		}
+		if mutation.Kind == storage.KindDelete && len(mutation.Value) != 0 {
+			return fmt.Errorf("mutation %d: %w", index, ErrDeleteHasValue)
+		}
+		staged[index] = stagedEntry{key: key, value: mutation.Value}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.frozen {
+		return ErrFrozen
+	}
+	for _, entry := range staged {
+		m.insertLocked(entry.key, entry.value)
+	}
+	m.validateIfEnabledLocked()
+	return nil
+}
+
+func (m *MemTable) insertLocked(key storage.InternalKey, value []byte) {
 
 	var predecessors [maxHeight]*node
 	candidate := m.lowerBoundLocked(key, predecessors[:])
 	if candidate != nil && storage.CompareInternal(candidate.key, key) == 0 {
 		m.replaceValueLocked(candidate, value)
-		m.validateIfEnabledLocked()
-		return nil
+		return
 	}
 
 	ownedKey, keyBytes := cloneKey(key)
@@ -116,8 +161,6 @@ func (m *MemTable) Insert(key storage.InternalKey, value []byte) error {
 
 	m.count++
 	m.size = saturatingAdd(m.size, nodeSize(n))
-	m.validateIfEnabledLocked()
-	return nil
 }
 
 // Get returns an exact internal-key match. Returned bytes do not alias table

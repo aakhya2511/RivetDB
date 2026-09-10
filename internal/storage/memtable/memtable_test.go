@@ -83,6 +83,50 @@ func TestDeleteDiffersFromEmptyValue(t *testing.T) {
 	}
 }
 
+func TestApplyBatchAtomicValidationAndSequences(t *testing.T) {
+	t.Parallel()
+	table := deterministicTable()
+	invalid := storage.WriteBatch{FirstSequence: 40, Mutations: []storage.Mutation{
+		{Key: []byte("first"), Value: []byte("value"), Kind: storage.KindValue},
+		{Key: []byte("bad"), Value: []byte("not-empty"), Kind: storage.KindDelete},
+	}}
+	if err := table.ApplyBatch(invalid); !errors.Is(err, ErrDeleteHasValue) {
+		t.Fatalf("ApplyBatch invalid error = %v, want ErrDeleteHasValue", err)
+	}
+	if table.Len() != 0 {
+		t.Fatalf("invalid batch partially applied: Len = %d", table.Len())
+	}
+
+	valid := storage.WriteBatch{FirstSequence: 40, Mutations: []storage.Mutation{
+		{Key: []byte("same"), Value: []byte("new"), Kind: storage.KindValue},
+		{Key: []byte("same"), Kind: storage.KindDelete},
+		{Key: []byte("other"), Value: []byte("value"), Kind: storage.KindValue},
+	}}
+	if err := table.ApplyBatch(valid); err != nil {
+		t.Fatalf("ApplyBatch valid: %v", err)
+	}
+	entries := collect(t, table.Iterator())
+	if len(entries) != 3 {
+		t.Fatalf("valid batch entries = %d, want 3", len(entries))
+	}
+	seen := map[uint64]bool{}
+	for _, entry := range entries {
+		seen[entry.Key.Sequence()] = true
+	}
+	for sequence := uint64(40); sequence <= 42; sequence++ {
+		if !seen[sequence] {
+			t.Fatalf("assigned sequence %d missing", sequence)
+		}
+	}
+	table.Freeze()
+	if err := table.ApplyBatch(storage.WriteBatch{FirstSequence: 43, Mutations: []storage.Mutation{{Key: []byte("late"), Kind: storage.KindValue}}}); !errors.Is(err, ErrFrozen) {
+		t.Fatalf("ApplyBatch frozen error = %v, want ErrFrozen", err)
+	}
+	if table.Len() != 3 {
+		t.Fatalf("frozen batch changed table: Len = %d", table.Len())
+	}
+}
+
 func TestBinaryPrefixAndVersionOrdering(t *testing.T) {
 	t.Parallel()
 

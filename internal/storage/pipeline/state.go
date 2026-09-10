@@ -1,0 +1,88 @@
+package pipeline
+
+import (
+	"fmt"
+
+	"github.com/rivetdb/rivetdb/internal/storage/memtable"
+	"github.com/rivetdb/rivetdb/internal/storage/sstable"
+)
+
+// FlushState is one explicit state in an immutable generation's lifecycle.
+type FlushState uint8
+
+const (
+	StateActive FlushState = iota
+	StateQueued
+	StateFlushing
+	StateFailed
+	StateDurable
+)
+
+func (s FlushState) String() string {
+	switch s {
+	case StateActive:
+		return "active"
+	case StateQueued:
+		return "queued"
+	case StateFlushing:
+		return "flushing"
+	case StateFailed:
+		return "failed"
+	case StateDurable:
+		return "durable"
+	default:
+		return fmt.Sprintf("unknown(%d)", s)
+	}
+}
+
+type generation struct {
+	id          uint64
+	table       *memtable.MemTable
+	state       FlushState
+	fileNumber  uint64
+	haveSeq     bool
+	smallestSeq uint64
+	largestSeq  uint64
+	flushErr    error
+	ambiguous   bool
+}
+
+func (g *generation) transition(next FlushState) error {
+	valid := g.state == StateActive && next == StateQueued ||
+		g.state == StateQueued && next == StateFlushing ||
+		g.state == StateFlushing && (next == StateDurable || next == StateFailed) ||
+		g.state == StateFailed && next == StateQueued
+	if !valid {
+		return fmt.Errorf("%w: generation %d %s -> %s", ErrInvalidTransition, g.id, g.state, next)
+	}
+	g.state = next
+	return nil
+}
+
+// FlushOutput identifies one physically durable, validated SSTable. It is not
+// logically installed until Phase 1G records it in a manifest.
+type FlushOutput struct {
+	Generation  uint64
+	FileNumber  uint64
+	SmallestSeq uint64
+	LargestSeq  uint64
+	Metadata    sstable.Metadata
+	Path        string
+}
+
+// Stats is a point-in-time copy of pipeline lifecycle counters and memory.
+type Stats struct {
+	ActiveGeneration   uint64
+	ActiveBytes        uint64
+	ImmutableCount     int
+	ImmutableBytes     uint64
+	NextSequence       uint64
+	SequenceExhausted  bool
+	Rotations          uint64
+	Flushes            uint64
+	FlushFailures      uint64
+	FlushNanos         uint64
+	SSTableBytes       uint64
+	BackpressureEvents uint64
+	BackpressureNanos  uint64
+}

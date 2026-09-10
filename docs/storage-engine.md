@@ -1,9 +1,9 @@
 # Design Note: Local Storage Engine (Phase 1)
 
 **Status:** Phase 1A storage primitives, Phase 1B WAL, Phase 1C MemTable, Phase
-1D SSTable format/writer and Phase 1E production reader are implemented and
-mechanically tested. Later engine layers are not implemented. The rest of this
-note specifies later Phase 1 work.
+1D SSTable format/writer, Phase 1E production reader and Phase 1F MemTable
+rotation/flush pipeline are implemented and mechanically tested. Later engine
+layers are not implemented. The rest of this note specifies later Phase 1 work.
 
 **Related:** [ADR-0001](design-decisions/0001-lsm-tree-over-b-tree.md) ·
 [ADR-0003](design-decisions/0003-explicit-internal-key-comparator.md) ·
@@ -11,7 +11,8 @@ note specifies later Phase 1 work.
 [ADR-0005](design-decisions/0005-memtable-skip-list.md) ·
 [ADR-0006](design-decisions/0006-sstable-physical-format.md) ·
 [ADR-0007](design-decisions/0007-sstable-reader-validation-and-seek.md) ·
-[invariants.md](invariants.md) (STORAGE-1 … STORAGE-47) ·
+[ADR-0008](design-decisions/0008-memtable-rotation-and-flush-lifecycle.md) ·
+[invariants.md](invariants.md) (STORAGE-1 … STORAGE-59) ·
 [architecture.md](architecture.md) §3
 
 ---
@@ -153,6 +154,41 @@ stable after freeze. Saturating addition prevents wraparound. Reader-owned
 iterator snapshots are excluded. `ReachedSize(target)` reports whether a later
 rotation policy should act, but Phase 1C performs no automatic rotation or
 flush.
+
+### 4.2 Phase 1F write and flush pipeline
+
+`internal/storage/pipeline` owns one `SyncBatch` WAL writer, one active mutable
+MemTable and one bounded FIFO of frozen generations. One serialized admission
+token orders concurrent batches and assigns their contiguous sequence ranges.
+The order is validate and assign, encode, WAL append/fsync, atomic MemTable
+`ApplyBatch`, acknowledgement, then a size check. A batch reaching or crossing
+the configured `SizeBytes` target rotates only after the whole batch is
+applied, so no batch spans generations and one batch may exceed the target.
+
+Rotation freezes the old generation, assigns it a stable in-memory SSTable
+file number, installs exactly one successor and queues the old generation under
+the coordinator mutex. Generation and file allocators are deliberately not
+restart-safe before Phase 1G. One background worker claims only the FIFO head
+and moves it through `queued → flushing → durable` or `failed`. It streams the
+frozen iterator through the Phase 1D writer and does not remove the generation
+until Phase 1E reopens the published file and proves exact ordered equality.
+
+When the immutable count reaches its configured bound, the next writer waits
+on a bounded notification channel before WAL append. Cancellation during that
+wait returns without a durable effect; after append begins, cancellation cannot
+misreport an accepted write. A failed FIFO head is retained and blocks later
+flushes. Explicit retry preserves generation/file identity and is permitted
+only when publication is not ambiguous. A final `.sst` observed after failure
+is never automatically removed or overwritten; `.tmp` reconciliation is a
+future manifest/startup-cleanup concern.
+
+Phase 1F uses a flat directory: `000000000001.wal`, `%012d.sst.tmp` and
+`%012d.sst`. It never creates a manifest and never truncates or deletes the
+WAL. Clean shutdown first excludes in-flight/new writes, drains generations
+already queued, joins the worker, closes the WAL and leaves a nonempty active
+MemTable WAL-backed for replay. Replay intentionally reapplies all retained
+history through `MemTable.ApplyBatch`; deciding which flushed history may be
+skipped requires Phase 1G manifest authority.
 
 ## 5. On-disk format
 

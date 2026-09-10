@@ -462,6 +462,12 @@ The general shape:
   capacity, and a full queue applies backpressure rather than growing. An
   unbounded queue converts an overload into an out-of-memory crash, which is a
   much worse failure than a rejected request.
+- **Storage flush ownership.** Phase 1F serializes sequence assignment,
+  synchronous WAL append, atomic MemTable batch apply and rotation with one
+  admission token. One separate worker owns the bounded FIFO immutable queue;
+  it performs Phase 1D publication without holding write admission, retains a
+  failed head, and joins on shutdown. Phase 1G will add manifest authority
+  without moving sequence assignment into a per-range interface.
 - **Explicit lifecycle.** Every component that starts goroutines exposes
   `Close`, cancels a context, and waits for its goroutines to exit.
   [`testutil.NoLeaks`](../internal/testutil/leak.go) enforces this in tests: a
@@ -519,12 +525,12 @@ internal/clock/       time abstraction: real and deterministic mock
 internal/invariant/   safety assertions with named violations
 internal/rlog/        structured logging and a test recorder
 internal/testutil/    seeds and explicit failure-corpus promotion, leak detection, polling
-internal/storage/     key/batch, WAL, MemTable and SSTable writer; no SSTable reader
+internal/storage/     key/batch, WAL, MemTable, SSTable writer/reader and flush pipeline
 docs/                 this document, invariants, roadmap, ADRs
 ```
 
-Planned, in roadmap order: the remainder of `internal/storage` (SSTable reader,
-Bloom filter, manifest, compaction and engine coordination), `internal/raft`,
+Planned, in roadmap order: the remainder of `internal/storage` (Bloom filter,
+manifest, compaction and final engine coordination), `internal/raft`,
 `internal/multiraft`, `internal/rangedesc`,
 `internal/mvcc`, `internal/txn`, `internal/routing`, `internal/migration`,
 `internal/rebalance`, `internal/telemetry`, `internal/server`, plus `cmd/`,

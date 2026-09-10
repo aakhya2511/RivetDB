@@ -73,6 +73,18 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-45 | Every trusted index boundary equals its data block's reconstructed last key, and metadata counts and bounds equal the fully validated data stream. | verified (Phase 1E) |
 | STORAGE-46 | Tombstones are returned as stored entries and are never silently converted to absence by the SSTable reader. | verified (Phase 1E) |
 | STORAGE-47 | An SSTable reader never modifies, skips or repairs corrupt immutable bytes; corruption and I/O failures are surfaced to its caller. | verified (Phase 1E) |
+| STORAGE-48 | A write acknowledged by the Phase 1F pipeline crossed the synchronous WAL durability boundary before becoming visible in its MemTable. | verified (Phase 1F) |
+| STORAGE-49 | Every accepted batch is applied wholly to exactly one active MemTable generation under one authoritative contiguous sequence assignment. | verified (Phase 1F) |
+| STORAGE-50 | Exactly one mutable active MemTable exists while writes are accepted; rotation atomically freezes it, installs one successor and queues the frozen generation. | verified (Phase 1F) |
+| STORAGE-51 | A frozen MemTable never becomes mutable, and a single immutable generation cannot have two concurrent or successful flushes. | verified (Phase 1F) |
+| STORAGE-52 | A successful flush SSTable contains exactly every immutable MemTable entry once in `CompareInternal` order, including versions and tombstones. | verified (Phase 1F) |
+| STORAGE-53 | An immutable generation remains live until Phase 1D durable publication and Phase 1E exact-content validation succeed. | verified (Phase 1F) |
+| STORAGE-54 | Flush failure preserves immutable state, stops later FIFO flushes and is surfaced; ambiguous final files are never automatically deleted or overwritten. | verified (Phase 1F) |
+| STORAGE-55 | The immutable backlog is bounded, and waiting for capacity is cancellable only before WAL append without busy waiting. | verified (Phase 1F) |
+| STORAGE-56 | Phase 1F never deletes or truncates WAL data because no manifest yet authorizes reclamation. | verified (Phase 1F) |
+| STORAGE-57 | Concurrent writes and rotations assign every acknowledged batch to exactly one monotonically ordered generation and non-overlapping sequence range. | verified (Phase 1F) |
+| STORAGE-58 | Shutdown stops and joins the flush worker, closes the WAL and leaves every acknowledged write recoverable from WAL or a retained representation. | verified (Phase 1F) |
+| STORAGE-59 | WAL replay validates and atomically reapplies complete batches through the same MemTable application contract, without interpreting flushed-state authority. | verified (Phase 1F) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -114,6 +126,16 @@ full/range iteration, hostile handles and varints, rechecksummed restart
 corruption, every-byte and seeded random mutations, every-offset truncation,
 injected I/O/short-read/close failures, caller ownership, concurrent reads and
 Close races. The opt-in 100,000-entry gate exercises 1,697 blocks.
+
+STORAGE-48 through STORAGE-59 are enforced by
+[`pipeline_test.go`](../internal/storage/pipeline/pipeline_test.go) and the
+atomic batch cases in
+[`memtable_test.go`](../internal/storage/memtable/memtable_test.go). The suite
+checks WAL-before-apply ordering, failure-before-WAL non-effects, batches that
+cross the rotation target, explicit lifecycle transitions, stable FIFO retry
+identity, bounded cancellable backpressure, post-rename ambiguity, concurrent
+accepted-write accounting, graceful shutdown, retained-WAL replay and exact
+Phase 1E validation of real Phase 1D flush outputs.
 
 ## Raft
 

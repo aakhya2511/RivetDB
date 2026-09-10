@@ -36,6 +36,7 @@ Phase:    which phase this governs
 | [0005](0005-memtable-skip-list.md) | Skip list for the MemTable ordered structure | Accepted | 1C |
 | [0006](0006-sstable-physical-format.md) | SSTable block, index, footer and publication format | Accepted | 1D |
 | [0007](0007-sstable-reader-validation-and-seek.md) | SSTable reader validation and seek strategy | Accepted | 1E |
+| [0008](0008-memtable-rotation-and-flush-lifecycle.md) | MemTable rotation and flush lifecycle | Accepted | 1F |
 
 ## Planned
 

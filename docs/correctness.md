@@ -4,8 +4,8 @@ A distributed database is only as credible as the evidence that it is correct.
 This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
-**Current scope:** Phase 0, the pre-Phase-1 key contract and Phase 1A/1B storage
-primitives/WAL exist. No database consistency claims are made because there is
+**Current scope:** Phase 0, the pre-Phase-1 key contract and Phase 1A through
+1F storage units exist. No database consistency claims are made because there is
 not yet a complete key-value engine. This document describes the strategy the
 remaining implementation will be held to; sections marked *planned* are plans,
 not results.
@@ -107,6 +107,19 @@ sequences. Tests rewrite semantic fields with valid checksums, mutate every byte
 of a manageable table, run a separate seeded corruption campaign, truncate at
 every offset, inject short reads and I/O failures, race concurrent operations
 with Close, and explicitly validate a 100,000-entry/1,697-block table.
+
+Phase 1F connects the WAL, MemTable and SSTable without claiming manifest
+authority. Deterministic tests stop flushes to fill the bounded immutable
+queue, prove cancellation occurs before another WAL append, then release the
+worker and prove progress. A 64-writer accounting oracle matches every accepted
+sequence/key to exactly one FIFO flush. Lifecycle transitions run through a
+40,000-operation seeded model using three fixed seeds and one fresh seed,
+including every invalid transition. Failure models cover WAL append/sync
+classification and SSTable write, file-sync,
+close, rename, directory-sync and reader-validation outcomes; failed or
+ambiguous generations remain retained. Real-filesystem tests reopen every
+flush through the production reader and replay the never-reclaimed WAL,
+including the crash boundary after WAL durability and before MemTable apply.
 
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the
