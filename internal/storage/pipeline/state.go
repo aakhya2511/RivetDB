@@ -106,3 +106,20 @@ type Stats struct {
 	BackpressureEvents uint64
 	BackpressureNanos  uint64
 }
+
+// ReadGeneration is one MemTable participating in a coherent read view.
+// Table remains valid for the lifetime of the Pipeline.
+type ReadGeneration struct {
+	Generation uint64
+	FileNumber uint64
+	Table      *memtable.MemTable
+}
+
+// ReadSnapshot is an immutable description of the MemTable side of one read.
+type ReadSnapshot struct {
+	Active            ReadGeneration
+	Immutables        []ReadGeneration
+	LatestSequence    uint64
+	HaveSequence      bool
+	SequenceExhausted bool
+}

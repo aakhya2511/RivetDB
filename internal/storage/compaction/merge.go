@@ -9,10 +9,19 @@ import (
 	"github.com/rivetdb/rivetdb/internal/storage/sstable"
 )
 
+// EntryIterator is the common ordered-entry contract shared by compaction and
+// integrated read-side merging.
+type EntryIterator interface {
+	Next() bool
+	Entry() (sstable.Entry, bool)
+	Error() error
+	Close() error
+}
+
 // MergeInput identifies one ordered child iterator.
 type MergeInput struct {
 	FileNumber uint64
-	Iterator   *sstable.Iterator
+	Iterator   EntryIterator
 }
 type cursor struct {
 	entry   sstable.Entry
@@ -51,6 +60,7 @@ type MergeIterator struct {
 	heap          cursorHeap
 	inputs        []MergeInput
 	current       sstable.Entry
+	currentFile   uint64
 	valid, closed bool
 	err           error
 }
@@ -92,7 +102,7 @@ func (m *MergeIterator) Next() bool {
 		m.err = ErrInputCorrupt
 		return false
 	}
-	m.current, m.valid = item.entry, true
+	m.current, m.currentFile, m.valid = item.entry, item.input.FileNumber, true
 	if item.input.Iterator.Next() {
 		entry, ok := item.input.Iterator.Entry()
 		if !ok {
@@ -107,6 +117,14 @@ func (m *MergeIterator) Next() bool {
 		return false
 	}
 	return true
+}
+
+// SourceFileNumber identifies the child that produced the current entry.
+func (m *MergeIterator) SourceFileNumber() (uint64, bool) {
+	if m == nil || !m.valid || m.closed {
+		return 0, false
+	}
+	return m.currentFile, true
 }
 func (m *MergeIterator) Entry() (sstable.Entry, bool) {
 	if m == nil || !m.valid || m.closed {

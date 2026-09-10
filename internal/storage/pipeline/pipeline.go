@@ -34,6 +34,10 @@ type Options struct {
 	Logger          *slog.Logger
 	FileAllocator   FileAllocator
 	TableInstaller  TableInstaller
+	// RecoveredTable is WAL-replayed state installed as the initial active
+	// MemTable. Open never writes its contents back to the WAL.
+	RecoveredTable    *memtable.MemTable
+	SequenceExhausted bool
 }
 
 type durableWAL interface {
@@ -120,7 +124,9 @@ func Open(options Options) (*Pipeline, error) {
 
 func validateOptions(options Options) error {
 	if options.Directory == "" || options.MemTableBytes == 0 || options.MaxImmutables < 1 ||
-		options.FirstGeneration > math.MaxUint64-1 || options.FirstFileNumber > sstable.MaxFileNumber {
+		options.FirstGeneration > math.MaxUint64-1 || options.FirstFileNumber > sstable.MaxFileNumber ||
+		options.RecoveredTable != nil && options.RecoveredTable.Frozen() ||
+		options.SequenceExhausted && options.NextSequence != 0 {
 		return ErrInvalidOptions
 	}
 	if info, err := os.Stat(options.Directory); err != nil || !info.IsDir() {
@@ -152,12 +158,31 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 		writeToken: make(chan struct{}, 1), wake: make(chan struct{}, 1), changed: make(chan struct{}, 1),
 		ctx: ctx, cancel: cancel, wal: logWriter, directory: options.Directory,
 		threshold: options.MemTableBytes, maxImmutable: options.MaxImmutables,
-		nextSequence: options.NextSequence, nextGeneration: firstGeneration + 1, nextFile: firstFile,
+		nextSequence: options.NextSequence, seqExhausted: options.SequenceExhausted,
+		nextGeneration: firstGeneration + 1, nextFile: firstFile,
 		clock: options.Clock, logger: rlog.Component(options.Logger, "storage.pipeline"), accepting: true,
 		allocator: options.FileAllocator, installer: options.TableInstaller,
 	}
 	p.writeToken <- struct{}{}
-	p.active = &generation{id: firstGeneration, table: memtable.New(), state: StateActive}
+	recovered := options.RecoveredTable
+	if recovered == nil {
+		recovered = memtable.New()
+	}
+	p.active = &generation{id: firstGeneration, table: recovered, state: StateActive}
+	if recovered.Len() != 0 {
+		iterator := recovered.Iterator()
+		for iterator.Next() {
+			entry, ok := iterator.Entry()
+			invariant.Assert(ok, "STORAGE-85", "recovered iterator lost current entry")
+			sequence := entry.Key.Sequence()
+			if !p.active.haveSeq {
+				p.active.smallestSeq, p.active.largestSeq, p.active.haveSeq = sequence, sequence, true
+			} else {
+				p.active.smallestSeq = min(p.active.smallestSeq, sequence)
+				p.active.largestSeq = max(p.active.largestSeq, sequence)
+			}
+		}
+	}
 	if executor == nil {
 		p.flush = p.flushToSSTable(options.SSTableOptions)
 	} else {
@@ -497,6 +522,32 @@ func (p *Pipeline) Outputs() []FlushOutput {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]FlushOutput(nil), p.outputs...)
+}
+
+// ReadSnapshot captures active/immutable membership and the sequence boundary
+// under one lock. Tables are concurrency-safe and immutable generations are
+// retained until their Manifest installation has completed.
+func (p *Pipeline) ReadSnapshot() (ReadSnapshot, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return ReadSnapshot{}, ErrClosed
+	}
+	result := ReadSnapshot{
+		Active:            ReadGeneration{Generation: p.active.id, FileNumber: p.active.fileNumber, Table: p.active.table},
+		SequenceExhausted: p.seqExhausted,
+	}
+	result.Immutables = make([]ReadGeneration, 0, len(p.immutables))
+	for index := len(p.immutables) - 1; index >= 0; index-- {
+		item := p.immutables[index]
+		result.Immutables = append(result.Immutables, ReadGeneration{Generation: item.id, FileNumber: item.fileNumber, Table: item.table})
+	}
+	if p.seqExhausted {
+		result.LatestSequence, result.HaveSequence = math.MaxUint64, true
+	} else if p.nextSequence != 0 {
+		result.LatestSequence, result.HaveSequence = p.nextSequence-1, true
+	}
+	return result, nil
 }
 
 // Close stops writes, drains queued work when possible, joins the worker and

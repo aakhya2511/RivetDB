@@ -186,11 +186,12 @@ An LSM tree, implemented in this repository. Rationale versus a B+ tree is in
                                   SSTable in L1, L2, ...
 ```
 
-Reads consult the MemTable, then the immutable MemTable, then SSTables newest
-to oldest, stopping at the first version that satisfies the read's visibility
-rule. Bloom filters skip SSTables that cannot contain the key. A tombstone is a
-version like any other and shadows older versions until compaction can prove no
-reader needs them.
+Phase 1I reads capture one sequence and one coherent active/immutable/Version
+view. Point lookup considers every source that can contain a candidate: active,
+all immutables, every overlapping L0 table and one binary-range-selected table
+per non-overlapping higher level. The highest sequence wins globally; a
+tombstone shadows older values. Scan heap-merges the same sources and collapses
+versions by user key. Bloom filters remain absent.
 
 The engine owns its on-disk format. Every structure — WAL record framing,
 SSTable blocks, the index, the Bloom filter, the footer, the manifest — is
@@ -203,6 +204,13 @@ VersionSet lock, then revalidates and installs through one Manifest edit. It is
 strictly version-preserving: without MVCC visibility evidence it drops neither
 old versions nor tombstones. Obsolete inputs remain physical while old Version
 references may exist.
+
+The integrated Engine orchestrates rather than duplicates these units. Flush
+installation may briefly make an immutable and its identically numbered L0
+file both visible, but removes the immutable only after Manifest durability and
+Version publication, so no read gap exists. Compaction similarly publishes one
+new immutable Version while readers that captured the old Version finish on
+retained inputs. SSTable caching and physical reclamation are deferred.
 
 ---
 

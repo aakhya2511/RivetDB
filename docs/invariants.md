@@ -30,9 +30,9 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-2 | Every WAL record's checksum is verified on replay. A record whose checksum fails is not applied. | verified (Phase 1B) |
 | STORAGE-3 | A partially written trailing WAL record is truncated, not applied. A crash mid-append loses only the in-flight record, never an earlier one. | verified (Phase 1B) |
 | STORAGE-4 | Keys within an SSTable are strictly ascending, with no duplicate internal keys. | verified for individual SSTables (Phase 1E) |
-| STORAGE-5 | A read returns the newest version of a key visible to it, considering the MemTable, the immutable MemTable and every SSTable level. | planned (Phase 1) |
-| STORAGE-6 | Compaction never resurrects a deleted key: a tombstone is dropped only when no older version of that key can survive in any remaining file, and no live reader can be positioned before it. | planned (Phase 1) |
-| STORAGE-7 | Compaction is value-preserving: for every key and every read timestamp, the value visible before compaction equals the value visible after. | planned (Phase 1) |
+| STORAGE-5 | A read returns the newest version of a key visible to it, considering the MemTable, the immutable MemTable and every SSTable level. | verified for latest-state reads (Phase 1I) |
+| STORAGE-6 | Compaction never resurrects a deleted key: a tombstone is dropped only when no older version of that key can survive in any remaining file, and no live reader can be positioned before it. | verified by retaining all tombstones (Phase 1H/1I) |
+| STORAGE-7 | Compaction is value-preserving: for every key and every read timestamp, the value visible before compaction equals the value visible after. | verified by exact version preservation (Phase 1H) |
 | STORAGE-8 | A Bloom filter never produces a false negative. A "not present" answer from the filter means the key is genuinely absent from that SSTable. | planned (Phase 1) |
 | STORAGE-9 | The manifest describes exactly the set of SSTables that exist and are reachable. Recovery never opens a file absent from the manifest, and never misses one present in it. | planned (Phase 1) |
 | STORAGE-10 | An iterator observes a fixed, consistent view of the engine for its whole lifetime. Concurrent flushes and compactions do not change what it yields. | planned (Phase 1) |
@@ -110,6 +110,19 @@ is updated as part of the phase gate, not afterwards.
 | STORAGE-82 | Compaction input corruption or any output failure aborts the logical replacement and is never skipped. | verified (Phase 1H) |
 | STORAGE-83 | Compaction output file numbers come only from the durable VersionSet allocator; failed attempts may burn numbers but never reuse them. | verified (Phase 1H) |
 | STORAGE-84 | Physically deleting obsolete input SSTables is deferred while immutable Version reference reclamation is absent. | verified (Phase 1H) |
+| STORAGE-85 | Engine recovery applies required durable WAL batches directly to one recovered MemTable and never appends them again; assignment resumes above every durable sequence. | verified (Phase 1I) |
+| STORAGE-86 | Every Engine Get and Scan captures one sequence boundary, one active/immutable membership snapshot and one immutable Version for the operation. | verified (Phase 1I) |
+| STORAGE-87 | Get resolves the greatest sequence not above its boundary across active, every immutable, every overlapping L0 table and at most one range-selected table per non-overlapping higher level. | verified (Phase 1I) |
+| STORAGE-88 | A tombstone at the greatest visible sequence suppresses every older value across every source and maps to public not-found without erasing the stored tombstone. | verified (Phase 1I) |
+| STORAGE-89 | Scan merges all relevant authoritative sources in internal-key order, emits at most one current value per user key, omits newest tombstones and obeys half-open user-key bounds. | verified (Phase 1I) |
+| STORAGE-90 | Rotation and flush installation have no read-visibility gap: the old MemTable remains visible until its durable SSTable is authoritative in the Version. | verified (Phase 1I) |
+| STORAGE-91 | A read holding an old immutable Version can finish against retained compaction inputs while new reads use the atomically installed output Version. | verified (Phase 1I) |
+| STORAGE-92 | Valid orphan SSTables and stale temporary files never participate in Get or Scan; missing, corrupt or metadata-mismatched live tables prevent Open. | verified (Phase 1I) |
+| STORAGE-93 | Contradictory same-sequence candidates and exact duplicates across different authoritative identities are corruption; only immutable-to-its-installed-file handoff overlap is accepted. | verified (Phase 1I) |
+| STORAGE-94 | L0 reads account for arbitrary overlap, while higher-level point lookup uses non-overlapping decoded user-key ranges rather than internal-key bytes. | verified (Phase 1I) |
+| STORAGE-95 | Successful Put/Delete acknowledgement remains WAL-before-MemTable and is immediately visible to subsequent operations on that Engine. | verified (Phase 1I) |
+| STORAGE-96 | Engine shutdown rejects later operations, joins the flush worker and preserves an unflushed active MemTable through its durable WAL representation. | verified (Phase 1I) |
+| STORAGE-97 | WAL and obsolete SSTable physical deletion remain deferred; logical frontier and obsolescence metadata alone cannot unlink a file. | verified (Phase 1I) |
 
 STORAGE-12 through STORAGE-15 are enforced by
 [`internal_key_test.go`](../internal/storage/internal_key_test.go), including
@@ -181,6 +194,16 @@ user-range closure, deterministic picking, heap ordering, exact multiset
 preservation, all versions/tombstones, duplicate-safe failure, multi-output
 user-key boundaries, stale plans after durable output, atomic pre/post-Manifest
 restart behavior, retained obsolete files and repeated 100-table compaction.
+
+STORAGE-5 through STORAGE-7 and STORAGE-85 through STORAGE-97 are enforced by
+[`engine_test.go`](../internal/storage/engine/engine_test.go) together with the
+lower-layer crash and failure matrices. Coverage includes binary/prefix keys,
+empty values versus tombstones, overlapping L0 and compacted L1 candidates,
+full range collapse, read-your-writes, flush/compaction handoff, WAL replay
+without reappend, sequence continuation, valid orphan and stale-temp exclusion,
+missing/corrupt live-table rejection, fixed/fresh seeded reference models,
+restart cycles and concurrent writers/readers/scans/flush/compaction under the
+race detector.
 
 ## Raft
 

@@ -15,15 +15,16 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 **Phase 0 and the pre-Phase-1 key audit are complete. Phase 1A/1B storage
 primitives and WAL, Phase 1C MemTable, Phase 1D SSTable format/writer, Phase 1E
 SSTable reader/seek/iteration, Phase 1F MemTable rotation/flush pipeline, and
-Phase 1G Manifest/VersionSet authority and Phase 1H version-preserving LSM
-compaction are implemented; Phase 1I (integrated local engine/read path) is next.**
+Phase 1G Manifest/VersionSet authority, Phase 1H version-preserving LSM
+compaction and Phase 1I integrated local engine/read path are implemented;
+Phase 1J (crash recovery, reclamation safety and deep local-engine stress) is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
 mutable/frozen MemTable, deterministic SSTable writer/reader and bounded FIFO
 flush pipeline and crash-safe Manifest/VersionSet under `internal/storage`.
-There is no complete storage engine,
-Raft, server or client.
+There is now a complete local latest-state storage engine. There is no Raft,
+server, client, MVCC transaction layer or distributed behavior.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
@@ -218,9 +219,8 @@ first:
 6. MemTable rotation and SSTable flush pipeline. Complete.
 7. Manifest and version set (§5.4). Complete; see `docs/evidence/phase-1g.md`.
 8. Version-preserving L0-to-L1 compaction (§5.5). Complete; see `docs/evidence/phase-1h.md`.
-9. Integrated recovery and local read path. Next.
-8. Levelled compaction.
-9. Recovery, then the crash-at-every-offset test.
+9. Integrated recovery and local read path. Complete; see `docs/evidence/phase-1i.md`.
+10. Crash recovery, reclamation safety and deep local-engine stress. Next.
 
 Two parts of the spec are load-bearing and should not be changed casually:
 

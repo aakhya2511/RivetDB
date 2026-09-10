@@ -5,10 +5,10 @@ This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
 **Current scope:** Phase 0, the pre-Phase-1 key contract and Phase 1A through
-1H storage units exist. No database consistency claims are made because there is
-not yet a complete key-value engine. This document describes the strategy the
-remaining implementation will be held to; sections marked *planned* are plans,
-not results.
+1I exist, including a complete local latest-state key-value engine. No
+distributed, transactional, serializability or linearizability claim is made.
+This document describes the strategy the remaining implementation will be held
+to; sections marked *planned* are plans, not results.
 
 ---
 
@@ -138,6 +138,15 @@ pre/post-Manifest crash, restart and 100-table stress tests compare complete
 internal-entry multisets including tombstones and old versions. Inputs are
 never physically deleted, and replay-frontier equality is checked across the
 atomic replacement.
+
+Phase 1I runs the integrated engine against a sorted latest-state reference
+map across fixed and freshly logged seeds while interleaving writes, deletes,
+flushes, compactions and reopen cycles. Targeted tests cover binary ranges,
+overlapping L0 and L1 resolution, empty values, tombstone non-resurrection,
+WAL replay without reappend, valid-orphan exclusion, missing/corrupt live-table
+rejection and concurrent Get/Scan/write/flush/compaction under the race
+detector. A Get or Scan is a sequence-bounded operation, not an MVCC snapshot
+transaction, and no linearizability claim is inferred from these tests.
 
 Coverage: crash before an fsync, crash mid-append (torn record), crash during a
 flush, crash during a compaction, crash between writing a file and updating the

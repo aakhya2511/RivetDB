@@ -1,9 +1,8 @@
 # Design Note: Local Storage Engine (Phase 1)
 
-**Status:** Phase 1A storage primitives, Phase 1B WAL, Phase 1C MemTable, Phase
-1D SSTable format/writer, Phase 1E production reader and Phase 1F MemTable
-rotation/flush pipeline are implemented and mechanically tested. Later engine
-layers are not implemented. The rest of this note specifies later Phase 1 work.
+**Status:** Phase 1A through Phase 1I are implemented and mechanically tested,
+including the integrated local latest-state engine. Deep reclamation/crash
+stress and remaining Phase 1 optimization work are not implemented.
 
 **Related:** [ADR-0001](design-decisions/0001-lsm-tree-over-b-tree.md) ·
 [ADR-0003](design-decisions/0003-explicit-internal-key-comparator.md) ·
@@ -12,7 +11,10 @@ layers are not implemented. The rest of this note specifies later Phase 1 work.
 [ADR-0006](design-decisions/0006-sstable-physical-format.md) ·
 [ADR-0007](design-decisions/0007-sstable-reader-validation-and-seek.md) ·
 [ADR-0008](design-decisions/0008-memtable-rotation-and-flush-lifecycle.md) ·
-[invariants.md](invariants.md) (STORAGE-1 … STORAGE-59) ·
+[ADR-0009](design-decisions/0009-manifest-versionset-and-replay-frontier-authority.md) ·
+[ADR-0010](design-decisions/0010-version-preserving-lsm-compaction.md) ·
+[ADR-0011](design-decisions/0011-integrated-local-lsm-read-write-semantics.md) ·
+[invariants.md](invariants.md) (STORAGE-1 … STORAGE-97) ·
 [architecture.md](architecture.md) §3
 
 ---
@@ -189,6 +191,24 @@ already queued, joins the worker, closes the WAL and leaves a nonempty active
 MemTable WAL-backed for replay. Replay intentionally reapplies all retained
 history through `MemTable.ApplyBatch`; deciding which flushed history may be
 skipped requires Phase 1G manifest authority.
+
+### 4.3 Phase 1I integrated engine and reads
+
+`internal/storage/engine` owns the pipeline, Manifest Store and compaction
+executor. Open validates the CURRENT-selected Version and its live tables,
+recovers allocation/sequence authorities, repairs only an incomplete WAL tail,
+and applies whole batches beyond the inclusive replay frontier directly to a
+recovered active MemTable. Replayed records are never appended again.
+
+Get and Scan capture the pipeline's latest sequence and active/immutable
+membership, then one immutable Version. An immutable remains readable through
+physical flush and Manifest installation; after Version publication it can
+leave the MemTable list. This permits a brief identical handoff overlap but no
+gap. Get selects the greatest visible sequence across all sources. Scan reuses
+the compaction heap merge, groups by user key and emits one newest value while
+omitting tombstones. Both are sequence-bounded operations, not transaction or
+MVCC snapshot APIs. Table readers are opened per operation; caches, Bloom
+filters, WAL deletion and obsolete-table deletion remain deferred.
 
 ## 5. On-disk format
 
@@ -660,7 +680,7 @@ conflates the two is describing a guarantee it does not have.
 |---|---|---|
 | Crash mid-WAL-append | a structurally incomplete trailing record is reported as a repairable tail; earlier complete records replay | STORAGE-3 |
 | Crash after WAL fsync, before MemTable apply | replay re-applies the batch | STORAGE-1 |
-| Crash during flush | the partial SSTable is never in the manifest, so it is ignored and deleted; the WAL still holds the data | STORAGE-9, STORAGE-11 |
+| Crash during flush | the partial or published SSTable is not in the manifest, so it is retained but ignored; the WAL still holds the data | STORAGE-9, STORAGE-11 |
 | Crash during compaction | before the atomic VersionEdit inputs remain live and outputs are retained orphans; afterward outputs are live and inputs are retained but logically obsolete | STORAGE-77, STORAGE-79 |
 | Crash between file fsync and manifest update | the file is an orphan retained for conservative later reclamation | STORAGE-9 |
 | Crash between manifest write and `CURRENT` rename | the old manifest is still valid; the new one is orphaned | STORAGE-9 |
