@@ -43,7 +43,7 @@ const (
 	footerMagic             = 72
 	footerFilterPresentFlag = uint32(1)
 
-	fileMagic uint64 = 0x5249564554535354 // "RIVETSST"
+	fileMagic uint64 = 0x5453535445564952 // little-endian bytes spell "RIVETSST"
 )
 
 type blockKind byte

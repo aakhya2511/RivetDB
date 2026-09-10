@@ -56,8 +56,9 @@ block can be added before the footer without changing version 1 handle layout.
 The footer is fixed at 80 bytes at EOF. It stores index, metadata and optional
 filter handles, the exclusive end of the data region, format version, flags, a
 zero reserved field, a CRC32C over all footer bytes except the CRC field, and
-the `RIVETSST` magic. All fixed integers except the internal-key sequence
-trailer are little-endian. Length varints are canonical unsigned LEB128.
+the literal eight-byte `RIVETSST` magic. All fixed integers except the
+internal-key sequence trailer are little-endian. Length varints are canonical
+unsigned LEB128.
 
 The writer rejects comparator-equal duplicates and out-of-order input; it never
 sorts. Full index boundary keys are compared with `storage.CompareInternal`,

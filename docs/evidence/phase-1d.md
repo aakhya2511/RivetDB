@@ -60,7 +60,7 @@ would accept it.
 Two independent builds of a 2,000-entry table produced 50,223 identical bytes:
 
 ```text
-sha256 d21f9ff9a01f448434cff2f71a11adc3e11081902f110584c6f321adab9d8266
+sha256 4ffe20910613fb58ca349e6d3f536ce4b44d2055cd36c619150d760fbb65961f
 ```
 
 Six randomized seeds (five fixed, one fresh) each generate 2,000 unique
@@ -74,7 +74,7 @@ produced:
 ```text
 data blocks  1,697
 file bytes   6,946,722
-sha256       088faf37de5a7ddc85eead4f7fdcaccb051ee6280ebcb532b1868539e068bf5f
+sha256       94d7c16e9517fa2009b2eb94ecb4b6ff6dc1187beadb0a7811ff4e8f25e429af
 ```
 
 Building that table twice produced byte-identical output.

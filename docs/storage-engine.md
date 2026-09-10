@@ -440,7 +440,7 @@ footer without changing its layout. No filter query logic exists in Phase 1D.
  60  flags_u32          (bit 0 = filter present; currently 0)
  64  reserved_u32       (=0)
  68  footer_crc32c_u32
- 72  magic_u64          (=0x5249564554535354, ASCII "RIVETSST")
+ 72  magic_u64          (=0x5453535445564952; LE bytes are ASCII "RIVETSST")
 ```
 
 The footer checksum covers bytes `[0,68)` and `[72,80)`, authenticating every
