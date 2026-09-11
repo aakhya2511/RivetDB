@@ -4,11 +4,11 @@ A distributed database is only as credible as the evidence that it is correct.
 This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
-**Current scope:** Phase 0, the pre-Phase-1 key contract and Phase 1A through
-1J exist, including a crash-tested local latest-state key-value engine. No
-distributed, transactional, serializability or linearizability claim is made.
-This document describes the strategy the remaining implementation will be held
-to; sections marked *planned* are plans, not results.
+**Current scope:** Phase 0, the complete Phase 1 local storage engine and the
+Phase 2 single-group Raft consensus core exist. Raft is qualified against an
+injected deterministic state machine, not integrated with the LSM. No
+distributed database, transactional, serializability or linearizability claim
+is made. Sections marked *planned* are plans, not results.
 
 ---
 
@@ -185,21 +185,41 @@ checksum-valid filter whose bits create false negatives during eager Open.
 Existing post-open corruption tests remain unchanged; no block cache can hide
 later file mutation.
 
+Phase 2 adds a deterministic, single-owner Raft simulator with explicit logical
+ticks, directed links, selected delivery, drop, delay, duplication, reordering,
+partition, heal, crash, restart, proposal and snapshot operations. Every event
+checks election safety, leader append-only, log matching, leader completeness,
+state-machine safety, term/vote monotonicity, committed-prefix bounds and
+snapshot/apply bounds. Targeted schedules cover one-, three-, four- and
+five-node quorums, split votes, leader isolation, current-term-only commit,
+conflict repair, full-cluster restart and snapshot catch-up. Fixed and fresh
+seeds run at least 10,000 events per 3- and 5-node campaign; an opt-in tier runs
+100,000 events. The independent Raft file store is truncated or corrupted at
+every byte, rejects checksum-valid semantic corruption, ignores unpublished
+temporary state, and injects failure at every publication step.
+
 Expensive coverage is partitioned, not removed. `make test` is the normal
 deterministic suite, `make race` repeats that practical suite under the race
 detector, `make stress` enables large/reference campaigns, `make crash` runs
 process/publication failures, and `make exhaustive` runs every-byte WAL,
-SSTable and Manifest truncations. `make certify-local` runs all correctness
-tiers in order. Scheduled/manual CI runs the heavy tiers separately from PR
+SSTable and Manifest truncations. `make certify-local` runs all local-storage
+tiers in order. Raft adds `raft-test`, `raft-race`, `raft-stress`, `raft-chaos`
+and `raft-exhaustive`; `make certify-raft` runs those plus the unchanged local
+certification. Scheduled/manual CI runs the heavy tiers separately from PR
 latency.
 
-Coverage: crash before an fsync, crash mid-append (torn record), crash during a
-flush, crash during a compaction, crash between writing a file and updating the
-manifest, crash during a range split, crash while a transaction is prepared.
+Current crash coverage includes before-fsync, torn WAL/Raft-state publication,
+flush, compaction and file-before-Manifest boundaries. Range-split and prepared-
+transaction crashes remain explicit future gates for their respective phases.
 
 ### 2.5 Fault injection
 
-*Planned (Phase 10).* A controllable framework supporting `KillNode`,
+*Implemented for the Phase 2 Raft simulator:* crash/restart, directed message
+loss, selected delay/delivery, duplication, reordering and partitions. The
+simulator records bounded deterministic traces. Disk throttling, process-level
+network adapters and cross-subsystem faults remain Phase 10 work.
+
+*Planned (Phase 10).* A system-wide controllable framework supporting `KillNode`,
 `RestartNode`, `PauseNode`, `DropMessage`, `DelayMessage`, `DuplicateMessage`,
 `PartitionNodes`, `HealPartition`, `ThrottleDisk`, `ThrottleNetwork` and
 `CorruptWALRecord`. Faults are scheduled from the run's seed, so a campaign is
@@ -211,9 +231,11 @@ consensus implementations most often turn out to be wrong.
 
 ### 2.6 Chaos campaigns
 
-*Planned (Phase 10).* Long randomized runs: a cluster under concurrent client
-load while faults are injected continuously, with invariants checked during and
-after. Campaigns run on a schedule rather than per-commit, and every failure's
+Phase 2 implements bounded seeded consensus campaigns against an in-memory
+state machine. *Planned (Phase 10):* long randomized runs of the integrated
+database under concurrent client load while faults are injected continuously,
+with invariants checked during and after. Campaigns run on a schedule rather
+than per-commit, and every failure's
 seed is committed to the corpus so it becomes a fast deterministic regression
 test on every subsequent build.
 

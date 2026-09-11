@@ -1,14 +1,15 @@
 # RivetDB
 
-RivetDB is an experimental local LSM storage engine built from first principles
-as the future substrate for Multi-Raft replication, MVCC and
-workload-adaptive range rebalancing. Those distributed layers do not exist yet.
+RivetDB is an experimental database built from first principles. Its local LSM
+storage engine and independent single-group Raft consensus core are implemented;
+their integration and the later Multi-Raft, MVCC and workload-adaptive range
+layers do not exist yet.
 
 Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 1 complete — local-storage freeze candidate.**
+> **Project status: Phase 2 complete — Raft consensus core mechanically qualified.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -25,9 +26,12 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > Phase 1K adds measured frozen iteration, a bounded leased SSTable-reader
 > cache, persisted user-key Bloom filters, lower-copy Scan assembly and explicit
 > correctness/stress/crash/exhaustive certification tiers.
+> Phase 2 adds a deterministic single-group Raft core with independent durable
+> state, RequestVote, AppendEntries, InstallSnapshot, quorum commit, ordered
+> apply, crash/restart recovery and seeded 3-/5-node adversarial simulation.
 >
-> **There is no Raft, distributed database service, server or client yet.**
-> Everything else described below is a design with a written specification, not working code — see
+> **There is no Raft-to-LSM integration, distributed database service, server
+> or client yet.** Everything else described below is a design with a written specification, not working code — see
 > [Roadmap](docs/roadmap.md) for exactly what is built and what is not.
 >
 > RivetDB is a research and demonstration system. It is not production
@@ -199,8 +203,9 @@ SSD with `RIVETDB_BENCH_DIR`; no volume name is hard-coded.
 Everything here is designed and specified but **not yet built**. Each links to
 its phase gate.
 
-- **Raft** — implemented here, not imported, because the failure handling is
-  the point. [Phase 2](docs/roadmap.md#phase-2--single-raft-group-)
+- **Raft-to-LSM integration** — the mechanically qualified Raft core still
+  applies only to an injected deterministic state machine.
+  [Phase 3](docs/roadmap.md#phase-3--durable-replicated-range-)
 - **Multi-Raft and range routing** — one Raft group per key range, many ranges
   per node. [Phase 4](docs/roadmap.md#phase-4--multi-raft-and-routing-)
 - **MVCC and distributed transactions** — write intents, snapshot reads,

@@ -111,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tier: [stress, crash, exhaustive]
+        tier: [stress, crash, exhaustive, raft-stress, raft-chaos, raft-exhaustive]
     steps:
       - uses: actions/checkout@v4
 

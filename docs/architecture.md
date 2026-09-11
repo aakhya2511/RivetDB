@@ -1,7 +1,8 @@
 # RivetDB Architecture
 
-**Status:** design baseline for the implementation. Phase 0 and Phase 1A
-through 1J are implemented; see [roadmap.md](roadmap.md) for what exists today
+**Status:** design baseline for the implementation. Phase 0, Phase 1A through
+1K and the Phase 2 single-group Raft core are implemented. See
+[roadmap.md](roadmap.md) for what exists today
 and [invariants.md](invariants.md) for the properties each subsystem must
 uphold.
 
@@ -228,11 +229,13 @@ Raft, implemented in this repository. Not an external library: the failure
 handling *is* the project, and delegating it would mean the interesting bugs
 live somewhere else.
 
-The implementation is structured so that the protocol logic is a pure function
-of (current state, incoming message, elapsed time) and produces (new state,
-outgoing messages, entries to apply). Time enters through the
-[`clock.Clock`](../internal/clock/clock.go) interface and never through
-`time.Now`. Consequences:
+The implementation is a synchronous, single-owner event-driven state machine.
+Each `Tick`, message or proposal deterministically changes protocol state;
+safety-dependent changes are atomically saved through an injected Raft Store
+before dependent messages are returned, and committed entries apply through an
+injected state machine. The core performs no direct network I/O and reads no
+wall clock. A driver maps [`clock.Clock`](../internal/clock/clock.go) progress
+to logical ticks. Consequences:
 
 - Election, replication and log-conflict resolution can be tested with no
   network, no disk and no real time, in microseconds per scenario.
@@ -242,9 +245,11 @@ outgoing messages, entries to apply). Time enters through the
 - Persistence, transport and the state machine are injected, so the same
   protocol code is exercised by both unit tests and real clusters.
 
-Durable Raft state (`currentTerm`, `votedFor`, the log) is written through the
-storage engine's WAL machinery, so there is one durability mechanism in the
-system rather than two.
+Phase 2 persists `currentTerm`, `votedFor`, snapshots and the replicated log
+through a Raft-specific Store, independently of the Phase 1 data WAL. The
+former is the consensus durability authority. Phase 3 must decide how committed
+commands enter the LSM without accidentally double-logging or assigning
+replica-local logical order; see [ADR-0014](design-decisions/0014-raft-core-persistence-and-apply-boundary.md).
 
 ---
 

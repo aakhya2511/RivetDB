@@ -16,7 +16,7 @@ find than to prevent.
 |---|---|---|
 | 0 | Foundation: docs, module, build, CI, logging, test harness | ✅ |
 | 1 | Local LSM storage engine | ✅ complete (1A–1K) |
-| 2 | Single Raft group | ⬜ |
+| 2 | Single Raft group | ✅ complete |
 | 3 | Durable replicated range (Raft + storage) | ⬜ |
 | 4 | Multi-Raft and range routing | ⬜ |
 | 5 | MVCC | ⬜ |
@@ -28,10 +28,11 @@ find than to prevent.
 | 11 | Performance engineering | ⬜ |
 | 12 | Optional AI operator | ⬜ |
 
-**What exists right now:** Phase 0, the pre-Phase-1 internal-key contract and
-Phase 1A through 1K include a certified local latest-state key-value engine.
-There is no Raft, server or client. Anything else described in
-[architecture.md](architecture.md) is a design, clearly marked as such.
+**What exists right now:** Phase 0, the certified Phase 1 local latest-state
+engine and the mechanically qualified Phase 2 single-group Raft core. Raft is
+not integrated with storage; there is no distributed database server or client.
+Anything later in [architecture.md](architecture.md) is a design, clearly
+marked as such.
 
 ---
 
@@ -144,7 +145,7 @@ readiness audit are in [`phase-1k.md`](evidence/phase-1k.md).
 
 ---
 
-## Phase 2 — Single Raft group ⬜
+## Phase 2 — Single Raft group ✅
 
 Raft against an in-memory state machine, with an injected transport, an
 injected clock and injected persistence, so that entire cluster scenarios run
@@ -152,11 +153,11 @@ deterministically in one process.
 
 **Build:** leader election with randomized timeouts · `RequestVote` ·
 `AppendEntries` with conflict resolution · commit and apply indices · durable
-term, vote and log · snapshot creation and installation · log compaction ·
-leader transfer.
+term, vote and log · snapshot creation and installation · log compaction.
+Leader transfer is deliberately deferred behind the safety gate.
 
 **Gate:** a three-node cluster elects a leader and replicates writes; and each
-of these scenarios preserves RAFT-1 through RAFT-12 with no acknowledged
+of these scenarios preserves RAFT-1 through RAFT-14 with no acknowledged
 committed write lost —
 
 leader killed · follower killed · leader restarted · symmetric partition ·
@@ -164,6 +165,11 @@ leader killed · follower killed · leader restarted · symmetric partition ·
 duplicated and reordered messages · a follower far enough behind to need a
 snapshot · full-cluster restart · repeated randomized fault sequences from
 recorded seeds.
+
+**Delivered:** deterministic synchronous core, independent memory/file Raft
+stores, RequestVote/AppendEntries/InstallSnapshot, atomic snapshot compaction,
+continuous executable safety checkers, fixed/fresh 3- and 5-node campaigns and
+the `make certify-raft` gate. See [`evidence/phase-2.md`](evidence/phase-2.md).
 
 ---
 

@@ -12,20 +12,17 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phase 0 and the pre-Phase-1 key audit are complete. Phase 1A/1B storage
-primitives and WAL, Phase 1C MemTable, Phase 1D SSTable format/writer, Phase 1E
-SSTable reader/seek/iteration, Phase 1F MemTable rotation/flush pipeline, and
-Phase 1G Manifest/VersionSet authority, Phase 1H version-preserving LSM
-compaction, Phase 1I integrated local engine/read path and Phase 1J crash,
-visibility and reclamation work, and Phase 1K measured performance and final
-local-storage certification are complete. Phase 2 Raft is next.**
+**Phase 0, Phase 1 local storage and Phase 2 single-group Raft are complete.
+Phase 3 Raft-to-LSM integration is next and has not started.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
 mutable/frozen MemTable, deterministic SSTable writer/reader and bounded FIFO
 flush pipeline and crash-safe Manifest/VersionSet under `internal/storage`.
-There is now a complete local latest-state storage engine. There is no Raft,
-server, client, MVCC transaction layer or distributed behavior.
+There is a complete local latest-state engine plus an independent deterministic
+Raft core, memory/file Raft stores, simulator and snapshot foundation under
+`internal/raft`. Raft does not yet apply to the LSM. There is no server, client,
+MVCC transaction layer, Multi-Raft or distributed database behavior.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
@@ -76,6 +73,12 @@ make stress   # large randomized/reference campaigns
 make crash    # subprocess and publication crash campaigns
 make exhaustive # every-byte truncation/corruption campaigns
 make certify-local # complete local-storage correctness gate
+make raft-test # deterministic Raft core and persistence tests
+make raft-race # Raft tests under the race detector
+make raft-stress # 100k-event simulation and durable-store stress
+make raft-chaos # fixed/fresh adversarial cluster schedules
+make raft-exhaustive # every-byte Raft-store campaigns
+make certify-raft # complete Phase 2 gate plus certify-local
 make benchmark # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover    # coverage profile + HTML report in bin/
 make tidy     # go mod tidy, fails if it was not already tidy
@@ -188,6 +191,7 @@ Design is written before the code it governs.
 | [docs/architecture.md](docs/architecture.md) | Layer boundaries, control plane, failure model, concurrency model, and §14's open questions |
 | [docs/invariants.md](docs/invariants.md) | Safety properties, with the IDs assertions and tests reference |
 | [docs/storage-engine.md](docs/storage-engine.md) | Phase 1 spec: byte-level on-disk formats, durability modes, crash-scenario table, test list |
+| [docs/raft.md](docs/raft.md) | Phase 2 protocol, persistence, simulator, snapshot and Phase 3 boundaries |
 | [docs/correctness.md](docs/correctness.md) | Test strategy, reproducibility mechanism, and §5's explicit list of what is *not* tested |
 | [docs/roadmap.md](docs/roadmap.md) | The twelve phases and each gate |
 | [docs/design-decisions/](docs/design-decisions/) | ADRs. An ADR records a contested decision with the alternatives that lost, and is superseded rather than rewritten. |
@@ -203,12 +207,15 @@ Decisions recorded: [ADR-0001](docs/design-decisions/0001-lsm-tree-over-b-tree.m
 [ADR-0005](docs/design-decisions/0005-memtable-skip-list.md)
 (MemTable skip list), and
 [ADR-0006](docs/design-decisions/0006-sstable-physical-format.md)
-(SSTable physical format). They list the rejected options' genuine
+(SSTable physical format), through
+[ADR-0014](docs/design-decisions/0014-raft-core-persistence-and-apply-boundary.md)
+(Raft core persistence and apply boundary). The ADR index lists the complete
+sequence. They list the rejected options' genuine
 advantages, not strawmen — keep that standard.
 
 ---
 
-## 7. Continuing Phase 1
+## 7. Phase boundaries and next work
 
 The spec is [docs/storage-engine.md](docs/storage-engine.md); §11 is the test
 list that constitutes the gate. Suggested build order, smallest correct unit
@@ -262,3 +269,10 @@ work rather than after:
 - **Read path** (Raft read vs ReadIndex vs leader lease) is undecided and due in
   Phase 3. Note the tension: architecture.md §11 assumes nothing about clock
   skew, but leader leases make safety depend on clock bounds. See §14.
+
+Phase 2 is frozen at the boundary in [docs/raft.md](docs/raft.md): opaque
+logical commands, an independent Raft durability authority, static peers and
+an injected deterministic state machine. Phase 3 must first design an
+idempotent apply API carrying Raft index/term, settle Raft-log versus local-WAL
+ordering, and choose a logical or physical snapshot contract. It must not call
+current `Engine.Put`/`Engine.Delete`, which allocate replica-local sequences.

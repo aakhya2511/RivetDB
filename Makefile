@@ -12,6 +12,8 @@ SHELL := /bin/bash
 GO ?= go
 GOBIN ?= $(CURDIR)/bin
 PKGS ?= ./...
+LOCAL_PKGS ?= ./internal/clock ./internal/invariant ./internal/rlog ./internal/storage/... ./internal/testutil/...
+RAFT_PKGS ?= ./internal/raft
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -98,11 +100,40 @@ benchmark: ## Run the reproducible benchmark suite (honors RIVETDB_BENCH_DIR)
 
 .PHONY: certify-local
 certify-local: ## Run every local-storage correctness tier in order
+	$(MAKE) check PKGS="$(LOCAL_PKGS)"
+	$(MAKE) race PKGS="$(LOCAL_PKGS)"
+	$(MAKE) stress PKGS="$(LOCAL_PKGS)"
+	$(MAKE) crash PKGS="$(LOCAL_PKGS)"
+	$(MAKE) exhaustive PKGS="$(LOCAL_PKGS)"
+
+.PHONY: raft-test
+raft-test: ## Run deterministic Raft core, persistence, partition, and simulation tests
+	$(GO) test -count=1 -timeout 10m $(TEST_FLAGS) $(RAFT_PKGS)
+
+.PHONY: raft-race
+raft-race: ## Run the Raft suite twice under the race detector
+	$(GO) test -race -count=$(RACE_COUNT) -timeout 15m $(TEST_FLAGS) $(RAFT_PKGS)
+
+.PHONY: raft-stress
+raft-stress: ## Run 100k-event simulation and durable Raft-store stress
+	RIVETDB_RAFT_STRESS=1 $(GO) test -count=1 -timeout 30m -run 'RandomizedClusterHeavy|FileStoreDeterministicStress' $(TEST_FLAGS) $(RAFT_PKGS)
+
+.PHONY: raft-chaos
+raft-chaos: ## Run fixed and fresh 3/5-node deterministic fault schedules
+	$(GO) test -count=1 -timeout 15m -run 'RandomizedClusterSafety|LeaderIsolation|Minority|DuplicateReordered|FollowerLag' $(TEST_FLAGS) $(RAFT_PKGS)
+
+.PHONY: raft-exhaustive
+raft-exhaustive: ## Run every-offset/corruption Raft-store campaigns
+	$(GO) test -count=1 -timeout 15m -run 'FileStoreRejectsEveryTruncationAndCorruption|FileStoreRejectsChecksumValidSemanticCorruption|FileStorePublicationOrderingAndFailures' $(TEST_FLAGS) $(RAFT_PKGS)
+
+.PHONY: certify-raft
+certify-raft: ## Run the full Phase 2 Raft gate plus Phase 1 regression
 	$(MAKE) check
-	$(MAKE) race
-	$(MAKE) stress
-	$(MAKE) crash
-	$(MAKE) exhaustive
+	$(MAKE) raft-race
+	$(MAKE) raft-stress
+	$(MAKE) raft-chaos
+	$(MAKE) raft-exhaustive
+	$(MAKE) certify-local
 
 .PHONY: diff-check
 diff-check: ## Fail on whitespace errors in the working diff

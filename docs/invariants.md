@@ -254,18 +254,27 @@ not safety assertions.
 
 | ID | Invariant | Status |
 |---|---|---|
-| RAFT-1 | *Election safety.* At most one leader is elected per term. | planned (Phase 2) |
-| RAFT-2 | *Leader append-only.* A leader never overwrites or deletes entries in its own log; it only appends. | planned (Phase 2) |
-| RAFT-3 | *Log matching.* If two logs contain an entry with the same index and term, the logs are identical in every entry through that index. | planned (Phase 2) |
-| RAFT-4 | *Leader completeness.* If an entry is committed in a term, it is present in the log of every leader of every later term. | planned (Phase 2) |
-| RAFT-5 | *State machine safety.* If two nodes apply an entry at a given log index, it is the same entry. No node ever applies conflicting commands at the same index. | planned (Phase 2) |
-| RAFT-6 | `currentTerm` never decreases at a node, across restarts included. | planned (Phase 2) |
-| RAFT-7 | `commitIndex` never decreases; `appliedIndex ≤ commitIndex` always. | planned (Phase 2) |
-| RAFT-8 | A node grants at most one vote per term, and that grant is durable before the response is sent. | planned (Phase 2) |
-| RAFT-9 | A leader that has lost quorum cannot commit new entries, even before it learns it has lost quorum. | planned (Phase 2) |
-| RAFT-10 | Persistent state (`currentTerm`, `votedFor`, log entries) is durable before any RPC response depending on it is sent. | planned (Phase 2) |
-| RAFT-11 | Log compaction discards only entries covered by a durable snapshot, and a snapshot's applied index is never ahead of what it contains. | planned (Phase 2) |
-| RAFT-12 | Installing a snapshot yields a state machine identical to applying every entry the snapshot covers. | planned (Phase 2) |
+| RAFT-1 | *Election safety.* At most one leader is elected per term. | verified (Phase 2) |
+| RAFT-2 | *Leader append-only.* A leader never overwrites or deletes entries in its own log; it only appends. | verified (Phase 2) |
+| RAFT-3 | *Log matching.* If two logs contain an entry with the same index and term, the logs are identical in every entry through that index. | verified (Phase 2) |
+| RAFT-4 | *Leader completeness.* If an entry is committed in a term, it is present in the log of every leader of every later term. | verified (Phase 2) |
+| RAFT-5 | *State machine safety.* If two nodes apply an entry at a given log index, it is the same entry. No node ever applies conflicting commands at the same index. | verified (Phase 2) |
+| RAFT-6 | `currentTerm` never decreases at a node, across restarts included. | verified (Phase 2) |
+| RAFT-7 | Within one node execution, `commitIndex` never decreases; `appliedIndex ≤ commitIndex` always. After restart, volatile commit knowledge is reconstructed from the durable snapshot and leader communication. | verified (Phase 2) |
+| RAFT-8 | A node grants at most one vote per term, and that grant is durable before the response is sent. | verified (Phase 2) |
+| RAFT-9 | A leader that has lost quorum cannot commit new entries, even before it learns it has lost quorum. | verified (Phase 2) |
+| RAFT-10 | Persistent state (`currentTerm`, `votedFor`, log entries) is durable before any RPC response depending on it is sent. | verified (Phase 2) |
+| RAFT-11 | Log compaction discards only entries covered by a durable snapshot, and a snapshot's applied index is never ahead of what it contains. | verified (Phase 2) |
+| RAFT-12 | Installing a snapshot yields a state machine identical to applying every entry the snapshot covers. | verified (Phase 2) |
+| RAFT-13 | Entries apply exactly once per node execution, strictly in increasing index order, and only after commitment; an apply failure stops before advancing `lastApplied`. | verified (Phase 2) |
+| RAFT-14 | Persistence uncertainty stops a node before it emits any vote, append, snapshot or proposal outcome that depends on the uncertain state. | verified (Phase 2) |
+
+The deterministic simulator checks RAFT-1 through RAFT-8 and RAFT-11/13 at
+every scheduled event, including across crashes and restarts. Targeted tests
+prove minority and even-cluster quorum behavior (RAFT-9), persistence-before-
+response and fatal uncertainty (RAFT-10/14), and snapshot equivalence and
+suffix preservation (RAFT-11/12). The complete mapping and campaign record is
+in [`evidence/phase-2.md`](evidence/phase-2.md).
 
 ## Ranges and routing
 

@@ -42,6 +42,7 @@ Phase:    which phase this governs
 | [0011](0011-integrated-local-lsm-read-write-semantics.md) | Integrated local LSM read/write semantics | Accepted | 1I |
 | [0012](0012-crash-visibility-and-physical-reclamation.md) | Crash recovery, visibility publication and physical reclamation | Accepted | 1J |
 | [0013](0013-evidence-driven-local-storage-performance.md) | Evidence-driven local-storage performance architecture | Accepted | 1K |
+| [0014](0014-raft-core-persistence-and-apply-boundary.md) | Raft core persistence and state-machine boundary | Accepted | 2 |
 
 ## Planned
 
