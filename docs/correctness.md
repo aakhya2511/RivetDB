@@ -4,11 +4,11 @@ A distributed database is only as credible as the evidence that it is correct.
 This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
-**Current scope:** Phase 0, the complete Phase 1 local storage engine and the
-Phase 2 single-group Raft consensus core exist. Raft is qualified against an
-injected deterministic state machine, not integrated with the LSM. No
-distributed database, transactional, serializability or linearizability claim
-is made. Sections marked *planned* are plans, not results.
+**Current scope:** Phases 0–4 exist: the complete local LSM, deterministic Raft,
+durable replicated range, and static Multi-Raft catalog/hosting/routed-mutation
+composition. There is no network service, distributed read protocol, dynamic
+range metadata, transactional, serializability or linearizability claim.
+Sections marked *planned* are plans, not results.
 
 ---
 
@@ -325,6 +325,24 @@ compact Raft history because LSM snapshot replacement is deferred. A separate
 subprocess exits after a quorum-committed mutation and verifies reconstruction
 from filesystem-backed Raft stores.
 
+### Phase 4 Multi-Raft gate
+
+`make certify-multiraft` composes the unchanged lower gates with descriptor,
+catalog, node hosting, shared transport/scheduler and routed-mutation tests.
+The catalog suite compares binary-search lookup with a linear reference over
+random binary keys and rejects every truncation and single-byte corruption of
+the canonical metadata format. Subprocesses exit at catalog publication
+stages, during partial local-range bootstrap, and after several ranges commit.
+
+A real-filesystem five-node/three-range layout exercises independent leaders,
+range-specific quorum loss, node failure with different group effects,
+range/node restart, different flush/compaction schedules, full-cluster restart,
+per-range digest equality, and a global latest-state reference. A lightweight
+five-range deterministic campaign checks every Raft group independently under
+range/node partitions, crashes, restart, loss, duplication and reordering; the
+opt-in tier runs 25 ranges for 100,000 events. The 100-group scheduler test
+measures goroutine and heap growth and proves fixed round-robin tick service.
+
 ---
 
 ## 5. What is not tested
@@ -341,12 +359,17 @@ Stated plainly, because an unlisted gap reads as a claim:
   Phase 3 deliberately added no leader lease or distributed read protocol; any
   future lease design would require an explicit bounded-skew assumption and
   new tests.
-- **Linearizable distributed reads.** Phase 3 `LocalGet`/`LocalScan` are replica
+- **Linearizable distributed reads.** Phase 3/4 `LocalGet`/`LocalScan` are replica
   inspection and may be stale. ReadIndex and lease reads are not tested because
   they are not implemented.
 - **Integrated Raft/LSM snapshots.** Snapshot export and replace-state restore
   are deferred. Integrated ranges retain required history and do not expose log
   compaction.
+- **Dynamic range metadata.** Phase 4 persists a static bootstrap catalog and
+  tests explicit generation replacement, but has no meta-range, placement
+  consensus, online split, migration, or dynamic membership.
+- **Cross-range read or write atomicity.** Routed mutations are independent
+  Raft operations. There is no global read snapshot or distributed transaction.
 - **Adversarial input and authentication.** Input is bounds-checked and
   malformed data is rejected, but there is no threat model and no security
   testing.

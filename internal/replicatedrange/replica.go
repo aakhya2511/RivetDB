@@ -60,6 +60,7 @@ var (
 	ErrLeadershipLost = errors.New("replicated range: leadership lost before local apply")
 	ErrStopped        = errors.New("replicated range: stopped")
 	ErrTooManyWaiters = errors.New("replicated range: proposal waiter capacity reached")
+	ErrKeyOutOfRange  = errors.New("replicated range: command key outside configured range")
 )
 
 type Options struct {
@@ -76,6 +77,8 @@ type Options struct {
 	Random             *rand.Rand
 	MaxProposalWaiters int
 	Hook               Hook
+	Generation         uint64
+	ContainsKey        func([]byte) bool
 }
 
 type Result struct {
@@ -85,6 +88,7 @@ type Result struct {
 
 type Status struct {
 	RangeID                 RangeID
+	Generation              uint64
 	NodeID                  raft.NodeID
 	ReplicaID               ReplicaID
 	Raft                    raft.Status
@@ -98,14 +102,16 @@ type Status struct {
 // Replica is one deterministic Raft group plus one range-scoped replicated LSM.
 // It owns no timer or transport goroutine; callers drive Tick and Step.
 type Replica struct {
-	mu         sync.Mutex
-	rangeID    RangeID
-	replicaID  ReplicaID
-	node       *raft.Node
-	engine     *engine.Engine
-	waiters    map[uint64]chan Result
-	maxWaiters int
-	stopped    bool
+	mu          sync.Mutex
+	rangeID     RangeID
+	replicaID   ReplicaID
+	generation  uint64
+	containsKey func([]byte) bool
+	node        *raft.Node
+	engine      *engine.Engine
+	waiters     map[uint64]chan Result
+	maxWaiters  int
+	stopped     bool
 }
 
 func Open(options Options) (_ *Replica, resultErr error) {
@@ -115,6 +121,9 @@ func Open(options Options) (_ *Replica, resultErr error) {
 	}
 	if options.MaxProposalWaiters == 0 {
 		options.MaxProposalWaiters = 1024
+	}
+	if options.Generation == 0 {
+		options.Generation = 1
 	}
 	if options.MaxProposalWaiters < 1 {
 		return nil, ErrInvalidOptions
@@ -169,11 +178,12 @@ func Open(options Options) (_ *Replica, resultErr error) {
 			return nil, fmt.Errorf("open range Raft store: %w", err)
 		}
 	}
-	r := &Replica{rangeID: options.RangeID, replicaID: options.ReplicaID, engine: local, waiters: make(map[uint64]chan Result), maxWaiters: options.MaxProposalWaiters}
+	r := &Replica{rangeID: options.RangeID, replicaID: options.ReplicaID, generation: options.Generation,
+		containsKey: options.ContainsKey, engine: local, waiters: make(map[uint64]chan Result), maxWaiters: options.MaxProposalWaiters}
 	r.node, err = raft.NewNode(raft.Config{
 		ID: options.NodeID, Peers: options.Peers, ElectionTimeoutMin: options.ElectionTimeoutMin,
 		ElectionTimeoutMax: options.ElectionTimeoutMax, HeartbeatInterval: options.HeartbeatInterval,
-		Random: options.Random, Store: store, StateMachine: &stateMachine{engine: local, hook: options.Hook},
+		Random: options.Random, Store: store, StateMachine: &stateMachine{engine: local, hook: options.Hook, containsKey: options.ContainsKey},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open range Raft node: %w", err)
@@ -222,8 +232,12 @@ func (r *Replica) Propose(ctx context.Context, encoded []byte) (uint64, []raft.M
 	if err := ctx.Err(); err != nil {
 		return 0, nil, nil, fmt.Errorf("before proposal admission: %w", err)
 	}
-	if _, err := DecodeCommand(encoded); err != nil {
+	command, err := DecodeCommand(encoded)
+	if err != nil {
 		return 0, nil, nil, err
+	}
+	if r.containsKey != nil && !r.containsKey(command.Key) {
+		return 0, nil, nil, ErrKeyOutOfRange
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -312,7 +326,7 @@ func (r *Replica) Status() Status {
 	raftStatus := r.node.Status()
 	durable, err := r.engine.DurableAppliedRaftIndex()
 	stats := r.engine.Stats()
-	result := Status{RangeID: r.rangeID, NodeID: raftStatus.ID, ReplicaID: r.replicaID, Raft: raftStatus,
+	result := Status{RangeID: r.rangeID, Generation: r.generation, NodeID: raftStatus.ID, ReplicaID: r.replicaID, Raft: raftStatus,
 		DurableAppliedRaftIndex: durable, LSMVisibleIndex: stats.Pipeline.VisibleSequence,
 		LiveTableCount: stats.Manifest.LiveTables, Fatal: errors.Join(raftStatus.Fatal, err)}
 	result.MaterializedCommands = stats.Puts + stats.Deletes
@@ -336,6 +350,12 @@ func (r *Replica) LocalScan(ctx context.Context) ([]engine.KV, error) {
 func (r *Replica) Flush(ctx context.Context) error {
 	if err := r.engine.Flush(ctx); err != nil {
 		return fmt.Errorf("flush range LSM: %w", err)
+	}
+	return nil
+}
+func (r *Replica) Compact(ctx context.Context) error {
+	if _, err := r.engine.Compact(ctx); err != nil {
+		return fmt.Errorf("compact range LSM: %w", err)
 	}
 	return nil
 }

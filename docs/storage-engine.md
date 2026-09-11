@@ -956,3 +956,12 @@ prefix. Unflushed state is absent and must be replayed from Raft after consensus
 again establishes commitment. Durable but uncommitted Raft entries are never
 an LSM recovery source. See [replicated-range.md](replicated-range.md) and
 [ADR-0015](design-decisions/0015-raft-to-lsm-replicated-state-machine.md).
+
+## 13. Phase 4 range isolation
+
+Phase 4 deliberately keeps one replicated Engine and Manifest directory per
+local range under `node/ranges/<RangeID>/data`. File numbers, MemTables,
+SSTables, compaction, table caches, failures, and durable applied frontiers are
+therefore range-local. The static catalog lives separately under `cluster/`
+and cannot make a range directory authoritative by discovery. No shared data
+WAL or shared LSM was introduced.

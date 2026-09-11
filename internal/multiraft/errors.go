@@ -1,0 +1,27 @@
+package multiraft
+
+import "errors"
+
+var (
+	ErrInvalidDescriptor   = errors.New("multiraft: invalid range descriptor")
+	ErrInvalidCatalog      = errors.New("multiraft: invalid range catalog")
+	ErrUnsupportedCatalog  = errors.New("multiraft: unsupported range catalog version")
+	ErrCorruptCatalog      = errors.New("multiraft: corrupt range catalog")
+	ErrCatalogMissing      = errors.New("multiraft: range catalog missing")
+	ErrCatalogMismatch     = errors.New("multiraft: bootstrap catalog differs from persisted authority")
+	ErrRangeNotFound       = errors.New("multiraft: range not found")
+	ErrStaleRange          = errors.New("multiraft: stale range generation")
+	ErrNotLeader           = errors.New("multiraft: range replica is not leader")
+	ErrLeaderUnknown       = errors.New("multiraft: range leader unknown")
+	ErrUnknownRange        = errors.New("multiraft: unknown local range")
+	ErrWrongRangeMessage   = errors.New("multiraft: message group identity mismatch")
+	ErrWrongRangeKey       = errors.New("multiraft: key outside range descriptor")
+	ErrResourceLimit       = errors.New("multiraft: resource limit exceeded")
+	ErrTransportStopped    = errors.New("multiraft: shared transport stopped")
+	ErrSchedulerStopped    = errors.New("multiraft: shared scheduler stopped")
+	ErrNodeStopped         = errors.New("multiraft: node stopped")
+	ErrMissingRange        = errors.New("multiraft: assigned range directory missing")
+	ErrBootstrapIncomplete = errors.New("multiraft: bootstrap incomplete")
+	ErrDuplicateRange      = errors.New("multiraft: duplicate local range registration")
+	ErrDuplicateNode       = errors.New("multiraft: duplicate node registration")
+)

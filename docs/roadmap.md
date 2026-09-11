@@ -18,7 +18,7 @@ find than to prevent.
 | 1 | Local LSM storage engine | ✅ complete (1A–1K) |
 | 2 | Single Raft group | ✅ complete |
 | 3 | Durable replicated range (Raft + storage) | ✅ complete |
-| 4 | Multi-Raft and range routing | ⬜ |
+| 4 | Multi-Raft and static range routing | ✅ complete |
 | 5 | MVCC | ⬜ |
 | 6 | Distributed transactions | ⬜ |
 | 7 | Online range splitting | ⬜ |
@@ -29,9 +29,9 @@ find than to prevent.
 | 12 | Optional AI operator | ⬜ |
 
 **What exists right now:** Phase 0, the certified Phase 1 local latest-state
-engine, the mechanically qualified Phase 2 single-group Raft core, and one
-certified statically configured Phase 3 replicated range. There is no
-Multi-Raft router, network database server, distributed read protocol or client.
+engine, the mechanically qualified Phase 2 single-group Raft core, Phase 3's
+durable replicated range, and Phase 4's static Multi-Raft node/catalog/router.
+There is no network database server, distributed read protocol or client.
 Anything later in [architecture.md](architecture.md) is a design, clearly
 marked as such.
 
@@ -200,16 +200,23 @@ client read surface.
 
 ---
 
-## Phase 4 — Multi-Raft and routing ⬜
+## Phase 4 — Multi-Raft and static routing ✅
 
-**Build:** range descriptors and the meta-range · many Raft groups per node
-sharing a batched tick loop · a router with an immutable cached range map ·
-stale-route detection via generation, with bounded retry.
+**Delivered:** canonical static range descriptors and a checksummed persisted
+full-keyspace catalog · many independent durable Raft/LSM ranges per physical
+node · one bounded range-aware transport · deterministic round-robin and fixed
+worker-pool schedulers · immutable binary-search routing · range-scoped leader
+hints · generation validation and bounded pre-admission retry.
 
-**Gate:** keys route to the correct range · several ranges serve concurrently
-with independent leaders · one node hosts many ranges without a goroutine per
-range · a client with a deliberately stale map converges without error ·
-RANGE-1 through RANGE-6 hold under randomized descriptor churn.
+**Gate:** exact binary boundaries route to one owner · three RF=3 ranges serve
+with independent leaders/quorums and divergent physical layouts · failures and
+restarts remain range scoped · 100 groups share bounded runtime resources ·
+catalog/crash/randomized/real-filesystem campaigns pass with zero invariant or
+digest mismatch. See [multiraft.md](multiraft.md),
+[range-routing.md](range-routing.md), and [evidence/phase-4.md](evidence/phase-4.md).
+
+**Deferred deliberately:** metadata consensus and dynamic descriptor churn,
+online split, migration, dynamic membership, distributed reads and RPC.
 
 ---
 

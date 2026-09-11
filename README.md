@@ -1,15 +1,15 @@
 # RivetDB
 
 RivetDB is an experimental database built from first principles. Its local LSM
-storage engine, single-group Raft core, and one statically configured durable
-replicated range are implemented; Multi-Raft, routing, MVCC and the
+storage engine, Raft core, durable replicated ranges, static Multi-Raft node,
+range catalog and mutation router are implemented; MVCC and the dynamic
 workload-adaptive range layers do not exist yet.
 
 Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 3 complete — durable single-range replication certified.**
+> **Project status: Phase 4 complete — static Multi-Raft routing certified.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -34,9 +34,13 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > Raft indexes are storage sequences; a distinct Manifest frontier proves
 > contiguous durable local materialization; replicas may flush/compact into
 > different physical layouts while retaining identical logical state.
+> Phase 4 hosts many such ranges per node behind a durable authoritative static
+> catalog, shared bounded transport/schedulers, exact binary-key routing,
+> generation checks and range-scoped leader hints. Independent leaders,
+> quorums, crashes, restarts and physical LSM layouts are certified per range.
 >
-> **There is no Multi-Raft, routing, distributed read protocol, network database
-> service, server or client yet.** Phase 3 local inspection is stale-capable and
+> **There is no distributed read protocol, network database service, server or
+> client yet.** Phase 4 local inspection is stale-capable and
 > is not a linearizable distributed read API. Everything else described below
 > is a design with a written specification, not working code — see
 > [Roadmap](docs/roadmap.md) for exactly what is built and what is not.
@@ -149,13 +153,14 @@ make exhaustive     # every-byte WAL/SSTable/Manifest campaigns
 make certify-local  # every local correctness tier
 make certify-raft   # full single-group Raft gate plus local regression
 make certify-range  # Phase 3 integration gate plus Raft/local regressions
+make certify-multiraft # Phase 4 gate plus every lower regression gate
 make benchmark      # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover     # coverage profile and HTML report
 make help      # all targets
 ```
 
 PR CI runs the practical checks; scheduled/manual CI adds the heavy tiers.
-`make certify-range` is the complete durable replicated-range correctness command.
+`make certify-multiraft` is the complete static Multi-Raft correctness command.
 
 ### Reproducing a randomized failure
 
@@ -183,7 +188,7 @@ or CI execution modifying the working tree.
 
 ## What is implemented today
 
-The Phase 0 foundation and completed Phase 1–3 units. Each piece exists because
+The Phase 0 foundation and completed Phase 1–4 units. Each piece exists because
 a later phase cannot be tested honestly without it.
 
 | Package | Purpose |
@@ -193,6 +198,7 @@ a later phase cannot be tested honestly without it.
 | [`internal/storage`](internal/storage) | Integrated local LSM engine over internal-key/write-batch codecs, WAL, skip-list MemTables, SSTables, bounded FIFO flush, Manifest/VersionSet authority and version-preserving L0-to-L1 compaction. |
 | [`internal/raft`](internal/raft) | Deterministic static-membership Raft with durable term/vote/log, quorum commit, ordered apply, snapshots, crash/restart and an adversarial simulator. |
 | [`internal/replicatedrange`](internal/replicatedrange) | One range-scoped Raft replica, bounded proposal waiters, canonical PUT/DELETE commands, WAL-free Raft-index LSM application, local status/inspection and logical digest. |
+| [`internal/multiraft`](internal/multiraft) | Static descriptors/catalog persistence, per-node range hosting, shared bounded transport/schedulers, range-scoped message validation and immutable routed mutations. |
 | [`internal/invariant`](internal/invariant) | Named, typed assertions so a violation identifies itself, plus an `Expensive()` tier for O(n) structural checks enabled in tests and chaos runs. |
 | [`internal/rlog`](internal/rlog) | Structured logging with canonical attribute keys (`node`, `range`, `term`, `index`, `txn`), context propagation, runtime-adjustable level, and a recorder so tests assert on structured events rather than substrings. |
 
@@ -214,8 +220,6 @@ SSD with `RIVETDB_BENCH_DIR`; no volume name is hard-coded.
 Everything here is designed and specified but **not yet built**. Each links to
 its phase gate.
 
-- **Multi-Raft and range routing** — one Raft group per key range, many ranges
-  per node. [Phase 4](docs/roadmap.md#phase-4--multi-raft-and-routing-)
 - **MVCC and distributed transactions** — write intents, snapshot reads,
   two-phase commit over replicated transaction records.
   [Phases 5–6](docs/roadmap.md#phase-5--mvcc-)

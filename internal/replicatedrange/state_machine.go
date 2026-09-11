@@ -13,8 +13,9 @@ import (
 var ErrSnapshotDeferred = errors.New("replicated range: LSM-integrated Raft snapshots are deferred")
 
 type stateMachine struct {
-	engine *engine.Engine
-	hook   Hook
+	engine      *engine.Engine
+	hook        Hook
+	containsKey func([]byte) bool
 }
 
 func (m *stateMachine) Apply(entry raft.Entry) error {
@@ -24,6 +25,9 @@ func (m *stateMachine) Apply(entry raft.Entry) error {
 	command, err := DecodeCommand(entry.Command)
 	if err != nil {
 		return fmt.Errorf("decode committed command: %w", err)
+	}
+	if m.containsKey != nil && !m.containsKey(command.Key) {
+		return ErrKeyOutOfRange
 	}
 	mutation := storage.Mutation{Key: command.Key, Value: command.Value}
 	switch command.Type {

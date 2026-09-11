@@ -12,8 +12,7 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phase 0, Phase 1 local storage, Phase 2 single-group Raft and Phase 3 durable
-single-range integration are complete. Phase 4 Multi-Raft/routing is next.**
+**Phases 0–4 are complete and certified. Phase 5 MVCC is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -21,10 +20,12 @@ mutable/frozen MemTable, deterministic SSTable writer/reader and bounded FIFO
 flush pipeline and crash-safe Manifest/VersionSet under `internal/storage`.
 There is a complete local latest-state engine plus an independent deterministic
 Raft core, memory/file Raft stores, simulator and snapshot foundation under
-`internal/raft`. `internal/replicatedrange` composes one static range with a
-WAL-free Raft-index apply path, explicit durable local frontier and bounded
-proposal waiters. There is no server, client, distributed read protocol, MVCC
-transaction layer or Multi-Raft/routing behavior.
+`internal/raft`. `internal/replicatedrange` composes one range with a WAL-free
+Raft-index apply path, explicit durable local frontier and bounded proposal
+waiters. `internal/multiraft` adds the authoritative static catalog, per-node
+hosting, shared bounded transport/schedulers and routed mutations. There is no
+server, client, distributed read protocol, dynamic range metadata or MVCC
+layer.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
@@ -195,6 +196,8 @@ Design is written before the code it governs.
 | [docs/storage-engine.md](docs/storage-engine.md) | Phase 1 spec: byte-level on-disk formats, durability modes, crash-scenario table, test list |
 | [docs/raft.md](docs/raft.md) | Phase 2 protocol, persistence, simulator, snapshot and Phase 3 boundaries |
 | [docs/replicated-range.md](docs/replicated-range.md) | Phase 3 Raft-to-LSM ordering, durability, replay and runtime contract |
+| [docs/multiraft.md](docs/multiraft.md) | Phase 4 node composition, static metadata authority, shared runtime and failure domains |
+| [docs/range-routing.md](docs/range-routing.md) | Phase 4 descriptors, catalog format, routing and future split/migration seams |
 | [docs/correctness.md](docs/correctness.md) | Test strategy, reproducibility mechanism, and §5's explicit list of what is *not* tested |
 | [docs/roadmap.md](docs/roadmap.md) | The twelve phases and each gate |
 | [docs/design-decisions/](docs/design-decisions/) | ADRs. An ADR records a contested decision with the alternatives that lost, and is superseded rather than rewritten. |
@@ -214,7 +217,9 @@ Decisions recorded: [ADR-0001](docs/design-decisions/0001-lsm-tree-over-b-tree.m
 [ADR-0014](docs/design-decisions/0014-raft-core-persistence-and-apply-boundary.md)
 (Raft core persistence and apply boundary), and
 [ADR-0015](docs/design-decisions/0015-raft-to-lsm-replicated-state-machine.md)
-(Raft-to-LSM integration). The ADR index lists the complete
+(Raft-to-LSM integration), and
+[ADR-0016](docs/design-decisions/0016-multiraft-static-range-routing.md)
+(static Multi-Raft hosting and routing). The ADR index lists the complete
 sequence. They list the rejected options' genuine
 advantages, not strawmen — keep that standard.
 
@@ -263,22 +268,21 @@ Two parts of the spec are load-bearing and should not be changed casually:
 
 Open questions retained for their owning later phases:
 
-- **Shared WAL across ranges.** Phase 1 builds one engine with one WAL, but
-  Phase 4 gives each node many ranges. Whether they share an engine — turning N
-  per-range fsyncs into one — is a real throughput decision. Phase 1's
-  interfaces should not foreclose it. See storage-engine.md §9.
+- **Shared WAL across ranges.** Phase 4 deliberately retains one LSM and Raft
+  store per range. Replicated apply does not use the data WAL; any later
+  group-commit/shared-log design must preserve range isolation and recovery.
 - **No range merging** is planned. A workload that creates many ranges and goes
   quiet leaves them fragmented permanently. Stated as a limitation in the
   README; add it to the roadmap if the Phase 9 demo needs it.
-- **Read path** (Raft read vs ReadIndex vs leader lease) remains undecided before
-  Phase 4 exposes a client read surface. Phase 3 deliberately exposes only
-  stale-capable local inspection. Architecture §11 assumes nothing about clock
+- **Read path** (Raft read vs ReadIndex vs leader lease) remains undecided for
+  Phase 5. Phase 4 exposes routed mutations and stale-capable local inspection,
+  not a distributed read surface. Architecture §11 assumes nothing about clock
   skew, while leader leases would make safety depend on clock bounds. See §14.
 
-Phase 3 is frozen at [docs/replicated-range.md](docs/replicated-range.md): one
-static full-keyspace range, Raft as ordering/durability authority, Raft index as
-storage sequence, no replicated data WAL, explicit Manifest applied frontier,
-logical rather than physical replica equality, and integrated snapshots/log
-compaction deferred. Run `make certify-range`; it includes Phase 2 and Phase 1
-regression gates. Phase 4 may add many groups, routing metadata, shared
-transport and batched scheduling, but must not weaken these contracts.
+Phase 4 is frozen at [docs/multiraft.md](docs/multiraft.md) and
+[docs/range-routing.md](docs/range-routing.md): persisted static catalog
+authority, explicit unbounded user-key bounds, independent per-range
+Raft/LSM/frontiers, shared bounded runtime services, and no distributed-read
+claim. Run `make certify-multiraft`; it includes every lower regression gate.
+Phase 5 must not weaken the Phase 1 internal-key comparator, Phase 3 durability
+boundary, or Phase 4 range ownership and generation contracts.

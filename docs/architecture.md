@@ -1,8 +1,8 @@
 # RivetDB Architecture
 
 **Status:** design baseline for the implementation. Phase 0, Phase 1A through
-1K, the Phase 2 single-group Raft core, and the Phase 3 static durable
-replicated range are implemented. See
+1K, the Phase 2 single-group Raft core, the Phase 3 static durable replicated
+range, and the Phase 4 static Multi-Raft/routing composition are implemented. See
 [roadmap.md](roadmap.md) for what exists today
 and [invariants.md](invariants.md) for the properties each subsystem must
 uphold.
@@ -117,8 +117,10 @@ from Raft index to storage sequence. Its replicated engine mode treats the
 quorum Raft log as durability authority and creates no standalone data WAL.
 Each `RangeID` has independent `raft/` and `data/` directories, an Engine,
 Raft Store, applied frontier and waiter set. No process-global range singleton
-or timer was introduced, so Phase 4 can place many instances behind shared
-transport demultiplexing and batched ticking.
+or timer was introduced. Phase 4 now places many instances behind
+`internal/multiraft` persisted immutable catalog snapshots, range-scoped leader
+hints, one bounded transport and a round-robin logical scheduler without
+changing the Raft core.
 
 Phase 3 exposes only local replica inspection. Followers may be stale, and the
 leader path has no ReadIndex or lease proof. The architecture's unbounded-clock-
@@ -290,9 +292,9 @@ A range descriptor is the authoritative statement of "who serves these keys":
 ```text
 RangeDescriptor {
     RangeID     uint64        stable identity, never reused
-    StartKey    []byte        inclusive
-    EndKey      []byte        exclusive
-    Replicas    []ReplicaDesc (node, replica id, voter/learner)
+    StartKey    KeyBound      inclusive; explicit -infinity allowed
+    EndKey      KeyBound      exclusive; explicit +infinity allowed
+    Replicas    []ReplicaDesc (distinct node and replica identity; voters only)
     Generation  uint64        bumped on every membership or bounds change
 }
 ```
@@ -303,25 +305,32 @@ the current descriptor attached, and the client retries against the truth. This
 turns "the client had a stale map" from a correctness problem into a
 one-round-trip cost.
 
+Phase 4 persists the complete static descriptor catalog independently on every
+participating node using a bounded checksummed binary format and crash-safe
+file/directory fsync publication. The default catalog covers the full keyspace
+without overlap or gaps. Directories are never ownership authority. Dynamic
+metadata consensus remains deferred.
+
 Range partitioning rather than hash partitioning is chosen so that `SCAN` is a
 local operation and so that a hot region of the keyspace can be *split* — the
 central move of this project. The tradeoff (sequential keys create a hot range)
 is exactly the problem the rebalancer addresses. See
 [ADR-0002](design-decisions/0002-range-partitioning-over-hashing.md).
 
-Raft groups on a node share a small number of goroutines and a batched tick
-loop rather than each running its own timer, because a node hosting hundreds of
-ranges cannot afford per-range background threads. That sharing is the reason
-the clock is an injected interface rather than a package-level call.
+Raft groups on a node share one bounded logical message queue. Deterministic
+simulation uses a round-robin scheduler; the physical Node runtime uses a fixed
+four-worker fair pool with per-range FIFO queues and at most one active item per
+range. Neither starts an OS timer or scheduler goroutine per group. Each LSM
+retains its one bounded flush worker because storage lifecycle is range-local.
 
 ---
 
 ## 6. Routing
 
-The router turns a key into a leader address. It keeps a cached, immutable
-snapshot of the range map; lookups are a binary search over sorted start keys
-with no allocation on the hot path, and cache updates swap in a new snapshot
-rather than mutating the old one, so readers never lock.
+The Phase 4 router turns a key into a range-scoped leader candidate. Its
+catalog is immutable; lookups binary-search sorted interval ends in `O(log R)`
+and return owned descriptor bytes. Explicit catalog replacement constructs a
+new snapshot rather than mutating descriptors in place.
 
 Staleness is the normal case, not an error case. Four things can be out of
 date, and each has a defined recovery:
@@ -329,14 +338,16 @@ date, and each has a defined recovery:
 | Stale fact | Detected by | Recovery |
 |---|---|---|
 | Leader moved | `NotLeader` response carrying the current leader hint | retry against the hint |
-| Range split | descriptor generation mismatch | refetch descriptor, re-route the key |
+| Range split | descriptor generation mismatch | return current descriptor; refresh is deferred |
 | Replica moved | `RangeNotFound` on the addressed node | refetch descriptor |
 | Whole map stale | repeated misses | full range-map refresh |
 
-Retries are bounded, use exponential backoff with jitter, and respect the
-caller's context deadline. Operations that may be retried after an ambiguous
-outcome carry a client-supplied identifier so that a duplicate delivery is
-recognised rather than applied twice.
+Phase 4 retries only pre-admission `NotLeader` responses, over a bounded
+candidate count and bounded logical scheduler work, while respecting context
+cancellation. An admitted command is never automatically retried because
+client deduplication is not implemented and its outcome can be ambiguous.
+`ErrLeaderUnknown`, `ErrRangeNotFound`, and generation-bearing
+`ErrStaleRange` remain explicit.
 
 ---
 
@@ -495,10 +506,9 @@ turns that from an outage into slow convergence.
 Ownership is stated per subsystem and enforced by structure, not by convention.
 The general shape:
 
-- **Single-writer state machines.** Raft group state and range state are each
-  owned by one goroutine that processes a serialised queue of events. Other
-  goroutines enqueue; they do not touch the state. This eliminates most locking
-  and makes the state machine's transitions replayable from the event sequence.
+- **Serialised state machines.** Each Raft/range instance serializes Tick,
+  Step, proposal and apply behind its own lock. A shared external scheduler
+  provides bounded work units; it does not require a goroutine per group.
 - **Immutable snapshots for read-mostly data.** The range map and the storage
   engine's version set are immutable values swapped atomically. Readers take a
   reference and are never blocked by a writer.
@@ -579,12 +589,13 @@ internal/invariant/   safety assertions with named violations
 internal/rlog/        structured logging and a test recorder
 internal/testutil/    seeds and explicit failure-corpus promotion, leak detection, polling
 internal/storage/     key/batch, WAL, MemTable, SSTable writer/reader and flush pipeline
+internal/raft/        deterministic Raft core, stores and simulator
+internal/replicatedrange/ one durable Raft-to-LSM replica
+internal/multiraft/   static catalog, node registry, shared transport/scheduler and router
 docs/                 this document, invariants, roadmap, ADRs
 ```
 
-Planned, in roadmap order: `internal/raft`,
-`internal/multiraft`, `internal/rangedesc`,
-`internal/mvcc`, `internal/txn`, `internal/routing`, `internal/migration`,
+Planned, in roadmap order: `internal/mvcc`, `internal/txn`, `internal/migration`,
 `internal/rebalance`, `internal/telemetry`, `internal/server`, plus `cmd/`,
 `api/proto`, `tests/` and `benchmarks/`.
 
@@ -602,12 +613,11 @@ Recorded here rather than silently deferred:
    costs a round trip. ReadIndex avoids the log write; leader leases avoid the
    round trip entirely but make safety depend on clock bounds, which §11 says
    are not assumed. Phase 3 deliberately exposes only stale-capable local
-   inspection. The distributed read choice remains due before Phase 4 exposes
-   a routed client read surface.
-3. **Range metadata storage.** Bootstrapping is circular — the range map has to
-   live somewhere, and that somewhere is itself a range. The likely answer is a
-   dedicated meta-range replicated like any other, with clients bootstrapping
-   from any node. Undecided.
+   inspection. Phase 4 exposes routed mutations only; the distributed read
+   choice remains open.
+3. **Dynamic range metadata authority.** Phase 4 uses an identical persisted
+   static bootstrap catalog on every node. A future dedicated meta-range,
+   distributed catalog, or external placement driver remains undecided.
 4. **Split key selection.** Sampling gives a size-balanced split; a
    load-balanced split needs per-key access statistics, which cost memory
    proportional to the working set. Undecided.

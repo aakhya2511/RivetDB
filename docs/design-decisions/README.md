@@ -44,6 +44,7 @@ Phase:    which phase this governs
 | [0013](0013-evidence-driven-local-storage-performance.md) | Evidence-driven local-storage performance architecture | Accepted | 1K |
 | [0014](0014-raft-core-persistence-and-apply-boundary.md) | Raft core persistence and state-machine boundary | Accepted | 2 |
 | [0015](0015-raft-to-lsm-replicated-state-machine.md) | Raft-to-LSM replicated state-machine integration | Accepted | 3 |
+| [0016](0016-multiraft-static-range-routing.md) | Multi-Raft hosting and static range routing | Accepted | 4 |
 
 ## Planned
 
@@ -54,7 +55,6 @@ visible rather than implicit; each is noted in
 | Topic | Decided in |
 |---|---|
 | Read path: Raft read vs ReadIndex vs leader lease | Phase 3 |
-| Range metadata storage and client bootstrap | Phase 4 |
 | Timestamp allocation: central oracle vs hybrid logical clocks | Phase 5 |
 | Isolation level: snapshot isolation vs serializable | Phase 5 |
 | Transaction recovery model | Phase 6 |

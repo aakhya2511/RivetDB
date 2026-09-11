@@ -15,6 +15,7 @@ PKGS ?= ./...
 LOCAL_PKGS ?= ./internal/clock ./internal/invariant ./internal/rlog ./internal/storage/... ./internal/testutil/...
 RAFT_PKGS ?= ./internal/raft
 RANGE_PKGS ?= ./internal/replicatedrange ./internal/storage/engine ./internal/storage/manifest ./internal/storage/pipeline
+MULTIRAFT_PKGS ?= ./internal/multiraft
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -160,7 +161,36 @@ certify-range: ## Run the full Phase 3 gate plus frozen Phase 2/Phase 1 regressi
 	$(MAKE) range-stress
 	$(MAKE) range-crash
 	$(MAKE) certify-raft
-	$(MAKE) certify-local
+
+.PHONY: multiraft-test
+multiraft-test: ## Run Phase 4 catalog, routing, hosting, and recovery tests
+	$(GO) test -count=1 -timeout 30m $(TEST_FLAGS) $(MULTIRAFT_PKGS)
+
+.PHONY: multiraft-race
+multiraft-race: ## Run Phase 4 twice under the race detector
+	$(GO) test -race -count=$(RACE_COUNT) -timeout 45m $(TEST_FLAGS) $(MULTIRAFT_PKGS)
+
+.PHONY: multiraft-stress
+multiraft-stress: ## Run the 25-range 100k-event Multi-Raft campaign
+	RIVETDB_MULTIRAFT_STRESS=1 $(GO) test -count=1 -timeout 30m -run 'RandomizedMultiRaftHeavy' $(TEST_FLAGS) $(MULTIRAFT_PKGS)
+
+.PHONY: multiraft-chaos
+multiraft-chaos: ## Run in-memory and disk-backed Multi-Raft fault campaigns
+	$(GO) test -count=1 -timeout 30m -run 'RandomizedMultiRaftSafety|RandomizedDiskBackedMultiRangeRecovery|RangeSpecificQuorum|NodeCrashHasDifferent' $(TEST_FLAGS) $(MULTIRAFT_PKGS)
+
+.PHONY: multiraft-crash
+multiraft-crash: ## Run catalog/bootstrap and multi-range subprocess crash tests
+	RIVETDB_MULTIRAFT_CRASH=1 $(GO) test -count=1 -timeout 30m -run 'CatalogSubprocessCrash|BootstrapSubprocessCrash|MultiRaftSubprocessNodeCrash' $(TEST_FLAGS) $(MULTIRAFT_PKGS)
+
+.PHONY: certify-multiraft
+certify-multiraft: ## Run the Phase 4 gate and all frozen lower-phase certification
+	$(MAKE) check
+	$(MAKE) multiraft-test
+	$(MAKE) multiraft-race
+	$(MAKE) multiraft-stress
+	$(MAKE) multiraft-chaos
+	$(MAKE) multiraft-crash
+	$(MAKE) certify-range
 
 .PHONY: diff-check
 diff-check: ## Fail on whitespace errors in the working diff

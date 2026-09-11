@@ -186,3 +186,13 @@ certified. See [replicated-range.md](replicated-range.md).
 No real network transport, dynamic membership, joint consensus, ReadIndex,
 lease reads, client deduplication, Multi-Raft or distributed database claim is
 part of Phase 3.
+
+## 11. Phase 4 Multi-Raft composition
+
+Phase 4 leaves the Raft core unchanged. `internal/multiraft` instantiates one
+core and Store per `(RangeID, local ReplicaID)`, wraps every message in a
+generation-bearing envelope with matching routing and embedded RangeID, and
+drives Tick/Step through a shared bounded fair scheduler. Quorum, term, leader,
+log, snapshot and fatal state remain independent per group. Node and
+range-specific faults are composed outside the core and the existing Phase 2
+simulator continues checking RAFT invariants separately for every group.

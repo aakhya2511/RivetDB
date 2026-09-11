@@ -303,12 +303,31 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 
 | ID | Invariant | Status |
 |---|---|---|
-| RANGE-1 | Range key intervals partition the keyspace: the union of all `[start, end)` intervals covers it exactly, with no gap and no overlap. | planned (Phase 4) |
-| RANGE-2 | Exactly one range is responsible for any given key at any moment. Ownership is never ambiguous, including during a split. | planned (Phase 4) |
-| RANGE-3 | A range's `Generation` strictly increases and is bumped by every change to its bounds or replica set. | planned (Phase 4) |
-| RANGE-4 | A request carrying a stale generation is rejected with the current descriptor, never served from stale state. | planned (Phase 4) |
-| RANGE-5 | A range ID is never reused, including after the range is split or removed. | planned (Phase 4) |
-| RANGE-6 | Every key a client can read was written to the range that currently owns it. Routing never silently sends a key to the wrong range. | planned (Phase 4) |
+| RANGE-1 | Range key intervals partition the keyspace: the union of all `[start, end)` intervals covers it exactly, with no gap and no overlap. | verified (Phase 4 static catalog) |
+| RANGE-2 | Exactly one range is responsible for any given key at any moment. Ownership is never ambiguous, including during a split. | verified (Phase 4 static catalog); split transition planned (Phase 7) |
+| RANGE-3 | A range's `Generation` strictly increases and is bumped by every change to its bounds or replica set. | verified (Phase 4 administrative replacement); dynamic changes planned (Phases 7–8) |
+| RANGE-4 | A request carrying a stale generation is rejected with the current descriptor, never served from stale state. | verified (Phase 4) |
+| RANGE-5 | A range ID is never reused, including after the range is split or removed. | planned (Phase 7) |
+| RANGE-6 | Every key a client can read was written to the range that currently owns it. Routing never silently sends a key to the wrong range. | verified for mutations and local inspection (Phase 4); distributed reads planned |
+
+### Multi-Raft composition
+
+| ID | Invariant | Status |
+|---|---|---|
+| MULTIRAFT-1 | A Raft message is delivered only to the RangeID named by both its routing envelope and embedded group identity. | verified (Phase 4) |
+| MULTIRAFT-2 | Each RangeID has independent consensus state, Raft storage, LSM state, durable frontier, waiters and fatal state. | verified (Phase 4) |
+| MULTIRAFT-3 | A user mutation is proposed only to the descriptor owning its logical user key. | verified (Phase 4) |
+| MULTIRAFT-4 | A range state machine never contains a key outside its descriptor bounds. | verified (Phase 4) |
+| MULTIRAFT-5 | A range-local failure cannot mutate or stop an unrelated range. | verified (Phase 4) |
+| MULTIRAFT-6 | Quorum is computed independently from each descriptor's static replica set. | verified (Phase 4) |
+| MULTIRAFT-7 | Leaders and leader hints are scoped by RangeID; there is no global cluster leader. | verified (Phase 4) |
+| MULTIRAFT-8 | An authoritative full-keyspace catalog is ordered, gapless, non-overlapping and contains unique RangeIDs. | verified (Phase 4) |
+| MULTIRAFT-9 | A routed mutation's descriptor generation is validated before Raft admission. | verified (Phase 4) |
+| MULTIRAFT-10 | Persisted catalog metadata is ownership authority; local directories are never adopted as ranges. | verified (Phase 4) |
+| MULTIRAFT-11 | Node restart reconstructs all and only catalog-assigned local replicas, reporting missing assignments and retained orphans. | verified (Phase 4) |
+| MULTIRAFT-12 | Bounded fair node scheduling prevents one range's message/tick load from indefinitely starving another range. | verified (Phase 4) |
+| MULTIRAFT-13 | Applied and durable-applied frontiers are per RangeID and never influence another range. | verified (Phase 4) |
+| MULTIRAFT-14 | Convergence is checked per RangeID by logical state, never by physical LSM layout identity. | verified (Phase 4) |
 
 ## MVCC
 

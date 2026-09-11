@@ -1,7 +1,6 @@
 # Design Note: Durable Replicated Range (Phase 3)
 
-**Status:** Phase 3 integration design gate passed; implementation must follow
-this contract before the phase can be certified.
+**Status:** Phase 3 certified; Phase 4 composes this frozen per-range contract.
 
 **Related:** [ADR-0015](design-decisions/0015-raft-to-lsm-replicated-state-machine.md) ·
 [raft.md](raft.md) · [storage-engine.md](storage-engine.md) ·
@@ -161,3 +160,10 @@ waiters are per instance. No new global singleton is introduced. Phase 4 must
 add range descriptors/routing, a node-level transport demultiplexer and shared
 batched tick/runtime scheduling so hundreds of groups do not own one timer or
 goroutine each.
+
+Phase 4 implements that boundary in `internal/multiraft` without changing the
+ordering or durability contract above. A replica may now receive its static
+descriptor generation and a deterministic `ContainsKey` predicate. Admission
+rejects an out-of-range command before Raft proposal; committed apply checks the
+same predicate and makes the replica fatal on violation. Descriptor agreement
+is established by the authoritative catalog before groups communicate.

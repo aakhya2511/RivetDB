@@ -413,6 +413,40 @@ func TestMalformedCommittedCommandIsFatal(t *testing.T) {
 	}
 }
 
+func TestRangeKeyValidatorRejectsAdmissionAndCommittedApply(t *testing.T) {
+	directory := t.TempDir()
+	local, err := engine.Open(engine.Options{Directory: filepath.Join(directory, "data"), Mode: engine.ModeReplicated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := local.Close(context.Background()); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}()
+	machine := &stateMachine{engine: local, containsKey: func(key []byte) bool { return bytes.Compare(key, []byte("m")) < 0 }}
+	encoded, err := EncodeCommand(Command{Type: CommandPut, Key: []byte("z"), Value: []byte("outside")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applyErr := machine.Apply(raft.Entry{Index: 1, Term: 1, Type: raft.EntryCommand, Command: encoded}); !errors.Is(applyErr, ErrKeyOutOfRange) {
+		t.Fatalf("committed ownership check=%v", applyErr)
+	}
+	replica, err := Open(Options{RangeID: 9, NodeID: 1, ReplicaID: 1, Peers: []raft.NodeID{1}, Directory: filepath.Join(directory, "replica"),
+		ElectionTimeoutMin: 3, ElectionTimeoutMax: 3, HeartbeatInterval: 1, Random: rand.New(rand.NewPCG(1, 2)), ContainsKey: machine.containsKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := replica.Close(context.Background()); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}()
+	if _, _, _, err := replica.Propose(context.Background(), encoded); !errors.Is(err, ErrKeyOutOfRange) {
+		t.Fatalf("admission ownership check=%v", err)
+	}
+}
+
 func TestMajorityContinuesAfterFollowerStorageApplyFailure(t *testing.T) {
 	cluster := newTestCluster(t, 3)
 	cluster.elect(1)
