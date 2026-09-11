@@ -1,7 +1,8 @@
 # RivetDB Architecture
 
 **Status:** design baseline for the implementation. Phase 0, Phase 1A through
-1K and the Phase 2 single-group Raft core are implemented. See
+1K, the Phase 2 single-group Raft core, and the Phase 3 static durable
+replicated range are implemented. See
 [roadmap.md](roadmap.md) for what exists today
 and [invariants.md](invariants.md) for the properties each subsystem must
 uphold.
@@ -108,6 +109,20 @@ network. The Raft implementation replicates opaque byte commands; it can be
 tested against an in-memory state machine with no disk. Composing them is a
 separate concern with its own tests. This is what makes each phase's gate
 meaningful — a bug found in Phase 5 cannot be a Phase 1 bug in disguise.
+
+Phase 3 composes these layers without reversing that dependency: the Raft core
+still sees opaque commands and the storage engine still sees ordered mutations.
+`internal/replicatedrange` owns decoding, proposal completion and the mapping
+from Raft index to storage sequence. Its replicated engine mode treats the
+quorum Raft log as durability authority and creates no standalone data WAL.
+Each `RangeID` has independent `raft/` and `data/` directories, an Engine,
+Raft Store, applied frontier and waiter set. No process-global range singleton
+or timer was introduced, so Phase 4 can place many instances behind shared
+transport demultiplexing and batched ticking.
+
+Phase 3 exposes only local replica inspection. Followers may be stale, and the
+leader path has no ReadIndex or lease proof. The architecture's unbounded-clock-
+skew assumption remains unchanged: no leader-lease safety claim was introduced.
 
 ### 2.2 The control plane
 
@@ -247,9 +262,10 @@ to logical ticks. Consequences:
 
 Phase 2 persists `currentTerm`, `votedFor`, snapshots and the replicated log
 through a Raft-specific Store, independently of the Phase 1 data WAL. The
-former is the consensus durability authority. Phase 3 must decide how committed
-commands enter the LSM without accidentally double-logging or assigning
-replica-local logical order; see [ADR-0014](design-decisions/0014-raft-core-persistence-and-apply-boundary.md).
+former is the consensus durability authority. Phase 3 carries committed
+commands into a replicated-mode LSM without a data WAL, using the Raft index as
+logical sequence and a distinct Manifest durable-applied frontier; see
+[ADR-0015](design-decisions/0015-raft-to-lsm-replicated-state-machine.md).
 
 ---
 
@@ -585,7 +601,9 @@ Recorded here rather than silently deferred:
 2. **Read path.** Routing every read through Raft is obviously correct but
    costs a round trip. ReadIndex avoids the log write; leader leases avoid the
    round trip entirely but make safety depend on clock bounds, which §11 says
-   are not assumed. Undecided; will become an ADR at Phase 3.
+   are not assumed. Phase 3 deliberately exposes only stale-capable local
+   inspection. The distributed read choice remains due before Phase 4 exposes
+   a routed client read surface.
 3. **Range metadata storage.** Bootstrapping is circular — the range map has to
    live somewhere, and that somewhere is itself a range. The likely answer is a
    dedicated meta-range replicated like any other, with clients bootstrapping

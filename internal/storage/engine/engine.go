@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -28,20 +29,46 @@ const (
 	DefaultTableCacheCapacity = 32
 )
 
+// ReplicatedStage is a deterministic observation boundary in the replicated
+// apply and flush lifecycle.
+type ReplicatedStage uint8
+
+const (
+	ReplicatedStageApplyStarted ReplicatedStage = iota
+	ReplicatedStageMemTableApplied
+	ReplicatedStageVisibilityPublished
+	ReplicatedStageSSTableDurable
+	ReplicatedStageManifestFrontierDurable
+)
+
+// ReplicatedHook observes replicated durability boundaries for crash tests.
+type ReplicatedHook func(ReplicatedStage, uint64)
+
+// Mode selects the durability authority for one database directory.
+type Mode = manifest.StorageMode
+
+const (
+	ModeStandalone = manifest.ModeStandalone
+	ModeReplicated = manifest.ModeReplicated
+)
+
 // Options configures one local storage engine.
 type Options struct {
-	Directory          string
-	MemTableBytes      uint64
-	MaxImmutables      int
-	SSTableOptions     sstable.Options
-	L0Trigger          int
-	TargetFileSize     uint64
-	Clock              clock.Clock
-	Logger             *slog.Logger
-	WriteHook          pipeline.WriteHook
-	ReadHook           ReadHook
-	MaintenanceHook    MaintenanceHook
-	TableCacheCapacity int
+	Directory           string
+	MemTableBytes       uint64
+	MaxImmutables       int
+	SSTableOptions      sstable.Options
+	L0Trigger           int
+	TargetFileSize      uint64
+	Clock               clock.Clock
+	Logger              *slog.Logger
+	WriteHook           pipeline.WriteHook
+	ReadHook            ReadHook
+	MaintenanceHook     MaintenanceHook
+	TableCacheCapacity  int
+	Mode                Mode
+	ReplicatedApplyHook pipeline.ReplicatedApplyHook
+	ReplicatedHook      ReplicatedHook
 }
 
 // KV is one latest-state user-key/value result.
@@ -66,6 +93,7 @@ type Stats struct {
 // Engine owns the complete Phase 1 local LSM lifecycle.
 type Engine struct {
 	mu                                             sync.RWMutex
+	applyMu                                        sync.Mutex
 	directory                                      string
 	pipeline                                       *pipeline.Pipeline
 	manifest                                       *manifest.Store
@@ -82,12 +110,25 @@ type Engine struct {
 	maintenanceHook                                MaintenanceHook
 	tableCache                                     *tableCache
 	reclaimed                                      map[uint64]struct{}
+	mode                                           Mode
+	appliedIdentities                              map[uint64]applyIdentity
 	reclaimedTables, maintenanceFailures           atomic.Uint64
+}
+
+type applyIdentity struct {
+	term   uint64
+	digest [sha256.Size]byte
 }
 
 // Open creates or recovers one local engine directory.
 func Open(options Options) (_ *Engine, resultErr error) {
 	if options.Directory == "" {
+		return nil, ErrInvalidOptions
+	}
+	if options.Mode == 0 {
+		options.Mode = ModeStandalone
+	}
+	if options.Mode != ModeStandalone && options.Mode != ModeReplicated {
 		return nil, ErrInvalidOptions
 	}
 	if options.MemTableBytes == 0 {
@@ -128,10 +169,21 @@ func Open(options Options) (_ *Engine, resultErr error) {
 		return nil, fmt.Errorf("inspect CURRENT: %w", currentErr)
 	}
 	wPath := filepath.Join(options.Directory, pipeline.WALFileName)
-	if err := repairWALTail(wPath); err != nil {
+	if options.Mode == ModeReplicated {
+		if _, err := os.Lstat(wPath); err == nil {
+			return nil, ErrUnexpectedWAL
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect forbidden replicated data WAL: %w", err)
+		}
+	} else if err := repairWALTail(wPath); err != nil {
 		return nil, err
 	}
-	manifestOptions := manifest.Options{Directory: options.Directory, Clock: options.Clock, Logger: options.Logger}
+	manifestOptions := manifest.Options{Directory: options.Directory, Clock: options.Clock, Logger: options.Logger, Mode: options.Mode}
+	if options.ReplicatedHook != nil {
+		manifestOptions.ReplicatedFrontierHook = func(index uint64) {
+			options.ReplicatedHook(ReplicatedStageManifestFrontierDurable, index)
+		}
+	}
 	var store *manifest.Store
 	var err error
 	if currentErr == nil {
@@ -153,27 +205,62 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	}
 	recovered := memtable.New()
 	var replayed uint64
-	if _, statErr := os.Stat(wPath); statErr == nil {
-		var frontier *uint64
-		if value, ok := version.ReplayFrontier(); ok {
-			frontier = &value
+	if options.Mode == ModeStandalone {
+		if _, statErr := os.Stat(wPath); statErr == nil {
+			var frontier *uint64
+			if value, ok := version.ReplayFrontier(); ok {
+				frontier = &value
+			}
+			replayed, err = manifest.ReplayWAL(wPath, frontier, recovered)
+			if err != nil {
+				return nil, fmt.Errorf("replay engine WAL: %w", err)
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("stat WAL: %w", statErr)
 		}
-		replayed, err = manifest.ReplayWAL(wPath, frontier, recovered)
-		if err != nil {
-			return nil, fmt.Errorf("replay engine WAL: %w", err)
-		}
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return nil, fmt.Errorf("stat WAL: %w", statErr)
 	}
 	nextSequence, exhausted := store.RecoveredNextSequence()
+	var durableApplied uint64
+	if options.Mode == ModeReplicated {
+		var ok bool
+		durableApplied, ok = version.ReplicatedAppliedThrough()
+		if !ok {
+			return nil, errors.Join(ErrCorruption, manifest.ErrModeMismatch)
+		}
+		nextSequence, exhausted = 0, false
+	}
 	firstGeneration := nextGeneration(version)
+	replicatedApplyHook := options.ReplicatedApplyHook
+	if options.ReplicatedHook != nil {
+		outerHook := replicatedApplyHook
+		replicatedApplyHook = func(stage pipeline.WriteStage, result pipeline.WriteResult) {
+			if outerHook != nil {
+				outerHook(stage, result)
+			}
+			switch stage {
+			case pipeline.WriteStageApplyStarted:
+				options.ReplicatedHook(ReplicatedStageApplyStarted, result.LastSequence)
+			case pipeline.WriteStageApplyCompleted:
+				options.ReplicatedHook(ReplicatedStageMemTableApplied, result.LastSequence)
+			case pipeline.WriteStagePublished:
+				options.ReplicatedHook(ReplicatedStageVisibilityPublished, result.LastSequence)
+			}
+		}
+	}
 	pipe, err := pipeline.Open(pipeline.Options{
 		Directory: options.Directory, MemTableBytes: options.MemTableBytes,
 		MaxImmutables: options.MaxImmutables, NextSequence: nextSequence,
 		SequenceExhausted: exhausted, FirstGeneration: firstGeneration,
 		SSTableOptions: options.SSTableOptions, Clock: options.Clock, Logger: options.Logger,
 		FileAllocator: store, TableInstaller: store, RecoveredTable: recovered,
-		WriteHook: options.WriteHook,
+		WriteHook:  options.WriteHook,
+		Replicated: options.Mode == ModeReplicated, DurableApplied: durableApplied,
+		ReplicatedApplyHook: replicatedApplyHook,
+		ReplicatedFlushHook: func(index uint64) {
+			if options.ReplicatedHook != nil {
+				options.ReplicatedHook(ReplicatedStageSSTableDurable, index)
+			}
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open write pipeline: %w", err)
@@ -186,7 +273,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open compaction executor: %w", err), pipe.Close(context.Background()))
 	}
-	e := &Engine{directory: options.Directory, pipeline: pipe, manifest: store, compact: executor, readHook: options.ReadHook, removeFile: os.Remove, maintenanceHook: options.MaintenanceHook, tableCache: newTableCache(options.Directory, options.TableCacheCapacity), reclaimed: make(map[uint64]struct{})}
+	e := &Engine{directory: options.Directory, pipeline: pipe, manifest: store, compact: executor, readHook: options.ReadHook, removeFile: os.Remove, maintenanceHook: options.MaintenanceHook, tableCache: newTableCache(options.Directory, options.TableCacheCapacity), reclaimed: make(map[uint64]struct{}), mode: options.Mode, appliedIdentities: make(map[uint64]applyIdentity)}
 	e.recoveries.Store(1)
 	e.replayed.Store(replayed)
 	return e, nil
@@ -260,10 +347,95 @@ func (e *Engine) writeBatch(ctx context.Context, mutations []storage.Mutation) e
 	if e.closed {
 		return ErrClosed
 	}
+	if e.mode != ModeStandalone {
+		return ErrWrongMode
+	}
 	if _, err := e.pipeline.Write(ctx, mutations); err != nil {
 		return fmt.Errorf("write local mutation: %w", err)
 	}
 	return nil
+}
+
+// ApplyCommitted materializes one committed Raft mutation without using the
+// standalone WAL or local sequence allocator. commandBytes identifies replay.
+func (e *Engine) ApplyCommitted(ctx context.Context, index, term uint64, commandBytes []byte, mutation storage.Mutation) error {
+	if ctx == nil || index == 0 || term == 0 || len(commandBytes) == 0 {
+		return ErrInvalidOptions
+	}
+	e.applyMu.Lock()
+	defer e.applyMu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return ErrClosed
+	}
+	if e.mode != ModeReplicated {
+		return ErrWrongMode
+	}
+	identity := applyIdentity{term: term, digest: sha256.Sum256(commandBytes)}
+	if existing, ok := e.appliedIdentities[index]; ok {
+		if existing != identity {
+			return ErrConflictingApply
+		}
+		return ErrAlreadyApplied
+	}
+	version, err := e.manifest.Current()
+	if err != nil {
+		return fmt.Errorf("read replicated applied frontier: %w", err)
+	}
+	if durable, ok := version.ReplicatedAppliedThrough(); ok && index <= durable {
+		return ErrAlreadyApplied
+	}
+	stats := e.pipeline.Stats()
+	if index <= stats.ReplicatedApplied {
+		return ErrApplyOrder
+	}
+	if _, err := e.pipeline.ApplyReplicated(ctx, index, mutation); err != nil {
+		return fmt.Errorf("materialize committed Raft mutation: %w", err)
+	}
+	e.appliedIdentities[index] = identity
+	if mutation.Kind == storage.KindDelete {
+		e.deletes.Add(1)
+	} else {
+		e.puts.Add(1)
+	}
+	return nil
+}
+
+// AdvanceApplied records complete local application of committed no-op indexes.
+func (e *Engine) AdvanceApplied(index uint64) error {
+	e.applyMu.Lock()
+	defer e.applyMu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return ErrClosed
+	}
+	if e.mode != ModeReplicated {
+		return ErrWrongMode
+	}
+	if err := e.pipeline.AdvanceReplicatedApplied(index); err != nil {
+		return fmt.Errorf("advance replicated applied progress: %w", err)
+	}
+	return nil
+}
+
+// DurableAppliedRaftIndex returns the authoritative local Manifest frontier.
+func (e *Engine) DurableAppliedRaftIndex() (uint64, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return 0, ErrClosed
+	}
+	version, err := e.manifest.Current()
+	if err != nil {
+		return 0, fmt.Errorf("read Manifest frontier: %w", err)
+	}
+	value, ok := version.ReplicatedAppliedThrough()
+	if !ok {
+		return 0, ErrWrongMode
+	}
+	return value, nil
 }
 
 // Flush rotates the active table and waits for every immutable installation.

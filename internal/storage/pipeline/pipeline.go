@@ -36,9 +36,13 @@ type Options struct {
 	TableInstaller  TableInstaller
 	// RecoveredTable is WAL-replayed state installed as the initial active
 	// MemTable. Open never writes its contents back to the WAL.
-	RecoveredTable    *memtable.MemTable
-	SequenceExhausted bool
-	WriteHook         WriteHook
+	RecoveredTable      *memtable.MemTable
+	SequenceExhausted   bool
+	WriteHook           WriteHook
+	Replicated          bool
+	DurableApplied      uint64
+	ReplicatedApplyHook ReplicatedApplyHook
+	ReplicatedFlushHook ReplicatedFlushHook
 }
 
 type durableWAL interface {
@@ -107,6 +111,13 @@ func (s WriteStage) String() string {
 // WriteHook observes a stage without holding the Pipeline mutex.
 type WriteHook func(WriteStage, WriteResult)
 
+// ReplicatedApplyHook observes a WAL-free replicated state-machine apply.
+type ReplicatedApplyHook func(WriteStage, WriteResult)
+
+// ReplicatedFlushHook observes an SSTable after contents and directory
+// durability and validation, but before Manifest installation.
+type ReplicatedFlushHook func(uint64)
+
 // Pipeline owns one synchronous WAL writer, one active MemTable and one FIFO
 // immutable flush worker.
 type Pipeline struct {
@@ -119,31 +130,37 @@ type Pipeline struct {
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 
-	wal             durableWAL
-	directory       string
-	threshold       uint64
-	maxImmutable    int
-	active          *generation
-	immutables      []*generation
-	outputs         []FlushOutput
-	nextSequence    uint64
-	seqExhausted    bool
-	lastAssigned    uint64
-	haveAssigned    bool
-	visibleSequence uint64
-	haveVisible     bool
-	nextGeneration  uint64
-	nextFile        uint64
-	flush           flushExecutor
-	allocator       FileAllocator
-	installer       TableInstaller
-	clock           clock.Clock
-	logger          *slog.Logger
-	stats           Stats
-	accepting       bool
-	closed          bool
-	closeErr        error
-	writeHook       WriteHook
+	wal                 durableWAL
+	directory           string
+	threshold           uint64
+	maxImmutable        int
+	active              *generation
+	immutables          []*generation
+	outputs             []FlushOutput
+	nextSequence        uint64
+	seqExhausted        bool
+	lastAssigned        uint64
+	haveAssigned        bool
+	visibleSequence     uint64
+	haveVisible         bool
+	nextGeneration      uint64
+	nextFile            uint64
+	flush               flushExecutor
+	allocator           FileAllocator
+	installer           TableInstaller
+	clock               clock.Clock
+	logger              *slog.Logger
+	stats               Stats
+	accepting           bool
+	closed              bool
+	closeErr            error
+	writeHook           WriteHook
+	replicated          bool
+	replicatedApplied   uint64
+	durableApplied      uint64
+	coveredApplied      uint64
+	replicatedApplyHook ReplicatedApplyHook
+	replicatedFlushHook ReplicatedFlushHook
 }
 
 // Open constructs a pipeline using explicit per-batch WAL sync and the Phase
@@ -152,6 +169,9 @@ type Pipeline struct {
 func Open(options Options) (*Pipeline, error) {
 	if err := validateOptions(options); err != nil {
 		return nil, err
+	}
+	if options.Replicated {
+		return newPipeline(options, nil, nil)
 	}
 	logWriter, err := wal.OpenWriter(filepath.Join(options.Directory, WALFileName), wal.WriterOptions{Durability: wal.SyncNone})
 	if err != nil {
@@ -179,7 +199,7 @@ func validateOptions(options Options) error {
 }
 
 func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) (*Pipeline, error) {
-	if logWriter == nil {
+	if logWriter == nil && !options.Replicated || logWriter != nil && options.Replicated {
 		return nil, ErrInvalidOptions
 	}
 	if options.Clock == nil {
@@ -205,6 +225,10 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 		nextGeneration: firstGeneration + 1, nextFile: firstFile,
 		clock: options.Clock, logger: rlog.Component(options.Logger, "storage.pipeline"), accepting: true,
 		allocator: options.FileAllocator, installer: options.TableInstaller, writeHook: options.WriteHook,
+		replicated: options.Replicated, replicatedApplied: options.DurableApplied,
+		durableApplied: options.DurableApplied, coveredApplied: options.DurableApplied,
+		replicatedApplyHook: options.ReplicatedApplyHook,
+		replicatedFlushHook: options.ReplicatedFlushHook,
 	}
 	p.writeToken <- struct{}{}
 	recovered := options.RecoveredTable
@@ -218,6 +242,9 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 	} else if options.NextSequence != 0 {
 		p.lastAssigned, p.visibleSequence = options.NextSequence-1, options.NextSequence-1
 		p.haveAssigned, p.haveVisible = true, true
+	}
+	if options.Replicated && options.DurableApplied != 0 {
+		p.visibleSequence, p.haveVisible = options.DurableApplied, true
 	}
 	if recovered.Len() != 0 {
 		iterator := recovered.Iterator()
@@ -247,6 +274,9 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 // Write assigns, durably appends, atomically applies and publishes one
 // nonempty batch.
 func (p *Pipeline) Write(ctx context.Context, mutations []storage.Mutation) (WriteResult, error) {
+	if p.replicated {
+		return WriteResult{}, ErrWrongMode
+	}
 	if ctx == nil {
 		return WriteResult{}, ErrInvalidOptions
 	}
@@ -356,6 +386,114 @@ func (p *Pipeline) Write(ctx context.Context, mutations []storage.Mutation) (Wri
 		p.notify(p.wake)
 	}
 	return result, nil
+}
+
+// ApplyReplicated applies exactly one committed mutation using its Raft index
+// as the internal storage sequence. It performs no local WAL append or sync.
+func (p *Pipeline) ApplyReplicated(ctx context.Context, index uint64, mutation storage.Mutation) (WriteResult, error) {
+	if !p.replicated {
+		return WriteResult{}, ErrWrongMode
+	}
+	if ctx == nil || index == 0 {
+		return WriteResult{}, ErrInvalidOptions
+	}
+	if err := validateMutations([]storage.Mutation{mutation}); err != nil {
+		return WriteResult{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return WriteResult{}, fmt.Errorf("wait for replicated apply admission: %w", ctx.Err())
+	case <-p.writeToken:
+	}
+	defer func() { p.writeToken <- struct{}{} }()
+	if err := p.waitForCapacity(ctx); err != nil {
+		return WriteResult{}, fmt.Errorf("before replicated apply: %w", err)
+	}
+	p.mu.Lock()
+	if !p.accepting {
+		p.mu.Unlock()
+		return WriteResult{}, ErrClosed
+	}
+	if failure := p.flushFailureLocked(); failure != nil {
+		p.mu.Unlock()
+		return WriteResult{}, failure
+	}
+	if index <= p.durableApplied {
+		p.mu.Unlock()
+		return WriteResult{}, ErrAlreadyApplied
+	}
+	if index <= p.replicatedApplied {
+		p.mu.Unlock()
+		return WriteResult{}, ErrApplyRegression
+	}
+	p.mu.Unlock()
+	if err := p.ensureActiveFile(ctx); err != nil {
+		return WriteResult{}, err
+	}
+	p.mu.Lock()
+	generationID, table := p.active.id, p.active.table
+	p.mu.Unlock()
+	result := WriteResult{FirstSequence: index, LastSequence: index, Generation: generationID}
+	p.observeReplicated(WriteStageApplyStarted, result)
+	applyErr := table.ApplyBatch(storage.WriteBatch{FirstSequence: index, Mutations: []storage.Mutation{mutation}})
+	invariant.Assert(applyErr == nil, "REPLICA-13", "apply prevalidated committed mutation: %v", applyErr)
+	p.observeReplicated(WriteStageApplyCompleted, result)
+	p.mu.Lock()
+	invariant.Assert(p.active.id == generationID && p.active.table == table, "REPLICA-4", "generation changed during replicated apply")
+	if !p.active.haveSeq {
+		p.active.smallestSeq = index
+	}
+	p.active.haveSeq, p.active.largestSeq = true, index
+	if !p.active.haveApplied {
+		p.active.haveApplied = true
+		p.active.firstApplied = p.coveredApplied + 1
+	}
+	p.active.lastApplied = index
+	p.coveredApplied, p.replicatedApplied = index, index
+	p.visibleSequence, p.haveVisible = index, true
+	rotate := p.active.table.ReachedSize(p.threshold)
+	if rotate {
+		p.rotateLocked()
+	}
+	p.validateIfEnabledLocked()
+	p.mu.Unlock()
+	p.observeReplicated(WriteStagePublished, result)
+	if rotate {
+		p.notify(p.wake)
+	}
+	return result, nil
+}
+
+// AdvanceReplicatedApplied publishes committed no-op progress without creating
+// a physical mutation. An active nonempty generation carries that coverage.
+func (p *Pipeline) AdvanceReplicatedApplied(index uint64) error {
+	if !p.replicated {
+		return ErrWrongMode
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.accepting {
+		return ErrClosed
+	}
+	if index < p.replicatedApplied {
+		return ErrApplyRegression
+	}
+	if index == p.replicatedApplied {
+		return nil
+	}
+	p.replicatedApplied = index
+	p.visibleSequence, p.haveVisible = index, true
+	if p.active.haveApplied {
+		p.active.lastApplied = index
+		p.coveredApplied = index
+	}
+	return nil
+}
+
+func (p *Pipeline) observeReplicated(stage WriteStage, result WriteResult) {
+	if p.replicatedApplyHook != nil {
+		p.replicatedApplyHook(stage, result)
+	}
 }
 
 func (p *Pipeline) observe(stage WriteStage, result WriteResult) {
@@ -595,6 +733,8 @@ func (p *Pipeline) Stats() Stats {
 	stats.SequenceExhausted = p.seqExhausted
 	stats.LastAssigned, stats.HaveAssigned = p.lastAssigned, p.haveAssigned
 	stats.VisibleSequence, stats.HaveVisible = p.visibleSequence, p.haveVisible
+	stats.ReplicatedMode, stats.ReplicatedApplied = p.replicated, p.replicatedApplied
+	stats.DurableAppliedAtOpen = p.durableApplied
 	return stats
 }
 
@@ -654,7 +794,10 @@ func (p *Pipeline) Close(ctx context.Context) error {
 	drainErr := p.Drain(ctx)
 	p.cancel()
 	p.wg.Wait()
-	walErr := p.wal.Close()
+	var walErr error
+	if p.wal != nil {
+		walErr = p.wal.Close()
+	}
 	p.mu.Lock()
 	p.closed = true
 	p.closeErr = errors.Join(drainErr, walErr)

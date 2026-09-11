@@ -10,17 +10,21 @@ import (
 // Version is an immutable logical view. Its methods return copied slices and
 // metadata, so a caller cannot mutate VersionSet state.
 type Version struct {
-	generation       uint64
-	comparator       string
-	levels           [MaxLevels][]TableMetadata
-	nextFileNumber   uint64
-	haveLastSequence bool
-	lastSequence     uint64
-	haveFrontier     bool
-	frontier         uint64
+	generation            uint64
+	comparator            string
+	levels                [MaxLevels][]TableMetadata
+	nextFileNumber        uint64
+	haveLastSequence      bool
+	lastSequence          uint64
+	haveFrontier          bool
+	frontier              uint64
+	mode                  StorageMode
+	modeExplicit          bool
+	replicatedApplied     uint64
+	haveReplicatedApplied bool
 }
 
-func initialVersion() *Version { return &Version{nextFileNumber: 1} }
+func initialVersion() *Version { return &Version{nextFileNumber: 1, mode: ModeStandalone} }
 
 // Generation is the number of durable edits represented by this Version.
 func (v *Version) Generation() uint64 { return v.generation }
@@ -72,6 +76,14 @@ func (v *Version) LastSequence() (uint64, bool) { return v.lastSequence, v.haveL
 // ReplayFrontier returns the inclusive safely installed WAL frontier.
 func (v *Version) ReplayFrontier() (uint64, bool) { return v.frontier, v.haveFrontier }
 
+// Mode returns the persisted durability mode. Legacy manifests are standalone.
+func (v *Version) Mode() StorageMode { return v.mode }
+
+// ReplicatedAppliedThrough returns the inclusive durable replicated apply frontier.
+func (v *Version) ReplicatedAppliedThrough() (uint64, bool) {
+	return v.replicatedApplied, v.haveReplicatedApplied
+}
+
 // Contains reports whether the same file metadata is live at its stated level.
 func (v *Version) Contains(table TableMetadata) bool {
 	if v == nil || table.Level >= MaxLevels {
@@ -97,6 +109,12 @@ func (v *Version) apply(edit VersionEdit) (*Version, error) {
 	}
 	if next.comparator == "" {
 		return nil, ErrComparatorMismatch
+	}
+	if edit.StorageMode != nil {
+		if (*edit.StorageMode != ModeStandalone && *edit.StorageMode != ModeReplicated) || next.modeExplicit || next.generation != 0 {
+			return nil, ErrModeMismatch
+		}
+		next.mode, next.modeExplicit = *edit.StorageMode, true
 	}
 	if edit.NextFileNumber != nil {
 		if *edit.NextFileNumber < next.nextFileNumber || *edit.NextFileNumber == 0 || *edit.NextFileNumber > maxNextFileNumber() {
@@ -143,6 +161,9 @@ func (v *Version) apply(edit VersionEdit) (*Version, error) {
 		}
 	}
 	if edit.ReplayFrontier != nil {
+		if next.mode != ModeStandalone {
+			return nil, ErrModeMismatch
+		}
 		if next.haveFrontier && *edit.ReplayFrontier < next.frontier {
 			return nil, ErrFrontierRegression
 		}
@@ -153,6 +174,15 @@ func (v *Version) apply(edit VersionEdit) (*Version, error) {
 			return nil, ErrFrontierGap
 		}
 		next.frontier, next.haveFrontier = *edit.ReplayFrontier, true
+	}
+	if edit.ReplicatedAppliedThrough != nil {
+		if next.mode != ModeReplicated || next.haveReplicatedApplied && *edit.ReplicatedAppliedThrough < next.replicatedApplied {
+			return nil, ErrModeMismatch
+		}
+		next.replicatedApplied, next.haveReplicatedApplied = *edit.ReplicatedAppliedThrough, true
+	}
+	if next.mode == ModeStandalone && next.haveReplicatedApplied || next.mode == ModeReplicated && next.haveFrontier {
+		return nil, ErrModeMismatch
 	}
 	if highest := next.highestFile(); highest >= next.nextFileNumber {
 		return nil, ErrFileNumberCollision
@@ -331,6 +361,14 @@ func (v *Version) snapshotEdit() (VersionEdit, error) {
 		frontier := v.frontier
 		edit.ReplayFrontier = &frontier
 	}
+	if v.mode == ModeReplicated {
+		mode := v.mode
+		edit.StorageMode = &mode
+	}
+	if v.haveReplicatedApplied {
+		frontier := v.replicatedApplied
+		edit.ReplicatedAppliedThrough = &frontier
+	}
 	for _, level := range v.levels {
 		edit.AddedFiles = append(edit.AddedFiles, cloneTables(level)...)
 	}
@@ -343,7 +381,8 @@ func (v *Version) snapshotEdit() (VersionEdit, error) {
 func validateEquivalent(left, right *Version) error {
 	if left.comparator != right.comparator || left.nextFileNumber != right.nextFileNumber ||
 		left.haveLastSequence != right.haveLastSequence || left.lastSequence != right.lastSequence ||
-		left.haveFrontier != right.haveFrontier || left.frontier != right.frontier {
+		left.haveFrontier != right.haveFrontier || left.frontier != right.frontier ||
+		left.mode != right.mode || left.haveReplicatedApplied != right.haveReplicatedApplied || left.replicatedApplied != right.replicatedApplied {
 		return ErrManifestCorrupt
 	}
 	for level := range left.levels {

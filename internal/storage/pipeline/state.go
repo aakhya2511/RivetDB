@@ -42,16 +42,19 @@ func (s FlushState) String() string {
 }
 
 type generation struct {
-	id          uint64
-	table       *memtable.MemTable
-	state       FlushState
-	fileNumber  uint64
-	haveSeq     bool
-	smallestSeq uint64
-	largestSeq  uint64
-	flushErr    error
-	ambiguous   bool
-	physical    bool
+	id           uint64
+	table        *memtable.MemTable
+	state        FlushState
+	fileNumber   uint64
+	haveSeq      bool
+	smallestSeq  uint64
+	largestSeq   uint64
+	flushErr     error
+	ambiguous    bool
+	physical     bool
+	haveApplied  bool
+	firstApplied uint64
+	lastApplied  uint64
 }
 
 func (g *generation) transition(next FlushState) error {
@@ -82,33 +85,39 @@ type FlushOutput struct {
 // TableInstallation is a physically durable, validated SSTable awaiting
 // logical installation by a Manifest authority.
 type TableInstallation struct {
-	Generation       uint64
-	SmallestSequence uint64
-	LargestSequence  uint64
-	Metadata         sstable.Metadata
-	Path             string
+	Generation          uint64
+	SmallestSequence    uint64
+	LargestSequence     uint64
+	Metadata            sstable.Metadata
+	Path                string
+	HaveAppliedCoverage bool
+	FirstAppliedIndex   uint64
+	LastAppliedIndex    uint64
 }
 
 // Stats is a point-in-time copy of pipeline lifecycle counters and memory.
 type Stats struct {
-	ActiveGeneration   uint64
-	ActiveBytes        uint64
-	ImmutableCount     int
-	ImmutableBytes     uint64
-	NextSequence       uint64
-	SequenceExhausted  bool
-	LastAssigned       uint64
-	HaveAssigned       bool
-	VisibleSequence    uint64
-	HaveVisible        bool
-	Rotations          uint64
-	Flushes            uint64
-	Installs           uint64
-	FlushFailures      uint64
-	FlushNanos         uint64
-	SSTableBytes       uint64
-	BackpressureEvents uint64
-	BackpressureNanos  uint64
+	ActiveGeneration     uint64
+	ActiveBytes          uint64
+	ImmutableCount       int
+	ImmutableBytes       uint64
+	NextSequence         uint64
+	SequenceExhausted    bool
+	LastAssigned         uint64
+	HaveAssigned         bool
+	VisibleSequence      uint64
+	HaveVisible          bool
+	Rotations            uint64
+	Flushes              uint64
+	Installs             uint64
+	FlushFailures        uint64
+	FlushNanos           uint64
+	SSTableBytes         uint64
+	BackpressureEvents   uint64
+	BackpressureNanos    uint64
+	ReplicatedMode       bool
+	ReplicatedApplied    uint64
+	DurableAppliedAtOpen uint64
 }
 
 // ReadGeneration is one MemTable participating in a coherent read view.

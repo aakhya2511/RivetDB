@@ -726,6 +726,85 @@ func TestCrashAfterManifestDurabilityRecoversLiveTable(t *testing.T) {
 	}
 }
 
+func TestReplicatedFrontierCrashSeamsUseExplicitGenerationCoverage(t *testing.T) {
+	directory := t.TempDir()
+	store, createErr := Create(Options{Directory: directory, Mode: ModeReplicated})
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	file, allocateErr := store.AllocateFileNumber(context.Background())
+	if allocateErr != nil {
+		t.Fatal(allocateErr)
+	}
+	metadata := writeTable(t, directory, file, 2, "replicated", "value")
+	path := filepath.Join(directory, sstable.FileName(file))
+	crash := errors.New("crash after replicated Manifest fsync")
+	store.afterDurable = func() error { return crash }
+	installation := pipeline.TableInstallation{Generation: 1, SmallestSequence: 2, LargestSequence: 2, Metadata: metadata, Path: path,
+		HaveAppliedCoverage: true, FirstAppliedIndex: 1, LastAppliedIndex: 3}
+	if err := store.InstallTable(context.Background(), installation); !errors.Is(err, crash) {
+		t.Fatalf("install error=%v", err)
+	}
+	current, _ := store.Current()
+	if frontier, _ := current.ReplicatedAppliedThrough(); frontier != 0 || current.LiveTableCount() != 0 {
+		t.Fatalf("volatile state frontier=%d tables=%d", frontier, current.LiveTableCount())
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(Options{Directory: directory, Mode: ModeReplicated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	current, _ = recovered.Current()
+	if frontier, ok := current.ReplicatedAppliedThrough(); !ok || frontier != 3 || current.LiveTableCount() != 1 {
+		t.Fatalf("recovered frontier=%d ok=%v tables=%d", frontier, ok, current.LiveTableCount())
+	}
+}
+
+func TestReplicatedPublishedSSTableBeforeManifestIsOrphan(t *testing.T) {
+	directory := t.TempDir()
+	store, createErr := Create(Options{Directory: directory, Mode: ModeReplicated})
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	file, allocateErr := store.AllocateFileNumber(context.Background())
+	if allocateErr != nil {
+		t.Fatal(allocateErr)
+	}
+	_ = writeTable(t, directory, file, 2, "orphan", "ignored")
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(Options{Directory: directory, Mode: ModeReplicated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	current, _ := recovered.Current()
+	frontier, _ := current.ReplicatedAppliedThrough()
+	if current.LiveTableCount() != 0 || frontier != 0 || len(recovered.Discovery().Orphans) != 1 {
+		t.Fatalf("tables=%d frontier=%d discovery=%+v", current.LiveTableCount(), frontier, recovered.Discovery())
+	}
+}
+
+func TestReplicatedInstallRejectsNoncontiguousCoverage(t *testing.T) {
+	directory := t.TempDir()
+	store, err := Create(Options{Directory: directory, Mode: ModeReplicated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	file, _ := store.AllocateFileNumber(context.Background())
+	metadata := writeTable(t, directory, file, 9, "gap", "value")
+	err = store.InstallTable(context.Background(), pipeline.TableInstallation{Generation: 1, SmallestSequence: 9, LargestSequence: 9, Metadata: metadata,
+		Path: filepath.Join(directory, sstable.FileName(file)), HaveAppliedCoverage: true, FirstAppliedIndex: 2, LastAppliedIndex: 9})
+	if !errors.Is(err, ErrReplicatedFrontierGap) {
+		t.Fatalf("gap error=%v", err)
+	}
+}
+
 func TestCompactionCrashAfterManifestDurabilityRecoversAtomicReplacement(t *testing.T) {
 	directory := t.TempDir()
 	store, err := Create(Options{Directory: directory})

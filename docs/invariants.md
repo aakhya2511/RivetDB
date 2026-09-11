@@ -278,6 +278,29 @@ in [`evidence/phase-2.md`](evidence/phase-2.md).
 
 ## Ranges and routing
 
+### Replicated state-machine integration
+
+The `REPLICA` namespace covers the Phase 3 boundary between one Raft group and
+one local LSM. The existing `RANGE` namespace below remains reserved for Phase
+4 keyspace ownership and routing.
+
+| ID | Invariant | Status |
+|---|---|---|
+| REPLICA-1 | A replicated mutation's storage sequence is its Raft log index; no node-local allocator determines replicated order. | verified (Phase 3) |
+| REPLICA-2 | Only committed Raft command entries mutate replicated logical LSM state. | verified (Phase 3) |
+| REPLICA-3 | Committed mutations apply in strictly increasing Raft-index order; no-op gaps are processed progress, not missing mutations. | verified (Phase 3) |
+| REPLICA-4 | Published local applied progress never exceeds complete state-machine application. | verified (Phase 3) |
+| REPLICA-5 | The durable applied frontier advances only with contiguous, authoritative flushed-generation coverage. | verified (Phase 3) |
+| REPLICA-6 | Durable applied coverage is explicit and is never inferred from SSTable mutation-sequence bounds. | verified (Phase 3) |
+| REPLICA-7 | A crash before durable frontier advancement causes committed entries above the old frontier to replay safely. | verified (Phase 3) |
+| REPLICA-8 | A crash after durable frontier advancement does not reinsert mutations already represented by authoritative local state. | verified (Phase 3) |
+| REPLICA-9 | Flush, compaction and reclamation cannot change replicated command ordering or logical state; compaction cannot advance the applied frontier. | verified (Phase 3) |
+| REPLICA-10 | Healthy caught-up replicas at the same applied index have identical logical key/value/tombstone state. | verified (Phase 3) |
+| REPLICA-11 | Replica physical LSM layouts may differ; physical identity is never replicated logical authority. | verified (Phase 3) |
+| REPLICA-12 | Standalone WAL and local-sequence semantics are isolated from replicated engine mode, which emits no data-WAL write. | verified (Phase 3) |
+| REPLICA-13 | Malformed commands or uncertain committed state-machine application stop the replica before it skips or advances past the entry. | verified (Phase 3) |
+| REPLICA-14 | Client mutation success requires Raft quorum commitment and leader-local application. | verified (Phase 3) |
+
 | ID | Invariant | Status |
 |---|---|---|
 | RANGE-1 | Range key intervals partition the keyspace: the union of all `[start, end)` intervals covers it exactly, with no gap and no overlap. | planned (Phase 4) |

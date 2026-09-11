@@ -17,7 +17,7 @@ find than to prevent.
 | 0 | Foundation: docs, module, build, CI, logging, test harness | ✅ |
 | 1 | Local LSM storage engine | ✅ complete (1A–1K) |
 | 2 | Single Raft group | ✅ complete |
-| 3 | Durable replicated range (Raft + storage) | ⬜ |
+| 3 | Durable replicated range (Raft + storage) | ✅ complete |
 | 4 | Multi-Raft and range routing | ⬜ |
 | 5 | MVCC | ⬜ |
 | 6 | Distributed transactions | ⬜ |
@@ -29,8 +29,9 @@ find than to prevent.
 | 12 | Optional AI operator | ⬜ |
 
 **What exists right now:** Phase 0, the certified Phase 1 local latest-state
-engine and the mechanically qualified Phase 2 single-group Raft core. Raft is
-not integrated with storage; there is no distributed database server or client.
+engine, the mechanically qualified Phase 2 single-group Raft core, and one
+certified statically configured Phase 3 replicated range. There is no
+Multi-Raft router, network database server, distributed read protocol or client.
 Anything later in [architecture.md](architecture.md) is a design, clearly
 marked as such.
 
@@ -173,22 +174,29 @@ the `make certify-raft` gate. See [`evidence/phase-2.md`](evidence/phase-2.md).
 
 ---
 
-## Phase 3 — Durable replicated range ⬜
+## Phase 3 — Durable replicated range ✅
 
-Connect Raft to the storage engine, so a client write is replicated to a
-majority and then applied durably.
+Connect Raft to the storage engine so one range's client mutation is replicated
+to a majority and then applied locally on every caught-up replica.
 
-**Build:** a state machine that applies committed entries to the storage engine
-· snapshots built from an engine snapshot · idempotent apply keyed on log index
-· a minimal RPC server and client.
+**Delivered:** canonical bounded PUT/DELETE commands; a static range-scoped
+deterministic runtime; Raft-index-ordered WAL-free LSM application; persisted
+storage-mode identity; explicit MemTable applied-index coverage; atomic
+Manifest table/frontier installation; proposal waiters; local inspection and
+logical digests; durable 3-/5-node, restart, crash and randomized campaigns.
 
-**Gate:** `PUT → Raft → majority → apply → storage` end to end; every node
-crashes and recovers with identical applied state; a snapshot-installing
-follower converges to the leader byte-for-byte; an entry applied twice after a
-restart does not corrupt state.
+**Gate:** `PUT/DELETE → Raft → majority → leader-local apply → success`; caught-up
+replicas agree logically despite different physical LSM layouts; unflushed
+state reconstructs from retained committed Raft history; explicit durable
+frontiers prevent both skipped and duplicate replay; uncommitted durable log
+entries never apply. See [replicated-range.md](replicated-range.md) and
+[evidence/phase-3.md](evidence/phase-3.md).
 
-**Also decides:** the read path — Raft read, ReadIndex, or leader lease — as an
-ADR, with the clock-assumption tradeoff spelled out.
+**Deferred deliberately:** LSM-integrated Raft snapshots, log compaction for an
+integrated range, real transport/RPC, and a distributed read protocol. Local
+inspection is stale-capable. Phase 3 does not choose leader leases or claim
+linearizable reads; the read-path decision remains due before Phase 4 exposes a
+client read surface.
 
 ---
 

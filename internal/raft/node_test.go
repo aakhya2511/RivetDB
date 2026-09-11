@@ -237,6 +237,44 @@ func TestAppendRejectHintAndDuplicateSafety(t *testing.T) {
 	}
 }
 
+func TestFollowerSnapshotAheadMovesLeaderNextIndexForward(t *testing.T) {
+	entries := []Entry{
+		{Index: 1, Term: 1, Type: EntryCommand, Command: []byte("a")},
+		{Index: 2, Term: 1, Type: EntryCommand, Command: []byte("b")},
+		{Index: 3, Term: 1, Type: EntryCommand, Command: []byte("c")},
+		{Index: 4, Term: 2, Type: EntryCommand, Command: []byte("d")},
+		{Index: 5, Term: 2, Type: EntryCommand, Command: []byte("e")},
+	}
+	leaderStore, err := NewMemoryStoreFrom(PersistentState{HardState: HardState{Term: 2}, Entries: entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leader, _ := newTestNode(t, 1, []NodeID{1, 2, 3}, leaderStore)
+	leader.role, leader.leaderID = Leader, 1
+	leader.nextIndex = map[NodeID]uint64{1: 6, 2: 1, 3: 6}
+	leader.matchIndex = map[NodeID]uint64{1: 5, 2: 0, 3: 5}
+	followerStore, err := NewMemoryStoreFrom(PersistentState{
+		HardState: HardState{Term: 2}, Snapshot: Snapshot{Index: 3, Term: 1},
+		Entries: cloneEntries(entries[3:]),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	follower, _ := newTestNode(t, 2, []NodeID{1, 2, 3}, followerStore)
+	rejections, err := follower.Step(leader.replicationMessage(2))
+	if err != nil || len(rejections) != 1 || rejections[0].Success || rejections[0].RejectHint != 4 {
+		t.Fatalf("snapshot-ahead rejection=%+v err=%v", rejections, err)
+	}
+	retries, err := leader.Step(rejections[0])
+	if err != nil || len(retries) != 1 || retries[0].PrevLogIndex != 3 || len(retries[0].Entries) != 2 {
+		t.Fatalf("forward retry=%+v status=%+v err=%v", retries, leader.Status(), err)
+	}
+	responses, err := follower.Step(retries[0])
+	if err != nil || len(responses) != 1 || !responses[0].Success || responses[0].MatchIndex != 5 {
+		t.Fatalf("catch-up response=%+v status=%+v err=%v", responses, follower.Status(), err)
+	}
+}
+
 func TestFollowerCommitIsBoundedByRequestCoverage(t *testing.T) {
 	store, err := NewMemoryStoreFrom(PersistentState{HardState: HardState{Term: 2}, Entries: []Entry{
 		{Index: 1, Term: 1, Type: EntryCommand, Command: []byte("a")},
@@ -508,11 +546,50 @@ func TestInstallSnapshotPreservesMatchingSuffix(t *testing.T) {
 	}
 	node, machine := newTestNode(t, 2, []NodeID{1, 2, 3}, store)
 	responses, err := node.Step(Message{Type: InstallSnapshot, From: 1, To: 2, Term: 3, Snapshot: Snapshot{Index: 3, Term: 2, Data: snapshotData}, LeaderCommit: 5})
-	if err != nil || !responses[0].Success || node.Status().Snapshot.Index != 3 || node.Status().LastApplied != 5 || machine.digest() != "[\"a\" \"b\" \"c\" \"d\" \"e\"]" {
+	if err != nil || !responses[0].Success || node.Status().Snapshot.Index != 3 || node.Status().LastApplied != 3 || machine.digest() != "[\"a\" \"b\" \"c\"]" {
 		t.Fatalf("responses=%+v status=%+v machine=%s err=%v", responses, node.Status(), machine.digest(), err)
+	}
+	_, err = node.Step(Message{Type: AppendEntries, From: 1, To: 2, Term: 3, PrevLogIndex: 3, PrevLogTerm: 2, Entries: []Entry{
+		{Index: 4, Term: 3, Type: EntryCommand, Command: []byte("d")},
+		{Index: 5, Term: 3, Type: EntryCommand, Command: []byte("e")},
+	}, LeaderCommit: 5})
+	if err != nil || node.Status().LastApplied != 5 || machine.digest() != "[\"a\" \"b\" \"c\" \"d\" \"e\"]" {
+		t.Fatalf("verified suffix status=%+v machine=%s err=%v", node.Status(), machine.digest(), err)
 	}
 	state, err := store.Load()
 	if err != nil || len(state.Entries) != 2 || state.Entries[0].Index != 4 {
 		t.Fatalf("persistent state=%+v err=%v", state, err)
+	}
+}
+
+func TestInstallSnapshotDoesNotApplyUnverifiedRetainedSuffix(t *testing.T) {
+	source := &recordingStateMachine{}
+	for index, command := range []string{"a", "b", "c"} {
+		if err := source.Apply(Entry{Index: uint64(index + 1), Term: 2, Type: EntryCommand, Command: []byte(command)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshotData, err := source.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewMemoryStoreFrom(PersistentState{HardState: HardState{Term: 7}, Entries: []Entry{
+		{Index: 1, Term: 1, Type: EntryCommand, Command: []byte("old-a")},
+		{Index: 2, Term: 2, Type: EntryCommand, Command: []byte("b")},
+		{Index: 3, Term: 2, Type: EntryCommand, Command: []byte("c")},
+		{Index: 4, Term: 2, Type: EntryCommand, Command: []byte("uncommitted-old")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, machine := newTestNode(t, 2, []NodeID{1, 2, 3}, store)
+	_, err = node.Step(Message{Type: InstallSnapshot, From: 1, To: 2, Term: 7, Snapshot: Snapshot{Index: 3, Term: 2, Data: snapshotData}, LeaderCommit: 4})
+	if err != nil || node.Status().LastApplied != 3 || machine.digest() != "[\"a\" \"b\" \"c\"]" {
+		t.Fatalf("unverified suffix applied status=%+v machine=%s err=%v", node.Status(), machine.digest(), err)
+	}
+	_, err = node.Step(Message{Type: AppendEntries, From: 1, To: 2, Term: 7, PrevLogIndex: 3, PrevLogTerm: 2,
+		Entries: []Entry{{Index: 4, Term: 7, Type: EntryCommand, Command: []byte("committed-new")}}, LeaderCommit: 4})
+	if err != nil || node.Status().LastApplied != 4 || machine.digest() != "[\"a\" \"b\" \"c\" \"committed-new\"]" {
+		t.Fatalf("verified replacement status=%+v machine=%s err=%v", node.Status(), machine.digest(), err)
 	}
 }

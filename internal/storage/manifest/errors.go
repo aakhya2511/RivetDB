@@ -31,4 +31,6 @@ var (
 	ErrMetadataMismatch        = errors.New("manifest and SSTable metadata differ")
 	ErrComparatorMismatch      = errors.New("internal-key comparator identity mismatch")
 	ErrStaleVersion            = errors.New("stale Version input set")
+	ErrModeMismatch            = errors.New("storage mode does not match Manifest")
+	ErrReplicatedFrontierGap   = errors.New("replicated applied frontier is not contiguous")
 )

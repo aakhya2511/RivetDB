@@ -194,3 +194,26 @@ The final Phase 2 commit was made only after `make certify-raft`, direct Go
 1.25/1.27 vet/test/race compatibility checks, formatting/lint and the Phase 1
 local certification passed. The final report records the command outcomes and
 commit hash.
+
+## Phase 3 regression hardening
+
+The Phase 3 regression gate discovered and promoted seed
+`-1985436038035538016`. A follower installing a snapshot with a matching
+boundary could retain an unverified divergent suffix and previously used the
+snapshot sender's `LeaderCommit` to apply that suffix immediately. The fix
+limits snapshot installation authority to the snapshot index; the subsequent
+`AppendEntries` exchange verifies or replaces the suffix before higher indexes
+can apply. A focused regression and the promoted 3-/5-node seed now cover this
+case. This is a safety hardening of the Phase 2 core found by the required Phase
+3 regression run, not snapshot integration with the LSM.
+
+Seed `-8562202010076979333` also exposed a catch-up liveness bug: when a
+follower's durable snapshot was ahead of the leader's `nextIndex`, the follower
+returned its snapshot index but the leader rejected the forward hint and
+retried index 1 forever. The follower now requests `snapshotIndex+1`, and the
+leader accepts a bounded forward reject hint through its own last index plus
+one. A focused unit test and the promoted seed prove catch-up. The simulator's
+RAFT-3 log-matching audit was also reduced from a redundant quadratic prefix
+rescan to an equivalent single-pass prefix check, and healed convergence now
+uses bounded fair delivery rounds so stale response chains cannot monopolize a
+test timeout.

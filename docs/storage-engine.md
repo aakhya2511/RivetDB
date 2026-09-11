@@ -926,3 +926,33 @@ The Phase 1 gate. Every item is a test that must exist and pass.
 - Point `Get` hit and miss; `Scan` throughput.
 - Write amplification, space amplification, compaction time share.
 - Recovery time as a function of WAL size.
+
+## 12. Phase 3 replicated state-machine mode
+
+Phase 3 adds a persisted `ReplicatedStateMachine` mode without changing the
+standalone path above. A Manifest with no mode field is legacy standalone; a
+new replicated directory writes mode `2` and an initial applied-through value
+of zero. Opening either directory under the other mode fails. Migration is not
+implemented.
+
+In replicated mode `Engine.Put`, `Delete` and `WriteBatch` are forbidden. The
+new `ApplyCommitted` path uses the Raft entry index as its one mutation's
+sequence, applies directly to the MemTable, and never opens
+`000000000001.wal`. Raft is both ordering and durability authority. The v1
+Manifest TLV adds critical tag `7` for storage mode and critical tag `8` for
+the replicated applied-through frontier; the format version does not change.
+Standalone initial edits omit both fields and remain byte-for-byte unchanged.
+
+Replicated MemTable generations carry explicit inclusive
+`firstAppliedIndex..lastAppliedIndex` coverage. This coverage may include no-op
+indexes absent from the SSTable. FIFO installation accepts a generation only
+when its first index is the current replicated frontier plus one, and writes
+the new table plus coverage end in the same Manifest record/fsync. SSTable
+minimum/maximum mutation sequences are never used to derive this frontier.
+Compaction edits omit it and assert it is unchanged.
+
+On restart, SSTables and the Manifest reconstruct only the durable materialized
+prefix. Unflushed state is absent and must be replayed from Raft after consensus
+again establishes commitment. Durable but uncommitted Raft entries are never
+an LSM recovery source. See [replicated-range.md](replicated-range.md) and
+[ADR-0015](design-decisions/0015-raft-to-lsm-replicated-state-machine.md).

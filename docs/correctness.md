@@ -306,6 +306,25 @@ they explore schedules that per-commit runs never reach.
 
 `main` stays buildable. A phase gate that does not pass is not committed.
 
+### Phase 3 replicated-range gate
+
+`make certify-range` composes the independently certified Raft and LSM layers.
+Targeted tests prove canonical command rejection, commit-before-apply recovery,
+unflushed MemTable replay, orphan-table exclusion, atomic Manifest
+table/frontier recovery, duplicate suppression, uncommitted-entry isolation,
+fatal malformed apply, bounded proposal-waiter cleanup, immediate leader crash,
+follower/full restart, different per-replica durable frontiers and intentionally
+different physical layouts. Every replica also runs the raw Engine structural
+validator.
+
+Normal randomized integration runs 10,000 events per fixed/fresh campaign over
+3- and 5-node groups with directed link changes, message drops, process-model
+crashes/restarts, PUT/DELETE, flush and compaction. The opt-in tier runs 100,000
+events. Unlike Phase 2 snapshot campaigns, integrated-range campaigns never
+compact Raft history because LSM snapshot replacement is deferred. A separate
+subprocess exits after a quorum-committed mutation and verifies reconstruction
+from filesystem-backed Raft stores.
+
 ---
 
 ## 5. What is not tested
@@ -318,9 +337,16 @@ Stated plainly, because an unlisted gap reads as a claim:
   corruption within a record or block. Corruption that a valid checksum would
   also accept — a whole stale-but-consistent file, for instance — is not
   detected.
-- **Clock skew as a safety concern.** RivetDB does not use time for safety, so
-  there is nothing to test here; but if a leader-lease read path is adopted in
-  Phase 3, that changes, and the assumption will be documented and tested.
+- **Clock skew as a safety concern.** RivetDB does not use time for safety.
+  Phase 3 deliberately added no leader lease or distributed read protocol; any
+  future lease design would require an explicit bounded-skew assumption and
+  new tests.
+- **Linearizable distributed reads.** Phase 3 `LocalGet`/`LocalScan` are replica
+  inspection and may be stale. ReadIndex and lease reads are not tested because
+  they are not implemented.
+- **Integrated Raft/LSM snapshots.** Snapshot export and replace-state restore
+  are deferred. Integrated ranges retain required history and do not expose log
+  compaction.
 - **Adversarial input and authentication.** Input is bounds-checked and
   malformed data is rejected, but there is no threat model and no security
   testing.

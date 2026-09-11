@@ -37,6 +37,9 @@ func (p *Pipeline) runWorker() {
 		if !install {
 			continue
 		}
+		if p.replicatedFlushHook != nil && installation.HaveAppliedCoverage {
+			p.replicatedFlushHook(installation.LastAppliedIndex)
+		}
 		installErr := p.installer.InstallTable(p.ctx, installation)
 		p.finishInstallation(item, installErr)
 	}
@@ -99,6 +102,8 @@ func (p *Pipeline) finishPhysicalFlush(item *generation, result flushResult, flu
 	return TableInstallation{
 		Generation: item.id, SmallestSequence: item.smallestSeq,
 		LargestSequence: item.largestSeq, Metadata: result.metadata, Path: result.path,
+		HaveAppliedCoverage: item.haveApplied, FirstAppliedIndex: item.firstApplied,
+		LastAppliedIndex: item.lastApplied,
 	}, true
 }
 

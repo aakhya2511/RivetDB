@@ -43,6 +43,7 @@ Phase:    which phase this governs
 | [0012](0012-crash-visibility-and-physical-reclamation.md) | Crash recovery, visibility publication and physical reclamation | Accepted | 1J |
 | [0013](0013-evidence-driven-local-storage-performance.md) | Evidence-driven local-storage performance architecture | Accepted | 1K |
 | [0014](0014-raft-core-persistence-and-apply-boundary.md) | Raft core persistence and state-machine boundary | Accepted | 2 |
+| [0015](0015-raft-to-lsm-replicated-state-machine.md) | Raft-to-LSM replicated state-machine integration | Accepted | 3 |
 
 ## Planned
 

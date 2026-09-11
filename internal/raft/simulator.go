@@ -367,7 +367,7 @@ func (m *auditedStateMachine) Apply(entry Entry) error {
 		return fmt.Errorf("%w: RAFT-13 apply index %d after %d", ErrInvariantCheck, entry.Index, m.lastIndex)
 	}
 	if prior, ok := m.simulator.applied[entry.Index]; ok && !sameEntry(prior, entry) {
-		return fmt.Errorf("%w: RAFT-5 applied index %d differs", ErrInvariantCheck, entry.Index)
+		return fmt.Errorf("%w: RAFT-5 applied index %d differs prior(term=%d type=%d command=%q) current(term=%d type=%d command=%q)", ErrInvariantCheck, entry.Index, prior.Term, prior.Type, prior.Command, entry.Term, entry.Type, entry.Command)
 	}
 	if err := m.inner.Apply(cloneEntry(entry)); err != nil {
 		return fmt.Errorf("apply audited state-machine entry %d: %w", entry.Index, err)
@@ -501,23 +501,19 @@ func leaderLogExtends(prior, current PersistentState, commitIndex uint64) error 
 func compareLogs(left, right *Node) error {
 	start := max(left.persistent.Snapshot.Index, right.persistent.Snapshot.Index) + 1
 	end := min(left.lastIndex(), right.lastIndex())
+	prefixEqual := true
+	var firstConflict uint64
 	for index := start; index <= end; index++ {
 		leftEntry, leftErr := left.entryAt(index)
 		rightEntry, rightErr := right.entryAt(index)
 		if leftErr != nil || rightErr != nil {
 			return errors.Join(leftErr, rightErr)
 		}
-		if leftEntry.Term == rightEntry.Term {
-			for prefix := start; prefix <= index; prefix++ {
-				leftPrefix, leftPrefixErr := left.entryAt(prefix)
-				rightPrefix, rightPrefixErr := right.entryAt(prefix)
-				if leftPrefixErr != nil || rightPrefixErr != nil {
-					return errors.Join(leftPrefixErr, rightPrefixErr)
-				}
-				if !sameEntry(leftPrefix, rightPrefix) {
-					return fmt.Errorf("%w: RAFT-3 matching index %d term %d has conflicting prefix %d", ErrInvariantCheck, index, leftEntry.Term, prefix)
-				}
-			}
+		if prefixEqual && !sameEntry(leftEntry, rightEntry) {
+			prefixEqual, firstConflict = false, index
+		}
+		if leftEntry.Term == rightEntry.Term && !prefixEqual {
+			return fmt.Errorf("%w: RAFT-3 matching index %d term %d has conflicting prefix %d", ErrInvariantCheck, index, leftEntry.Term, firstConflict)
 		}
 	}
 	return nil

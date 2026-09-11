@@ -32,6 +32,16 @@ const (
 	fieldReplayFrontier
 	fieldDeleteFile
 	fieldAddFile
+	fieldStorageMode
+	fieldReplicatedFrontier
+)
+
+// StorageMode identifies which durability authority owns logical writes.
+type StorageMode uint8
+
+const (
+	ModeStandalone StorageMode = iota + 1
+	ModeReplicated
 )
 
 // DeletedFile identifies one live file removal. Phase 1G persists this shape
@@ -79,12 +89,14 @@ func NewTableMetadata(level uint32, generation, smallestSequence, largestSequenc
 // VersionEdit atomically describes one immutable Version transition. Pointer
 // scalar fields distinguish absence from the valid zero value.
 type VersionEdit struct {
-	Comparator     *string
-	NextFileNumber *uint64
-	LastSequence   *uint64
-	ReplayFrontier *uint64
-	DeletedFiles   []DeletedFile
-	AddedFiles     []TableMetadata
+	Comparator               *string
+	NextFileNumber           *uint64
+	LastSequence             *uint64
+	ReplayFrontier           *uint64
+	StorageMode              *StorageMode
+	ReplicatedAppliedThrough *uint64
+	DeletedFiles             []DeletedFile
+	AddedFiles               []TableMetadata
 }
 
 // EncodeVersionEdit returns deterministic bounded binary TLV bytes.
@@ -104,6 +116,12 @@ func EncodeVersionEdit(edit VersionEdit) ([]byte, error) {
 	}
 	if edit.ReplayFrontier != nil {
 		fields = append(fields, encodedField{tag: fieldReplayFrontier, payload: appendUint64(nil, *edit.ReplayFrontier)})
+	}
+	if edit.StorageMode != nil {
+		fields = append(fields, encodedField{tag: fieldStorageMode, payload: []byte{byte(*edit.StorageMode)}})
+	}
+	if edit.ReplicatedAppliedThrough != nil {
+		fields = append(fields, encodedField{tag: fieldReplicatedFrontier, payload: appendUint64(nil, *edit.ReplicatedAppliedThrough)})
 	}
 	deletions := slices.Clone(edit.DeletedFiles)
 	slices.SortFunc(deletions, compareDeleted)
@@ -177,7 +195,7 @@ func DecodeVersionEdit(encoded []byte) (VersionEdit, error) {
 			value := string(payload)
 			edit.Comparator = &value
 			seenScalar[tag] = true
-		case fieldNextFile, fieldLastSequence, fieldReplayFrontier:
+		case fieldNextFile, fieldLastSequence, fieldReplayFrontier, fieldReplicatedFrontier:
 			if seenScalar[tag] || len(payload) != 8 {
 				return VersionEdit{}, ErrInvalidEdit
 			}
@@ -189,7 +207,16 @@ func DecodeVersionEdit(encoded []byte) (VersionEdit, error) {
 				edit.LastSequence = &value
 			case fieldReplayFrontier:
 				edit.ReplayFrontier = &value
+			case fieldReplicatedFrontier:
+				edit.ReplicatedAppliedThrough = &value
 			}
+			seenScalar[tag] = true
+		case fieldStorageMode:
+			if seenScalar[tag] || len(payload) != 1 {
+				return VersionEdit{}, ErrInvalidEdit
+			}
+			value := StorageMode(payload[0])
+			edit.StorageMode = &value
 			seenScalar[tag] = true
 		case fieldDeleteFile:
 			if len(payload) != 12 || len(edit.DeletedFiles) >= MaxChangesPerEdit {
@@ -232,10 +259,13 @@ type encodedField struct {
 }
 
 func validateEditShape(edit VersionEdit) error {
-	if edit.Comparator == nil && edit.NextFileNumber == nil && edit.LastSequence == nil && edit.ReplayFrontier == nil && len(edit.AddedFiles) == 0 && len(edit.DeletedFiles) == 0 {
+	if edit.Comparator == nil && edit.NextFileNumber == nil && edit.LastSequence == nil && edit.ReplayFrontier == nil && edit.StorageMode == nil && edit.ReplicatedAppliedThrough == nil && len(edit.AddedFiles) == 0 && len(edit.DeletedFiles) == 0 {
 		return ErrInvalidEdit
 	}
 	if len(edit.AddedFiles) > MaxChangesPerEdit || len(edit.DeletedFiles) > MaxChangesPerEdit {
+		return ErrInvalidEdit
+	}
+	if edit.StorageMode != nil && *edit.StorageMode != ModeStandalone && *edit.StorageMode != ModeReplicated || edit.ReplayFrontier != nil && edit.ReplicatedAppliedThrough != nil {
 		return ErrInvalidEdit
 	}
 	if edit.Comparator != nil && (*edit.Comparator == "" || len(*edit.Comparator) > 128) {

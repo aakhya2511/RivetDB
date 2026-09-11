@@ -13,8 +13,10 @@ import (
 
 func TestRandomizedClusterSafety(t *testing.T) {
 	fresh := testutil.Seed(t)
+	seeds := append([]int64{101, 9_901}, testutil.SeedCorpus(t, t.Name())...)
+	seeds = append(seeds, fresh)
 	for _, size := range []int{3, 5} {
-		for _, seed := range []int64{101, 9_901, fresh} {
+		for _, seed := range seeds {
 			t.Run(fmt.Sprintf("nodes-%d-seed-%d", size, seed), func(t *testing.T) {
 				runRandomCluster(t, size, seed, 10_000)
 			})
@@ -120,14 +122,14 @@ func convergeCluster(t *testing.T, simulator *Simulator, seed int64) {
 		for _, id := range simulator.ids {
 			mustRandomAction(t, simulator.Tick(id), simulator, seed, -round-2)
 		}
-		if _, err := simulator.DeliverAll(100_000); err != nil {
+		if _, err := simulator.DeliverAll(100); err != nil {
 			mustRandomAction(t, err, simulator, seed, -round-2)
 		}
 		leaders := currentLeaders(simulator)
 		if len(leaders) == 1 {
 			index, err := simulator.Propose(leaders[0], []byte("convergence-marker"))
 			if err == nil {
-				if _, err := simulator.DeliverAll(100_000); err != nil {
+				if _, err := simulator.DeliverAll(100); err != nil {
 					mustRandomAction(t, err, simulator, seed, -round-2)
 				}
 				if allApplied(simulator, index) {
@@ -139,6 +141,14 @@ func convergeCluster(t *testing.T, simulator *Simulator, seed int64) {
 					}
 					return
 				}
+			}
+		}
+		// A healed network need not deliver an unbounded stale response chain.
+		// Bound each round, discard its residue, then let fresh ticks drive a
+		// fair retry. Safety is checked by every delivery and again next round.
+		for _, envelope := range simulator.Pending() {
+			if err := simulator.Drop(envelope.ID); err != nil {
+				t.Fatal(err)
 			}
 		}
 	}

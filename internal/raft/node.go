@@ -307,7 +307,11 @@ func (n *Node) handleAppendEntries(message Message) ([]Message, error) {
 		return nil, err
 	}
 	if message.PrevLogIndex < n.persistent.Snapshot.Index {
-		return []Message{n.appendResponse(message.From, false, 0, n.persistent.Snapshot.Index)}, nil
+		hint := n.persistent.Snapshot.Index
+		if hint < math.MaxUint64 {
+			hint++
+		}
+		return []Message{n.appendResponse(message.From, false, 0, hint)}, nil
 	}
 	previousTerm, err := n.termAt(message.PrevLogIndex)
 	if err != nil {
@@ -351,7 +355,7 @@ func (n *Node) handleAppendEntries(message Message) ([]Message, error) {
 	if message.LeaderCommit > n.commitIndex {
 		n.commitIndex = min(message.LeaderCommit, lastCovered)
 		if err := n.applyCommitted(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("apply after AppendEntries from %d prev=%d/%d entries=%d covered=%d leader_commit=%d: %w", message.From, message.PrevLogIndex, message.PrevLogTerm, len(message.Entries), lastCovered, message.LeaderCommit, err)
 		}
 	}
 	return []Message{n.appendResponse(message.From, true, lastCovered, 0)}, nil
@@ -399,6 +403,14 @@ func (n *Node) handleAppendResponse(message Message) ([]Message, error) {
 	}
 	current := n.nextIndex[message.From]
 	hint := message.RejectHint
+	maximumNext := n.lastIndex()
+	if maximumNext < math.MaxUint64 {
+		maximumNext++
+	}
+	if hint > current && hint <= maximumNext {
+		n.nextIndex[message.From] = hint
+		return []Message{n.replicationMessage(message.From)}, nil
+	}
 	if hint == 0 || hint >= current {
 		if current > 1 {
 			hint = current - 1
@@ -511,12 +523,9 @@ func (n *Node) handleInstallSnapshot(message Message) ([]Message, error) {
 	n.persistent = candidate
 	n.commitIndex = max(n.commitIndex, message.Snapshot.Index)
 	n.lastApplied = message.Snapshot.Index
-	if message.LeaderCommit > n.commitIndex {
-		n.commitIndex = min(message.LeaderCommit, n.lastIndex())
-		if err := n.applyCommitted(); err != nil {
-			return nil, err
-		}
-	}
+	// The matching snapshot boundary proves only the prefix through the
+	// snapshot. A retained suffix remains unverified until the leader sends
+	// AppendEntries; LeaderCommit alone must not authorize applying it.
 	return []Message{{Type: InstallSnapshotResponse, From: n.id, To: message.From, Term: n.term(), Success: true, MatchIndex: message.Snapshot.Index}}, nil
 }
 

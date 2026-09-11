@@ -22,6 +22,12 @@ type Options struct {
 	Directory string
 	Clock     clock.Clock
 	Logger    *slog.Logger
+	// Mode defaults to ModeStandalone. ModeReplicated is persisted and cannot
+	// open or convert a standalone database directory.
+	Mode StorageMode
+	// ReplicatedFrontierHook observes a replicated applied frontier after its
+	// Manifest edit is durable, but before the new Version is published.
+	ReplicatedFrontierHook func(uint64)
 }
 
 type manifestWriter interface {
@@ -31,40 +37,44 @@ type manifestWriter interface {
 
 // Stats is copied observability state for the metadata authority.
 type Stats struct {
-	ManifestNumber    uint64
-	ManifestEdits     uint64
-	ManifestBytes     uint64
-	ManifestFsyncs    uint64
-	ManifestRewrites  uint64
-	RecoveryNanos     uint64
-	LiveTables        uint64
-	OrphanTables      uint64
-	VersionGeneration uint64
-	ReplayFrontier    uint64
-	HaveFrontier      bool
+	ManifestNumber           uint64
+	ManifestEdits            uint64
+	ManifestBytes            uint64
+	ManifestFsyncs           uint64
+	ManifestRewrites         uint64
+	RecoveryNanos            uint64
+	LiveTables               uint64
+	OrphanTables             uint64
+	VersionGeneration        uint64
+	ReplayFrontier           uint64
+	HaveFrontier             bool
+	Mode                     StorageMode
+	ReplicatedAppliedThrough uint64
+	HaveReplicatedApplied    bool
 }
 
 // Store serializes durable Manifest edits and publishes immutable Versions.
 type Store struct {
 	mu sync.RWMutex
 
-	directory      string
-	writer         manifestWriter
-	manifestNumber uint64
-	nextManifest   uint64
-	current        *Version
-	discovery      Discovery
-	nextSequence   uint64
-	seqExhausted   bool
-	poisoned       error
-	closed         bool
-	closeErr       error
-	clock          clock.Clock
-	logger         *slog.Logger
-	stats          Stats
-	currentOps     currentOps
-	afterDurable   func() error
-	obsolete       []uint64
+	directory              string
+	writer                 manifestWriter
+	manifestNumber         uint64
+	nextManifest           uint64
+	current                *Version
+	discovery              Discovery
+	nextSequence           uint64
+	seqExhausted           bool
+	poisoned               error
+	closed                 bool
+	closeErr               error
+	clock                  clock.Clock
+	logger                 *slog.Logger
+	stats                  Stats
+	currentOps             currentOps
+	afterDurable           func() error
+	replicatedFrontierHook func(uint64)
+	obsolete               []uint64
 }
 
 // Create creates the first Manifest and publishes CURRENT crash-safely.
@@ -89,6 +99,10 @@ func Create(options Options) (*Store, error) {
 	comparator := ComparatorName
 	nextFile := uint64(1)
 	initial := VersionEdit{Comparator: &comparator, NextFileNumber: &nextFile}
+	if options.Mode == ModeReplicated {
+		mode, zero := ModeReplicated, uint64(0)
+		initial.StorageMode, initial.ReplicatedAppliedThrough = &mode, &zero
+	}
 	version, err := initialVersion().apply(initial)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("construct initial Version: %w", err), writer.Close())
@@ -147,6 +161,9 @@ func Open(options Options) (*Store, error) {
 			return nil, fmt.Errorf("repair incomplete Manifest tail: %w", repairErr)
 		}
 	}
+	if recovered.version.mode != options.Mode {
+		return nil, ErrModeMismatch
+	}
 	writer, err := wal.OpenWriter(path, wal.WriterOptions{Durability: wal.SyncBatch})
 	if err != nil {
 		return nil, fmt.Errorf("open recovered Manifest writer: %w", err)
@@ -176,12 +193,14 @@ func Open(options Options) (*Store, error) {
 		}
 	}
 	maximum, haveMaximum := maximumVersionSequence(recovered.version)
-	walMaximum, haveWAL, err := maximumWALSequence(options.Directory)
-	if err != nil {
-		return nil, errors.Join(err, writer.Close())
-	}
-	if haveWAL && (!haveMaximum || walMaximum > maximum) {
-		maximum, haveMaximum = walMaximum, true
+	if options.Mode == ModeStandalone {
+		walMaximum, haveWAL, walErr := maximumWALSequence(options.Directory)
+		if walErr != nil {
+			return nil, errors.Join(walErr, writer.Close())
+		}
+		if haveWAL && (!haveMaximum || walMaximum > maximum) {
+			maximum, haveMaximum = walMaximum, true
+		}
 	}
 	if recovered.version.haveLastSequence && (!haveMaximum || recovered.version.lastSequence > maximum) {
 		maximum, haveMaximum = recovered.version.lastSequence, true
@@ -211,12 +230,19 @@ func newStore(options Options, writer manifestWriter, number uint64, version *Ve
 		directory: options.Directory, writer: writer, manifestNumber: number,
 		nextManifest: number + 1, current: version, clock: options.Clock,
 		logger: rlog.Component(options.Logger, "storage.manifest"), currentOps: osCurrentOps(),
-		stats: Stats{ManifestNumber: number},
+		replicatedFrontierHook: options.ReplicatedFrontierHook,
+		stats:                  Stats{ManifestNumber: number},
 	}
 }
 
 func validateOptions(options Options) error {
+	if options.Mode == 0 {
+		options.Mode = ModeStandalone
+	}
 	if options.Directory == "" {
+		return ErrInvalidOptions
+	}
+	if options.Mode != ModeStandalone && options.Mode != ModeReplicated {
 		return ErrInvalidOptions
 	}
 	info, err := os.Stat(options.Directory)
@@ -227,6 +253,9 @@ func validateOptions(options Options) error {
 }
 
 func configureOptions(options *Options) {
+	if options.Mode == 0 {
+		options.Mode = ModeStandalone
+	}
 	if options.Clock == nil {
 		options.Clock = clock.System()
 	}
@@ -301,6 +330,9 @@ func (s *Store) RecoveredNextSequence() (uint64, bool) {
 func (s *Store) Install(edit VersionEdit) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if edit.StorageMode != nil || edit.ReplicatedAppliedThrough != nil {
+		return ErrModeMismatch
+	}
 	for _, table := range edit.AddedFiles {
 		path := filepath.Join(s.directory, sstable.FileName(table.FileNumber))
 		if err := validatePhysicalTable(path, table); err != nil {
@@ -333,6 +365,9 @@ func (s *Store) installLocked(edit VersionEdit) error {
 	s.stats.ManifestEdits++
 	s.stats.ManifestFsyncs++
 	s.stats.ManifestBytes += uint64(len(encoded)) //nolint:gosec // bounded edit
+	if edit.ReplicatedAppliedThrough != nil && s.replicatedFrontierHook != nil {
+		s.replicatedFrontierHook(*edit.ReplicatedAppliedThrough)
+	}
 	if s.afterDurable != nil {
 		if err := s.afterDurable(); err != nil {
 			s.poisoned = err
@@ -399,18 +434,29 @@ func (s *Store) InstallTable(ctx context.Context, installation pipeline.TableIns
 		last = s.current.lastSequence
 	}
 	edit := VersionEdit{AddedFiles: []TableMetadata{table}, LastSequence: &last}
-	preliminary, err := s.current.apply(edit)
-	if err != nil {
-		return err
-	}
-	if frontier, ok := preliminary.maximumContiguousFrontier(); ok && (!s.current.haveFrontier || frontier > s.current.frontier) {
-		edit.ReplayFrontier = &frontier
+	if s.current.mode == ModeReplicated {
+		if !installation.HaveAppliedCoverage || installation.FirstAppliedIndex != s.current.replicatedApplied+1 || installation.LastAppliedIndex < installation.FirstAppliedIndex {
+			return ErrReplicatedFrontierGap
+		}
+		frontier := installation.LastAppliedIndex
+		edit.ReplicatedAppliedThrough = &frontier
+	} else {
+		preliminary, applyErr := s.current.apply(edit)
+		if applyErr != nil {
+			return applyErr
+		}
+		if frontier, ok := preliminary.maximumContiguousFrontier(); ok && (!s.current.haveFrontier || frontier > s.current.frontier) {
+			edit.ReplayFrontier = &frontier
+		}
 	}
 	if err := s.installLocked(edit); err != nil {
 		return fmt.Errorf("install flushed SSTable %d: %w", table.FileNumber, err)
 	}
 	if edit.ReplayFrontier != nil {
 		s.logger.Info("replay frontier advanced", slog.Uint64("replay_frontier", *edit.ReplayFrontier))
+	}
+	if edit.ReplicatedAppliedThrough != nil {
+		s.logger.Info("replicated applied frontier advanced", slog.Uint64("replicated_applied_through", *edit.ReplicatedAppliedThrough))
 	}
 	return nil
 }
@@ -446,10 +492,12 @@ func (s *Store) InstallCompaction(ctx context.Context, inputs, outputs []TableMe
 		return errors.Join(ErrStaleVersion, err)
 	}
 	beforeFrontier, beforeHaveFrontier := s.current.frontier, s.current.haveFrontier
+	beforeReplicated, beforeHaveReplicated := s.current.replicatedApplied, s.current.haveReplicatedApplied
 	if err := s.installLocked(edit); err != nil {
 		return fmt.Errorf("install compaction replacement: %w", err)
 	}
 	invariant.Assert(s.current.frontier == beforeFrontier && s.current.haveFrontier == beforeHaveFrontier, "STORAGE-81", "compaction changed replay frontier")
+	invariant.Assert(s.current.replicatedApplied == beforeReplicated && s.current.haveReplicatedApplied == beforeHaveReplicated, "REPLICA-9", "compaction changed replicated applied frontier")
 	for _, input := range inputs {
 		s.obsolete = append(s.obsolete, input.FileNumber)
 	}
@@ -540,6 +588,9 @@ func (s *Store) refreshStatsLocked() {
 	s.stats.VersionGeneration = s.current.generation
 	s.stats.HaveFrontier = s.current.haveFrontier
 	s.stats.ReplayFrontier = s.current.frontier
+	s.stats.Mode = s.current.mode
+	s.stats.ReplicatedAppliedThrough = s.current.replicatedApplied
+	s.stats.HaveReplicatedApplied = s.current.haveReplicatedApplied
 }
 
 // Close closes the active Manifest writer and is idempotent.

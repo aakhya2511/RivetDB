@@ -158,27 +158,31 @@ prefix preservation, apply ordering and state-machine safety across 3- and
 5-node fixed/fresh campaigns. Durable-store tests separately inject save,
 sync/publication and corruption failures.
 
-## 9. Phase 3 boundary
+## 9. Phase 3 integration
 
-Phase 3 must introduce a deterministic LSM apply API; `Engine.Put` and
-`Engine.Delete` are unsuitable because they allocate node-local sequences and
-append the data WAL. Raft log index is the recommended replicated mutation
-order, with no-op/config entries consuming indexes but not storage mutations.
-An applied-index marker must make replay idempotent.
+Phase 3 chose Raft as replicated ordering and durability authority. The
+canonical command state machine decodes one PUT or DELETE and calls the Engine
+`ApplyCommitted` boundary with entry index, term and command identity. It never
+calls standalone `Engine.Put`, `Delete` or `WriteBatch`. Raft index is the
+storage sequence; no-op entries produce legitimate gaps.
 
-The preferred integration candidate is Raft as replicated durability authority
-with an LSM apply mode whose local WAL is bypassed or explicitly non-sync. The
-alternative—Raft plus synchronous data WAL—reuses recovery but double-logs and
-needs a proven ordering protocol. Phase 3 decides this before integration.
+Replicated Engine mode bypasses both the data WAL and local allocator. Its
+Manifest persists a separate replicated applied-through frontier, advanced
+atomically with an installed table only from explicit contiguous generation
+coverage. Restart applies no durable log entry until consensus re-establishes
+commitment, then skips commands at/below that local durable frontier and
+reconstructs later committed state.
 
 Replicas must agree on committed commands, applied Raft index and logical
 key/value/tombstone state. File numbers, compaction timing, SSTable boundaries,
 Manifest generations and cache contents may remain node-local. A portable
-logical snapshot is the initial recommendation; physical snapshots remain an
-optimization requiring tighter storage coupling.
+logical snapshot remains the preferred future representation. Integrated
+snapshot restore is deferred, and the range exposes no log-compaction API, so
+required history is retained. Phase 2 snapshot support remains independently
+certified. See [replicated-range.md](replicated-range.md).
 
 ## 10. Deferred scope
 
-No LSM apply, data-WAL reuse, real network transport, dynamic membership,
-joint consensus, ReadIndex, lease reads, client deduplication, Multi-Raft or
-distributed database claim is part of Phase 2.
+No real network transport, dynamic membership, joint consensus, ReadIndex,
+lease reads, client deduplication, Multi-Raft or distributed database claim is
+part of Phase 3.

@@ -14,6 +14,7 @@ GOBIN ?= $(CURDIR)/bin
 PKGS ?= ./...
 LOCAL_PKGS ?= ./internal/clock ./internal/invariant ./internal/rlog ./internal/storage/... ./internal/testutil/...
 RAFT_PKGS ?= ./internal/raft
+RANGE_PKGS ?= ./internal/replicatedrange ./internal/storage/engine ./internal/storage/manifest ./internal/storage/pipeline
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -133,6 +134,32 @@ certify-raft: ## Run the full Phase 2 Raft gate plus Phase 1 regression
 	$(MAKE) raft-stress
 	$(MAKE) raft-chaos
 	$(MAKE) raft-exhaustive
+	$(MAKE) certify-local
+
+.PHONY: range-test
+range-test: ## Run deterministic Phase 3 integration and durable-recovery tests
+	$(GO) test -count=1 -timeout 20m $(TEST_FLAGS) $(RANGE_PKGS)
+
+.PHONY: range-race
+range-race: ## Run Phase 3 integration under the race detector
+	$(GO) test -race -count=1 -timeout 30m $(TEST_FLAGS) $(RANGE_PKGS)
+
+.PHONY: range-stress
+range-stress: ## Run the opt-in 100k-event replicated-range campaign
+	RIVETDB_RANGE_STRESS=1 $(GO) test -count=1 -timeout 90m -run 'RandomizedReplicatedRangeHeavy' $(TEST_FLAGS) ./internal/replicatedrange
+
+.PHONY: range-crash
+range-crash: ## Run Phase 3 subprocess and Manifest-frontier crash seams
+	RIVETDB_RANGE_CRASH=1 $(GO) test -count=1 -timeout 30m -run 'ReplicatedRangeSubprocessCrashRecovery|ReplicatedFrontierCrashSeams|ReplicatedPublishedSSTable' $(TEST_FLAGS) $(RANGE_PKGS)
+
+.PHONY: certify-range
+certify-range: ## Run the full Phase 3 gate plus frozen Phase 2/Phase 1 regressions
+	$(MAKE) check
+	$(MAKE) range-test
+	$(MAKE) range-race
+	$(MAKE) range-stress
+	$(MAKE) range-crash
+	$(MAKE) certify-raft
 	$(MAKE) certify-local
 
 .PHONY: diff-check

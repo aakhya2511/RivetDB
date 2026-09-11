@@ -12,8 +12,8 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phase 0, Phase 1 local storage and Phase 2 single-group Raft are complete.
-Phase 3 Raft-to-LSM integration is next and has not started.**
+**Phase 0, Phase 1 local storage, Phase 2 single-group Raft and Phase 3 durable
+single-range integration are complete. Phase 4 Multi-Raft/routing is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -21,8 +21,10 @@ mutable/frozen MemTable, deterministic SSTable writer/reader and bounded FIFO
 flush pipeline and crash-safe Manifest/VersionSet under `internal/storage`.
 There is a complete local latest-state engine plus an independent deterministic
 Raft core, memory/file Raft stores, simulator and snapshot foundation under
-`internal/raft`. Raft does not yet apply to the LSM. There is no server, client,
-MVCC transaction layer, Multi-Raft or distributed database behavior.
+`internal/raft`. `internal/replicatedrange` composes one static range with a
+WAL-free Raft-index apply path, explicit durable local frontier and bounded
+proposal waiters. There is no server, client, distributed read protocol, MVCC
+transaction layer or Multi-Raft/routing behavior.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
@@ -192,6 +194,7 @@ Design is written before the code it governs.
 | [docs/invariants.md](docs/invariants.md) | Safety properties, with the IDs assertions and tests reference |
 | [docs/storage-engine.md](docs/storage-engine.md) | Phase 1 spec: byte-level on-disk formats, durability modes, crash-scenario table, test list |
 | [docs/raft.md](docs/raft.md) | Phase 2 protocol, persistence, simulator, snapshot and Phase 3 boundaries |
+| [docs/replicated-range.md](docs/replicated-range.md) | Phase 3 Raft-to-LSM ordering, durability, replay and runtime contract |
 | [docs/correctness.md](docs/correctness.md) | Test strategy, reproducibility mechanism, and §5's explicit list of what is *not* tested |
 | [docs/roadmap.md](docs/roadmap.md) | The twelve phases and each gate |
 | [docs/design-decisions/](docs/design-decisions/) | ADRs. An ADR records a contested decision with the alternatives that lost, and is superseded rather than rewritten. |
@@ -209,7 +212,9 @@ Decisions recorded: [ADR-0001](docs/design-decisions/0001-lsm-tree-over-b-tree.m
 [ADR-0006](docs/design-decisions/0006-sstable-physical-format.md)
 (SSTable physical format), through
 [ADR-0014](docs/design-decisions/0014-raft-core-persistence-and-apply-boundary.md)
-(Raft core persistence and apply boundary). The ADR index lists the complete
+(Raft core persistence and apply boundary), and
+[ADR-0015](docs/design-decisions/0015-raft-to-lsm-replicated-state-machine.md)
+(Raft-to-LSM integration). The ADR index lists the complete
 sequence. They list the rejected options' genuine
 advantages, not strawmen — keep that standard.
 
@@ -256,8 +261,7 @@ Two parts of the spec are load-bearing and should not be changed casually:
   fsync is the step usually forgotten, and without it a rename can be lost
   across a crash even though the file's contents were durable.
 
-Open questions flagged during Phase 0, worth resolving before or during the
-work rather than after:
+Open questions retained for their owning later phases:
 
 - **Shared WAL across ranges.** Phase 1 builds one engine with one WAL, but
   Phase 4 gives each node many ranges. Whether they share an engine — turning N
@@ -266,13 +270,15 @@ work rather than after:
 - **No range merging** is planned. A workload that creates many ranges and goes
   quiet leaves them fragmented permanently. Stated as a limitation in the
   README; add it to the roadmap if the Phase 9 demo needs it.
-- **Read path** (Raft read vs ReadIndex vs leader lease) is undecided and due in
-  Phase 3. Note the tension: architecture.md §11 assumes nothing about clock
-  skew, but leader leases make safety depend on clock bounds. See §14.
+- **Read path** (Raft read vs ReadIndex vs leader lease) remains undecided before
+  Phase 4 exposes a client read surface. Phase 3 deliberately exposes only
+  stale-capable local inspection. Architecture §11 assumes nothing about clock
+  skew, while leader leases would make safety depend on clock bounds. See §14.
 
-Phase 2 is frozen at the boundary in [docs/raft.md](docs/raft.md): opaque
-logical commands, an independent Raft durability authority, static peers and
-an injected deterministic state machine. Phase 3 must first design an
-idempotent apply API carrying Raft index/term, settle Raft-log versus local-WAL
-ordering, and choose a logical or physical snapshot contract. It must not call
-current `Engine.Put`/`Engine.Delete`, which allocate replica-local sequences.
+Phase 3 is frozen at [docs/replicated-range.md](docs/replicated-range.md): one
+static full-keyspace range, Raft as ordering/durability authority, Raft index as
+storage sequence, no replicated data WAL, explicit Manifest applied frontier,
+logical rather than physical replica equality, and integrated snapshots/log
+compaction deferred. Run `make certify-range`; it includes Phase 2 and Phase 1
+regression gates. Phase 4 may add many groups, routing metadata, shared
+transport and batched scheduling, but must not weaken these contracts.
