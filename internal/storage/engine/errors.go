@@ -11,6 +11,7 @@ var (
 	ErrInvalidRange      = errors.New("invalid scan range")
 	ErrCorruption        = errors.New("authoritative storage state is corrupt")
 	ErrDuplicateEntry    = errors.New("duplicate internal entry across authoritative sources")
+	ErrUnresolvedIntent  = errors.New("unresolved transaction intent")
 	ErrDirectoryState    = errors.New("database directory has files but no CURRENT authority")
 	ErrWrongMode         = errors.New("storage operation is forbidden in this engine mode")
 	ErrUnexpectedWAL     = errors.New("replicated engine directory contains a standalone data WAL")

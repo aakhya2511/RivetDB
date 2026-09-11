@@ -9,8 +9,8 @@ import (
 
 const batchHeaderLen = 12
 
-// Mutation is one operation in a write batch. Value is ignored for KindDelete
-// and encoded, including when empty, for KindValue.
+// Mutation is one operation in a write batch. Value is encoded for kinds that
+// carry values and must be empty for marker kinds.
 type Mutation struct {
 	Key   []byte
 	Value []byte
@@ -49,7 +49,7 @@ func EncodeWriteBatch(batch WriteBatch) ([]byte, error) {
 			return nil, ErrBatchTooLarge
 		}
 		size += keySize
-		if mutation.Kind == KindValue {
+		if mutation.Kind.CarriesValue() {
 			valueLength := uint64(len(mutation.Value)) //nolint:gosec // slice length is nonnegative
 			valueSize := uvarintLen(valueLength) + len(mutation.Value)
 			if valueSize > MaxRecordSize-size {
@@ -66,7 +66,7 @@ func EncodeWriteBatch(batch WriteBatch) ([]byte, error) {
 		encoded = append(encoded, byte(mutation.Kind))
 		encoded = binary.AppendUvarint(encoded, uint64(len(mutation.Key)))
 		encoded = append(encoded, mutation.Key...)
-		if mutation.Kind == KindValue {
+		if mutation.Kind.CarriesValue() {
 			encoded = binary.AppendUvarint(encoded, uint64(len(mutation.Value)))
 			encoded = append(encoded, mutation.Value...)
 		}
@@ -116,7 +116,7 @@ func DecodeWriteBatch(encoded []byte) (WriteBatch, error) {
 		}
 		offset = next
 		mutation := Mutation{Kind: kind, Key: key}
-		if kind == KindValue {
+		if kind.CarriesValue() {
 			value, valueNext, valueErr := decodeLengthPrefixed(encoded, offset)
 			if valueErr != nil {
 				return WriteBatch{}, fmt.Errorf("%w: mutation %d value: %w", ErrInvalidBatch, i, valueErr)

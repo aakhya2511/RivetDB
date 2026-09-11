@@ -62,10 +62,37 @@ func (r *Replica) checkHistoricalRead(key []byte, timestamp mvcc.Timestamp) erro
 	if key != nil && r.containsKey != nil && !r.containsKey(key) {
 		return ErrKeyOutOfRange
 	}
-	if timestamp > r.machine.maxApplied {
+	if timestamp > max(r.machine.maxApplied, r.machine.safeRead) {
 		return ErrReplicaBehind
 	}
 	return nil
+}
+
+// GetMVCCAt exposes an uninterpreted selected intent only to the transaction
+// protocol; ordinary GetAt continues to reject provisional state.
+func (r *Replica) GetMVCCAt(ctx context.Context, key []byte, timestamp mvcc.Timestamp) (engine.MVCCEntry, error) {
+	if err := r.checkHistoricalRead(key, timestamp); err != nil {
+		return engine.MVCCEntry{}, err
+	}
+	value, err := r.engine.GetMVCCAt(ctx, key, uint64(timestamp))
+	if err != nil {
+		return engine.MVCCEntry{}, fmt.Errorf("local raw MVCC get: %w", err)
+	}
+	return value, nil
+}
+
+func (r *Replica) ScanMVCCAt(ctx context.Context, start, end []byte, timestamp mvcc.Timestamp) ([]engine.MVCCEntry, error) {
+	if r.containsSpan != nil && !r.containsSpan(start, end) {
+		return nil, ErrKeyOutOfRange
+	}
+	if err := r.checkHistoricalRead(nil, timestamp); err != nil {
+		return nil, err
+	}
+	values, err := r.engine.ScanMVCCAt(ctx, start, end, uint64(timestamp))
+	if err != nil {
+		return nil, fmt.Errorf("local raw MVCC scan: %w", err)
+	}
+	return values, nil
 }
 
 func (r *Replica) DigestAt(ctx context.Context, timestamp mvcc.Timestamp) ([sha256.Size]byte, error) {

@@ -840,6 +840,35 @@ func TestReplicatedInstallRejectsNoncontiguousCoverage(t *testing.T) {
 	}
 }
 
+func TestReplicatedMVCCInstallPreservesGlobalTimestampMaximum(t *testing.T) {
+	directory := t.TempDir()
+	store, err := Create(Options{Directory: directory, Mode: ModeReplicatedMVCC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for index, timestamp := range []uint64{100, 50} {
+		file, allocateErr := store.AllocateFileNumber(context.Background())
+		if allocateErr != nil {
+			t.Fatal(allocateErr)
+		}
+		metadata := writeTable(t, directory, file, timestamp, fmt.Sprintf("mvcc-%d", index), "value")
+		installation := pipeline.TableInstallation{Generation: uint64(index + 1), SmallestSequence: timestamp, LargestSequence: timestamp,
+			Metadata: metadata, Path: filepath.Join(directory, sstable.FileName(file)), HaveAppliedCoverage: true,
+			FirstAppliedIndex: uint64(index + 1), LastAppliedIndex: uint64(index + 1), MaxMVCCTimestamp: timestamp}
+		if installErr := store.InstallTable(context.Background(), installation); installErr != nil {
+			t.Fatal(installErr)
+		}
+	}
+	version, err := store.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maximum, ok := version.MaxAppliedMVCC(); !ok || maximum != 100 {
+		t.Fatalf("maximum=%d/%v, want 100/true", maximum, ok)
+	}
+}
+
 func TestCompactionCrashAfterManifestDurabilityRecoversAtomicReplacement(t *testing.T) {
 	directory := t.TempDir()
 	store, err := Create(Options{Directory: directory})

@@ -77,7 +77,7 @@ func (m *MemTable) Insert(key storage.InternalKey, value []byte) error {
 	if m.frozen {
 		return ErrFrozen
 	}
-	if key.Kind() == storage.KindDelete && len(value) != 0 {
+	if !key.Kind().CarriesValue() && len(value) != 0 {
 		return ErrDeleteHasValue
 	}
 	m.insertLocked(key, value)
@@ -106,12 +106,44 @@ func (m *MemTable) ApplyBatch(batch storage.WriteBatch) error {
 		if err != nil {
 			return fmt.Errorf("mutation %d key: %w", index, err)
 		}
-		if mutation.Kind == storage.KindDelete && len(mutation.Value) != 0 {
+		if !mutation.Kind.CarriesValue() && len(mutation.Value) != 0 {
 			return fmt.Errorf("mutation %d: %w", index, ErrDeleteHasValue)
 		}
 		staged[index] = stagedEntry{key: key, value: mutation.Value}
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.frozen {
+		return ErrFrozen
+	}
+	for _, entry := range staged {
+		m.insertLocked(entry.key, entry.value)
+	}
+	m.validateIfEnabledLocked()
+	return nil
+}
+
+// ApplyVersion atomically inserts all mutations at the same MVCC version.
+func (m *MemTable) ApplyVersion(version uint64, mutations []storage.Mutation) error {
+	if len(mutations) == 0 {
+		return storage.ErrEmptyBatch
+	}
+	type stagedEntry struct {
+		key   storage.InternalKey
+		value []byte
+	}
+	staged := make([]stagedEntry, len(mutations))
+	for index, mutation := range mutations {
+		key, err := storage.NewInternalKey(mutation.Key, version, mutation.Kind)
+		if err != nil {
+			return fmt.Errorf("mutation %d key: %w", index, err)
+		}
+		if !mutation.Kind.CarriesValue() && len(mutation.Value) != 0 {
+			return fmt.Errorf("mutation %d: %w", index, ErrDeleteHasValue)
+		}
+		staged[index] = stagedEntry{key: key, value: mutation.Value}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.frozen {

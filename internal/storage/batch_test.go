@@ -58,7 +58,7 @@ func TestWriteBatchRejectsInvalidInputs(t *testing.T) {
 		want  error
 	}{
 		{name: "empty", batch: storage.WriteBatch{}, want: storage.ErrEmptyBatch},
-		{name: "invalid kind", batch: storage.WriteBatch{Mutations: []storage.Mutation{{Kind: 2}}}, want: storage.ErrInvalidValueKind},
+		{name: "invalid kind", batch: storage.WriteBatch{Mutations: []storage.Mutation{{Kind: 4}}}, want: storage.ErrInvalidValueKind},
 		{name: "sequence overflow", batch: storage.WriteBatch{FirstSequence: math.MaxUint64, Mutations: []storage.Mutation{{Kind: storage.KindDelete}, {Kind: storage.KindDelete}}}, want: storage.ErrSequenceOverflow},
 	}
 	for _, tc := range tests {

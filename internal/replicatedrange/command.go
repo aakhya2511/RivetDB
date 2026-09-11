@@ -11,6 +11,7 @@ import (
 	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/storage/sstable"
+	"github.com/rivetdb/rivetdb/internal/txn"
 )
 
 const (
@@ -27,6 +28,14 @@ type CommandType uint8
 const (
 	CommandPut CommandType = iota + 1
 	CommandDelete
+	CommandTxnBarrier
+	CommandTxnCreate
+	CommandTxnPrepare
+	CommandTxnCommit
+	CommandTxnAbort
+	CommandTxnTakeover
+	CommandTxnResolveCommit
+	CommandTxnResolveAbort
 )
 
 type Command struct {
@@ -109,7 +118,7 @@ func DecodeCommand(encoded []byte) (Command, error) {
 }
 
 func validateCommand(command Command) error {
-	if command.Type != CommandPut && command.Type != CommandDelete {
+	if command.Type < CommandPut || command.Type > CommandTxnResolveAbort {
 		return fmt.Errorf("%w: type %d", ErrInvalidCommand, command.Type)
 	}
 	if len(command.Key) > sstable.MaxUserKeySize || len(command.Value) > sstable.MaxValueSize {
@@ -122,8 +131,26 @@ func validateCommand(command Command) error {
 	if len(command.Key) > raft.MaxCommandBytes-headerSize || len(command.Value) > raft.MaxCommandBytes-headerSize-len(command.Key) {
 		return ErrCommandTooLarge
 	}
-	if command.Type == CommandDelete && len(command.Value) != 0 {
+	if (command.Type == CommandDelete || command.Type == CommandTxnBarrier) && len(command.Value) != 0 {
 		return fmt.Errorf("%w: DELETE has value", ErrInvalidCommand)
+	}
+	if command.Type >= CommandTxnBarrier && command.Timestamp == 0 {
+		return fmt.Errorf("%w: transaction command has zero timestamp", ErrInvalidCommand)
+	}
+	if command.Type > CommandTxnBarrier {
+		operation, err := txn.DecodeOperation(command.Value)
+		if err != nil {
+			return fmt.Errorf("%w: transaction operation: %w", ErrInvalidCommand, err)
+		}
+		want := map[CommandType]txn.OperationType{
+			CommandTxnCreate: txn.OpCreate, CommandTxnPrepare: txn.OpPrepare,
+			CommandTxnCommit: txn.OpCommit, CommandTxnAbort: txn.OpAbort,
+			CommandTxnTakeover: txn.OpTakeover, CommandTxnResolveCommit: txn.OpResolveCommit,
+			CommandTxnResolveAbort: txn.OpResolveAbort,
+		}[command.Type]
+		if operation.Type != want || operation.CommitTime != uint64(command.Timestamp) {
+			return fmt.Errorf("%w: transaction operation mismatch", ErrInvalidCommand)
+		}
 	}
 	return nil
 }

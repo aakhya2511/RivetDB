@@ -186,7 +186,7 @@ func decodeDataEntry(payload []byte, position, entriesEnd uint64, previous []byt
 	if decodeErr != nil {
 		return decodedEntry{}, 0, 0, corrupt(ErrInvalidBlock, "internal key: %v", decodeErr)
 	}
-	if key.Kind() == storage.KindDelete && len(value) != 0 {
+	if !key.Kind().CarriesValue() && len(value) != 0 {
 		return decodedEntry{}, 0, 0, corrupt(ErrInvalidBlock, "deletion has value")
 	}
 	return decodedEntry{key: key, encoded: keyBytes, value: value}, position, shared, nil

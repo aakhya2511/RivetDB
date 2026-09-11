@@ -347,19 +347,29 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 | MVCC-12 | Raft applied index and MVCC timestamp remain distinct range-scoped authorities. | verified (Phase 5) |
 | MVCC-13 | Leadership change, physical clock skew or regression cannot make a range's timestamps regress. | verified (Phase 5) |
 | MVCC-14 | Restart recovers a timestamp floor at least as high as durable MVCC state and local durable timestamped Raft history. | verified (Phase 5) |
-| MVCC-6 | Garbage collection never removes a version that a live read timestamp could observe. | planned (Phase 5) |
-| MVCC-7 | A key has at most one write intent at a time. | planned (Phase 5) |
+| MVCC-15 | Future garbage collection never removes a version that a protected timestamp could observe. | planned (post-Phase 6) |
 
 ## Distributed transactions
 
 | ID | Invariant | Status |
 |---|---|---|
-| TXN-1 | *Atomicity.* A transaction's writes are either all visible or none are, regardless of how many ranges it spans. | planned (Phase 6) |
-| TXN-2 | The transaction record's state is the single source of truth for the outcome. No participant can reach a different conclusion. | planned (Phase 6) |
-| TXN-3 | A transaction's outcome, once decided, never changes. A committed transaction is never later reported aborted, and vice versa. | planned (Phase 6) |
-| TXN-4 | Every transaction operation is idempotent. Duplicate prepare, commit or abort messages produce the same result as one delivery. | planned (Phase 6) |
-| TXN-5 | Recovery resolves every transaction left prepared by a crash, in bounded time, without operator intervention. | planned (Phase 6) |
-| TXN-6 | A coordinator crash never leaves a transaction permanently undecided. | planned (Phase 6) |
+| TXN-1 | A transaction has one immutable read timestamp. | verified (Phase 6) |
+| TXN-2 | Every committed write from one transaction uses one commit timestamp. | verified (Phase 6) |
+| TXN-3 | A commit timestamp is strictly greater than its transaction's read timestamp. | verified (Phase 6) |
+| TXN-4 | Only a replicated transaction record is authoritative for outcome. | verified (Phase 6) |
+| TXN-5 | `COMMITTED` and `ABORTED` are terminal and mutually exclusive. | verified (Phase 6) |
+| TXN-6 | A participant commits intents only after the authoritative record is `COMMITTED`. | verified (Phase 6) |
+| TXN-7 | Prepared intents survive crashes, flush and compaction until authoritative resolution. | verified (Phase 6) |
+| TXN-8 | A committed transaction is logically visible atomically at one timestamp across all participants. | verified (Phase 6) |
+| TXN-9 | An aborted transaction's provisional writes never become committed MVCC versions. | verified (Phase 6) |
+| TXN-10 | Prepare enforces Snapshot Isolation first-committer-wins for overlapping writes. | verified (Phase 6) |
+| TXN-11 | Transaction-local writes and deletes overlay the immutable read snapshot. | verified (Phase 6) |
+| TXN-12 | Coordinator loss, client timeout, and elapsed time cannot change or invent a durable outcome. | verified (Phase 6) |
+| TXN-13 | Create, Prepare, Commit, Abort and Resolve retries are idempotent by TxnID. | verified (Phase 6) |
+| TXN-14 | A foreign unresolved intent is never exposed as committed user data. | verified (Phase 6) |
+| TXN-15 | Recovery consults replicated record authority and fences stale coordinators by epoch. | verified (Phase 6) |
+| TXN-16 | Snapshot Isolation is certified; write skew remains allowed and serializability is not claimed. | verified (Phase 6) |
+| TXN-17 | A user key has at most one unresolved prepared intent at a time. | verified (Phase 6) |
 
 ## Split and migration
 

@@ -9,24 +9,37 @@ import (
 	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/replicatedrange"
+	"github.com/rivetdb/rivetdb/internal/txn"
 )
 
 type RouterOptions struct {
-	Catalog     *Catalog
-	Scheduler   *Scheduler
-	Transport   *Transport
-	MaxAttempts int
-	MaxWork     int
+	Catalog            *Catalog
+	Scheduler          *Scheduler
+	Transport          *Transport
+	MaxAttempts        int
+	MaxWork            int
+	MaxTxnWrites       int
+	MaxTxnBytes        int
+	MaxTxnParticipants int
+	TxnIDGenerator     func() (txn.ID, error)
+	TxnHook            TxnHook
 }
 
 type Router struct {
-	catalog     *Catalog
-	scheduler   *Scheduler
-	transport   *Transport
-	maxAttempts int
-	maxWork     int
-	mu          sync.Mutex
-	leaders     map[RangeID]raft.NodeID
+	catalog            *Catalog
+	scheduler          *Scheduler
+	transport          *Transport
+	maxAttempts        int
+	maxWork            int
+	maxTxnWrites       int
+	maxTxnBytes        int
+	maxTxnParticipants int
+	txnIDGenerator     func() (txn.ID, error)
+	txnHook            TxnHook
+	mu                 sync.Mutex
+	leaders            map[RangeID]raft.NodeID
+	protected          map[txn.ID]mvcc.Timestamp
+	seen               map[txn.ID]struct{}
 }
 
 func NewRouter(options RouterOptions) (*Router, error) {
@@ -39,11 +52,29 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	if options.MaxWork == 0 {
 		options.MaxWork = 100_000
 	}
+	if options.MaxTxnWrites == 0 {
+		options.MaxTxnWrites = txn.MaxWrites
+	}
+	if options.MaxTxnBytes == 0 {
+		options.MaxTxnBytes = txn.MaxWriteBytes
+	}
+	if options.MaxTxnParticipants == 0 {
+		options.MaxTxnParticipants = txn.MaxParticipants
+	}
+	if options.TxnIDGenerator == nil {
+		options.TxnIDGenerator = txn.NewID
+	}
 	if options.MaxAttempts < 1 || options.MaxWork < 1 {
 		return nil, ErrResourceLimit
 	}
+	if options.MaxTxnWrites < 1 || options.MaxTxnWrites > txn.MaxWrites || options.MaxTxnBytes < 1 || options.MaxTxnBytes > txn.MaxWriteBytes || options.MaxTxnParticipants < 1 || options.MaxTxnParticipants > txn.MaxParticipants {
+		return nil, ErrResourceLimit
+	}
 	return &Router{catalog: options.Catalog, scheduler: options.Scheduler, transport: options.Transport,
-		maxAttempts: options.MaxAttempts, maxWork: options.MaxWork, leaders: make(map[RangeID]raft.NodeID)}, nil
+		maxAttempts: options.MaxAttempts, maxWork: options.MaxWork, maxTxnWrites: options.MaxTxnWrites,
+		maxTxnBytes: options.MaxTxnBytes, maxTxnParticipants: options.MaxTxnParticipants,
+		txnIDGenerator: options.TxnIDGenerator, txnHook: options.TxnHook,
+		leaders: make(map[RangeID]raft.NodeID), protected: make(map[txn.ID]mvcc.Timestamp), seen: make(map[txn.ID]struct{})}, nil
 }
 
 func (r *Router) Route(key []byte) (Route, error) {

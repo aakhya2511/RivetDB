@@ -98,3 +98,15 @@ range-scoped leader hint and bounded pre-admission retry. The router never
 chooses a timestamp: the selected range leader does so after leadership is
 established. Historical reads remain range-local inspection; no ReadIndex,
 leader lease, cluster snapshot or linearizable distributed read is introduced.
+
+## 6. Phase 6 transaction routing
+
+Transaction writes retain the descriptor generation resolved at commit and are
+sorted by RangeID. The record home is the descriptor owning the smallest write
+key. Protocol admission repeats generation and ownership checks; prepare also
+validates every embedded write key. Status is routed to the record home rather
+than read from coordinator memory.
+
+Static metadata is a Phase 6 certification condition. Phase 7 must pin or
+redirect participant identities while descriptors change, identify child
+ranges that inherit prepared keys, and make recovery follow those redirects.

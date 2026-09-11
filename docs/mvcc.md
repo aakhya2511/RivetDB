@@ -59,32 +59,17 @@ freshness is not. A follower may serve an old timestamp at or below its applied
 watermark, but returns `ErrReplicaBehind` above that watermark. A comparable
 timestamp queried on several ranges is not an atomic cluster snapshot.
 
-## 5. Deferred Phase 6 work
+## 5. Phase 6 transaction interpretation
 
-Phase 5 adds no intents, write transactions, conflict detection, transaction
-records, coordinator, 2PC, isolation claim or cross-range atomicity. Existing
-value/delete kinds remain sufficient for committed Phase 5 state; Phase 6 must
-allocate and specify any intent/lock representation deliberately.
+Phase 6 retains this committed-history contract and adds persistent
+`TxnAbort(2)` and `Intent(3)` kinds without changing the trailer. Transaction
+reads interpret selected intents through replicated record authority. A
+committed intent is logically visible at its CT, an aborted intent falls through
+to older history, and a pending intent conflicts. Physical resolution adds the
+lower-sorting committed value/delete or abort marker at the same CT.
 
-## 6. Phase 6 readiness audit
+## 6. Phase 7 readiness boundary
 
-1. A transaction read timestamp should be an HLC value chosen through a
-   transaction-level protocol that proves each participant can serve it.
-2. A commit timestamp should be an HLC value strictly above the read timestamp
-   and every participant-observed conflicting timestamp.
-3. Phase 5 HLC values are totally comparable across ranges; comparability alone
-   provides neither atomicity nor freshness.
-4. Phase 6 must detect a committed or pending write to each written key after
-   the transaction's read timestamp.
-5. Intents should use an explicitly versioned internal record kind carrying
-   transaction identity and provisional value, not overload committed values.
-6. Resolution must be idempotent and driven by an authoritative transaction
-   record outcome.
-7. Prepare, commit and abort transitions must each be replicated through the
-   owning range's Raft group; 2PC coordinates those replicated states.
-8. A replicated transaction record, not coordinator memory or timeouts, must be
-   recovery authority.
-9. GC will need the minimum of active snapshot/transaction timestamps and an
-   acknowledged protected timestamp before removing versions or tombstones.
-10. Snapshot isolation is the recommended first target. Serializable behavior
-    requires a separate checker and conflict design and is not implied here.
+Online splitting must preserve the Phase 5 timestamp history and Phase 6
+intent/record meanings. Descriptor-generation pinning, participant redirects,
+prepared-state division and descendant-aware recovery remain Phase 7 work.

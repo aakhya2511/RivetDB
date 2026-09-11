@@ -91,3 +91,17 @@ MVCC PUT/DELETE asks the owning leader to assign the timestamp and returns only
 after the unchanged quorum-commit plus leader-local-apply boundary. Static
 catalogs, generations, transport envelopes, scheduling and failure domains are
 unchanged.
+
+## 7. Phase 6 transaction composition
+
+The router drives transactions without becoming outcome authority. It chooses
+RT above best-effort observed live-leader HLC floors and lazily replicates an RT
+serving barrier before accessing each additional range. Buffered writes are
+grouped by static RangeID/generation, with sorted keys and participants. The
+smallest written key's range stores the replicated record.
+
+Create, prepare, decision, takeover and resolution are bounded routed Raft
+proposals. Record and participant queries use the in-process routed leader
+adapter; this is not a general network RPC or linearizable read API. Short
+leader-hint/protected-timestamp maps use one mutex, but transaction execution
+has no global lock. An unavailable untouched range is not a dependency.

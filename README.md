@@ -2,15 +2,15 @@
 
 RivetDB is an experimental database built from first principles. Its local LSM
 storage engine, Raft core, durable replicated ranges, static Multi-Raft node,
-range catalog, mutation router, replicated MVCC versions and range-local
-historical snapshots are implemented; distributed transactions and the dynamic
-workload-adaptive range layers do not exist yet.
+range catalog, mutation router, replicated MVCC versions, range-local
+historical snapshots, and Snapshot Isolation transactions with cross-range 2PC
+are implemented; the dynamic workload-adaptive range layers do not exist yet.
 
 Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 5 complete — replicated MVCC and range-local snapshots certified.**
+> **Project status: Phase 6 complete — Snapshot Isolation distributed transactions certified.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -43,6 +43,11 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > MVCC watermarks and lightweight read-only range snapshots. Historical values
 > and tombstones survive flush, compaction, reclamation, crash/restart and
 > replica convergence; no MVCC version is garbage-collected.
+> Phase 6 adds 128-bit transaction IDs, one immutable read timestamp, lazy
+> range serving barriers, buffered write overlays, replicated intents and
+> transaction records, first-committer-wins conflict checks, epoch-fenced 2PC
+> recovery, and atomic commit at one CT across independently replicated ranges.
+> Snapshot Isolation is certified; write skew is intentionally allowed.
 >
 > **There is no distributed read protocol, network database service, server or
 > client yet.** Phase 4/5 local inspection and historical snapshots are stale-capable and
@@ -160,6 +165,7 @@ make certify-raft   # full single-group Raft gate plus local regression
 make certify-range  # Phase 3 integration gate plus Raft/local regressions
 make certify-multiraft # Phase 4 gate plus every lower regression gate
 make certify-mvcc   # Phase 5 MVCC gate plus every lower regression gate
+make certify-txn    # Phase 6 transaction gate plus every lower regression gate
 make benchmark      # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover     # coverage profile and HTML report
 make help      # all targets
@@ -194,7 +200,7 @@ or CI execution modifying the working tree.
 
 ## What is implemented today
 
-The Phase 0 foundation and completed Phase 1–5 units. Each piece exists because
+The Phase 0 foundation and completed Phase 1–6 units. Each piece exists because
 a later phase cannot be tested honestly without it.
 
 | Package | Purpose |
@@ -206,6 +212,7 @@ a later phase cannot be tested honestly without it.
 | [`internal/replicatedrange`](internal/replicatedrange) | One range-scoped Raft replica, bounded proposal waiters, canonical PUT/DELETE commands, WAL-free Raft-index LSM application, local status/inspection and logical digest. |
 | [`internal/multiraft`](internal/multiraft) | Static descriptors/catalog persistence, per-node range hosting, shared bounded transport/schedulers, range-scoped message validation and immutable routed mutations. |
 | [`internal/mvcc`](internal/mvcc) | Canonical 48-bit physical/16-bit logical HLC timestamps with injected time, observation, regression resistance and explicit exhaustion. |
+| [`internal/txn`](internal/txn) | Canonical transaction IDs, records, participants, intents and bounded hostile-input-safe protocol codecs. |
 | [`internal/invariant`](internal/invariant) | Named, typed assertions so a violation identifies itself, plus an `Expensive()` tier for O(n) structural checks enabled in tests and chaos runs. |
 | [`internal/rlog`](internal/rlog) | Structured logging with canonical attribute keys (`node`, `range`, `term`, `index`, `txn`), context propagation, runtime-adjustable level, and a recorder so tests assert on structured events rather than substrings. |
 
@@ -227,10 +234,6 @@ SSD with `RIVETDB_BENCH_DIR`; no volume name is hard-coded.
 Everything here is designed and specified but **not yet built**. Each links to
 its phase gate.
 
-- **MVCC and distributed transactions** — write intents, snapshot reads,
-  two-phase commit over replicated transaction records. Historical committed
-  MVCC reads are complete; transactional intents/atomicity remain Phase 6.
-  [Phase 6](docs/roadmap.md#phase-6--distributed-transactions-)
 - **Online range splitting and replica migration** — reconfiguration as
   restartable state machines, with the data plane serving throughout.
   [Phases 7–8](docs/roadmap.md#phase-7--range-splitting-)

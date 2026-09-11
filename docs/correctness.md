@@ -4,11 +4,11 @@ A distributed database is only as credible as the evidence that it is correct.
 This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
-**Current scope:** Phases 0–5 exist: the complete local LSM, deterministic Raft,
+**Current scope:** Phases 0–6 exist: the complete local LSM, deterministic Raft,
 durable replicated range, static Multi-Raft composition, and replicated MVCC
-history with range-local read-only snapshots. There is no network service,
-distributed read protocol, dynamic metadata, transaction, isolation,
-serializability or linearizability claim.
+history with range-local snapshots, plus Snapshot Isolation transactions and
+cross-range atomic commit. There is no network service, general distributed
+read protocol, dynamic metadata, serializability or linearizability claim.
 Sections marked *planned* are plans, not results.
 
 ---
@@ -370,8 +370,10 @@ Stated plainly, because an unlisted gap reads as a claim:
 - **Dynamic range metadata.** Phase 4 persists a static bootstrap catalog and
   tests explicit generation replacement, but has no meta-range, placement
   consensus, online split, migration, or dynamic membership.
-- **Cross-range read or write atomicity.** Routed mutations are independent
-  Raft operations. There is no global read snapshot or distributed transaction.
+- **Serializable or linearizable distributed reads.** Phase 6 certifies
+  Snapshot Isolation transaction snapshots and atomic write commit. It does not
+  add SSI, predicate validation, ReadIndex, leases, external consistency or a
+  general linearizable distributed read API.
 - **Adversarial input and authentication.** Input is bounds-checked and
   malformed data is rejected, but there is no threat model and no security
   testing.
@@ -391,3 +393,15 @@ requested timestamp. It does not certify that a local replica is current with
 the cluster; requests above its applied MVCC watermark return
 `ErrReplicaBehind`. There is no transaction, isolation or linearizability
 claim.
+
+### Phase 6 transaction gate
+
+`make certify-txn` adds canonical hostile transaction codecs, immutable RT and
+read-your-writes, two/three/eleven-range one-CT commit, same-key races,
+non-conflicting writes, deliberate write skew, stale coordinator fencing,
+leader changes, range-specific failure isolation, committed-intent logical
+interpretation, intent flush/compaction/restart, mixed-state full restart, and
+real subprocess exit at seven durable 2PC stages. Fixed/fresh campaigns run
+10,800 modeled operations and the opt-in stress tier runs 100,000. Exact reads,
+scans, conflicts and committed histories are compared with a Snapshot Isolation
+reference model. Every Phase 5 and lower gate remains a regression dependency.

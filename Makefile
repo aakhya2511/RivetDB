@@ -17,6 +17,7 @@ RAFT_PKGS ?= ./internal/raft
 RANGE_PKGS ?= ./internal/replicatedrange ./internal/storage/engine ./internal/storage/manifest ./internal/storage/pipeline
 MULTIRAFT_PKGS ?= ./internal/multiraft
 MVCC_PKGS ?= ./internal/mvcc ./internal/replicatedrange ./internal/multiraft ./internal/storage/engine ./internal/storage/manifest ./internal/storage/pipeline ./internal/storage/compaction
+TXN_PKGS ?= ./internal/txn ./internal/multiraft ./internal/replicatedrange ./internal/storage/engine ./internal/storage/pipeline ./internal/storage/compaction
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -222,6 +223,36 @@ certify-mvcc: ## Run the Phase 5 gate and every frozen lower-phase certification
 	$(MAKE) mvcc-chaos
 	$(MAKE) mvcc-crash
 	$(MAKE) certify-multiraft
+
+.PHONY: txn-test
+txn-test: ## Run deterministic Snapshot Isolation, 2PC, intent, and recovery tests
+	$(GO) test -count=1 -timeout 45m $(TEST_FLAGS) $(TXN_PKGS)
+
+.PHONY: txn-race
+txn-race: ## Run transaction packages under the race detector
+	$(GO) test -race -count=1 -timeout 45m $(TEST_FLAGS) $(TXN_PKGS)
+
+.PHONY: txn-stress
+txn-stress: ## Run the opt-in 100k-event Snapshot Isolation model campaign
+	RIVETDB_TXN_STRESS=1 $(GO) test -count=1 -timeout 45m -run '^TestRandomizedTransactionsHeavy$$' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: txn-chaos
+txn-chaos: ## Run transaction conflicts, leader changes, range isolation, and restart recovery
+	$(GO) test -count=1 -timeout 30m -run 'TransactionLeaderChanges|ConcurrentConflicts|PendingPrepared|RandomizedTransactionsAgainst' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: txn-crash
+txn-crash: ## Run real-filesystem subprocess crashes at every durable 2PC stage
+	RIVETDB_TXN_CRASH=1 $(GO) test -count=1 -timeout 30m -run '^TestTransactionSubprocessCrashMatrix$$' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: certify-txn
+certify-txn: ## Run the Phase 6 gate and every frozen lower-phase certification
+	$(MAKE) check
+	$(MAKE) txn-test
+	$(MAKE) txn-race
+	$(MAKE) txn-stress
+	$(MAKE) txn-chaos
+	$(MAKE) txn-crash
+	$(MAKE) certify-mvcc
 
 .PHONY: diff-check
 diff-check: ## Fail on whitespace errors in the working diff

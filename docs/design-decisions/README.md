@@ -46,6 +46,7 @@ Phase:    which phase this governs
 | [0015](0015-raft-to-lsm-replicated-state-machine.md) | Raft-to-LSM replicated state-machine integration | Accepted | 3 |
 | [0016](0016-multiraft-static-range-routing.md) | Multi-Raft hosting and static range routing | Accepted | 4 |
 | [0017](0017-hlc-mvcc-timestamp-authority.md) | HLC timestamp authority and replicated MVCC snapshots | Accepted | 5 |
+| [0018](0018-snapshot-isolation-transactions-and-2pc.md) | Snapshot Isolation transactions, replicated intents, and 2PC | Accepted | 6 |
 
 ## Planned
 
@@ -56,8 +57,5 @@ visible rather than implicit; each is noted in
 | Topic | Decided in |
 |---|---|
 | Read path: Raft read vs ReadIndex vs leader lease | Phase 3 |
-| Timestamp allocation: central oracle vs hybrid logical clocks | Phase 5 |
-| Isolation level: snapshot isolation vs serializable | Phase 5 |
-| Transaction recovery model | Phase 6 |
 | Split key selection: size-based vs load-based | Phase 7 |
 | Replica migration protocol: push vs pull snapshot transfer | Phase 8 |

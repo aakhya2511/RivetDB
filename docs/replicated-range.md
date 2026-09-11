@@ -176,3 +176,17 @@ under that timestamp. Range-local `GetAt`, `ScanAt`, `DigestAt`, `NewSnapshot`
 and `SnapshotAt` enforce ownership and the locally applied timestamp watermark.
 Snapshots are read-only, process-local handles and pin timestamps rather than
 physical VersionSets. See [mvcc.md](mvcc.md).
+
+## Phase 6 replicated transaction state
+
+Canonical MVCC commands include read barriers, record create/decision/takeover,
+participant prepare, and commit/abort resolution. Applying prepare validates
+every key against the descriptor, detects newer committed versions and foreign
+intents, atomically inserts the range's complete intent batch at CT, and records
+prepared state by TxnID. Record and participant maps are deterministic state
+reconstructed from retained committed Raft history after restart.
+
+Metadata-only commands advance Raft apply without inventing an MVCC version.
+Resolution at an existing CT atomically adds committed value/delete or an abort
+marker. Transaction HLC observations, Raft frontier, safe-read barrier and
+maximum materialized MVCC timestamp remain distinct.

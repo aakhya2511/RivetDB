@@ -403,13 +403,20 @@ func (p *Pipeline) ApplyReplicated(ctx context.Context, index uint64, mutation s
 // ApplyReplicatedVersion applies one committed mutation with independent Raft
 // apply index and internal MVCC version.
 func (p *Pipeline) ApplyReplicatedVersion(ctx context.Context, index, version uint64, mutation storage.Mutation) (WriteResult, error) {
+	return p.ApplyReplicatedVersionBatch(ctx, index, version, []storage.Mutation{mutation}, false)
+}
+
+// ApplyReplicatedVersionBatch atomically materializes one replicated command's
+// mutations at one MVCC version. allowExistingVersion is reserved for intent
+// resolution at its already-visible provisional timestamp.
+func (p *Pipeline) ApplyReplicatedVersionBatch(ctx context.Context, index, version uint64, mutations []storage.Mutation, allowExistingVersion bool) (WriteResult, error) {
 	if !p.replicated {
 		return WriteResult{}, ErrWrongMode
 	}
 	if ctx == nil || index == 0 || version == 0 || !p.replicatedMVCC && version != index {
 		return WriteResult{}, ErrInvalidOptions
 	}
-	if err := validateMutations([]storage.Mutation{mutation}); err != nil {
+	if err := validateMutations(mutations); err != nil {
 		return WriteResult{}, err
 	}
 	select {
@@ -438,7 +445,7 @@ func (p *Pipeline) ApplyReplicatedVersion(ctx context.Context, index, version ui
 		p.mu.Unlock()
 		return WriteResult{}, ErrApplyRegression
 	}
-	if p.replicatedMVCC && p.haveVisible && version <= p.visibleSequence {
+	if p.replicatedMVCC && p.haveVisible && version <= p.visibleSequence && !allowExistingVersion {
 		p.mu.Unlock()
 		return WriteResult{}, ErrApplyRegression
 	}
@@ -451,22 +458,25 @@ func (p *Pipeline) ApplyReplicatedVersion(ctx context.Context, index, version ui
 	p.mu.Unlock()
 	result := WriteResult{FirstSequence: version, LastSequence: version, Generation: generationID}
 	p.observeReplicated(WriteStageApplyStarted, result)
-	applyErr := table.ApplyBatch(storage.WriteBatch{FirstSequence: version, Mutations: []storage.Mutation{mutation}})
-	invariant.Assert(applyErr == nil, "REPLICA-13", "apply prevalidated committed mutation: %v", applyErr)
+	applyErr := table.ApplyVersion(version, mutations)
+	invariant.Assert(applyErr == nil, "REPLICA-13", "apply prevalidated committed mutation batch: %v", applyErr)
 	p.observeReplicated(WriteStageApplyCompleted, result)
 	p.mu.Lock()
 	invariant.Assert(p.active.id == generationID && p.active.table == table, "REPLICA-4", "generation changed during replicated apply")
 	if !p.active.haveSeq {
-		p.active.smallestSeq = version
+		p.active.smallestSeq, p.active.largestSeq = version, version
+	} else {
+		p.active.smallestSeq = min(p.active.smallestSeq, version)
+		p.active.largestSeq = max(p.active.largestSeq, version)
 	}
-	p.active.haveSeq, p.active.largestSeq = true, version
+	p.active.haveSeq = true
 	if !p.active.haveApplied {
 		p.active.haveApplied = true
 		p.active.firstApplied = p.coveredApplied + 1
 	}
 	p.active.lastApplied = index
 	p.coveredApplied, p.replicatedApplied = index, index
-	p.visibleSequence, p.haveVisible = version, true
+	p.visibleSequence, p.haveVisible = max(p.visibleSequence, version), true
 	rotate := p.active.table.ReachedSize(p.threshold)
 	if rotate {
 		p.rotateLocked()
@@ -534,7 +544,7 @@ func validateMutations(mutations []storage.Mutation) error {
 		if _, err := storage.NewInternalKey(mutation.Key, 0, mutation.Kind); err != nil {
 			return fmt.Errorf("mutation %d: %w", index, err)
 		}
-		if mutation.Kind == storage.KindDelete && len(mutation.Value) != 0 {
+		if !mutation.Kind.CarriesValue() && len(mutation.Value) != 0 {
 			return fmt.Errorf("mutation %d: %w", index, sstable.ErrDeleteHasValue)
 		}
 	}

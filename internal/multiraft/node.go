@@ -286,6 +286,64 @@ func (n *Node) ProposeMVCC(ctx context.Context, route Route, command replicatedr
 	return timestamp, &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
 }
 
+func (n *Node) ProposeTransaction(ctx context.Context, route Route, command replicatedrange.Command) (*Pending, []Envelope, error) {
+	descriptor, err := n.catalog.LookupByID(route.RangeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if route.Generation != descriptor.Generation {
+		return nil, nil, &StaleRangeError{Current: descriptor}
+	}
+	if !descriptor.Contains(route.Key) || !bytes.Equal(command.Key, route.Key) {
+		return nil, nil, ErrWrongRangeKey
+	}
+	replica, err := n.liveReplica(route.RangeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	index, messages, waiter, err := replica.ProposeTransaction(ctx, command)
+	if err != nil {
+		if errors.Is(err, raft.ErrNotLeader) {
+			return nil, nil, &NotLeaderError{RangeID: route.RangeID, Leader: replica.Status().Raft.LeaderID}
+		}
+		return nil, nil, fmt.Errorf("propose transaction command to range %d: %w", route.RangeID, err)
+	}
+	envelopes, err := n.wrapMessages(route.RangeID, messages)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
+}
+
+func (n *Node) AssignTransactionTimestamp(ctx context.Context, route Route, floor mvcc.Timestamp) (mvcc.Timestamp, *Pending, []Envelope, error) {
+	descriptor, err := n.catalog.LookupByID(route.RangeID)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if route.Generation != descriptor.Generation {
+		return 0, nil, nil, &StaleRangeError{Current: descriptor}
+	}
+	if !descriptor.Contains(route.Key) {
+		return 0, nil, nil, ErrWrongRangeKey
+	}
+	replica, err := n.liveReplica(route.RangeID)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	timestamp, index, messages, waiter, err := replica.AssignTransactionTimestamp(ctx, route.Key, floor)
+	if err != nil {
+		if errors.Is(err, raft.ErrNotLeader) {
+			return 0, nil, nil, &NotLeaderError{RangeID: route.RangeID, Leader: replica.Status().Raft.LeaderID}
+		}
+		return 0, nil, nil, fmt.Errorf("assign transaction timestamp on range %d: %w", route.RangeID, err)
+	}
+	envelopes, err := n.wrapMessages(route.RangeID, messages)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return timestamp, &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
+}
+
 func (p *Pending) poll() (bool, error) {
 	select {
 	case result := <-p.waiter:

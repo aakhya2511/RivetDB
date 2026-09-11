@@ -2,8 +2,9 @@
 
 **Status:** design baseline for the implementation. Phase 0, Phase 1A through
 1K, the Phase 2 single-group Raft core, the Phase 3 static durable replicated
-range, the Phase 4 static Multi-Raft/routing composition, and Phase 5
-replicated MVCC/range-local snapshots are implemented. See
+range, the Phase 4 static Multi-Raft/routing composition, Phase 5 replicated
+MVCC/range-local snapshots, and Phase 6 Snapshot Isolation transactions are
+implemented. See
 [roadmap.md](roadmap.md) for what exists today
 and [invariants.md](invariants.md) for the properties each subsystem must
 uphold.
@@ -379,19 +380,17 @@ transaction record, and either treat the write as committed, ignore it, or wait.
 This is how the system avoids a separate lock table that would itself need to
 be replicated and recovered.
 
-Garbage collection removes versions older than the oldest active read
-timestamp. Until that GC threshold is implemented, storage grows without bound;
-this is tracked as a known limitation rather than assumed away.
+Phase 6 removes no version, tombstone or transaction record. Future garbage
+collection must account for active read and transaction timestamps, unresolved
+intents and retained retry records. Until that proof exists, storage grows
+without bound; this is a known limitation.
 
 ### 7.2 Isolation
 
-The initial target is **snapshot isolation**. That means write skew is
-*permitted*. RivetDB will not describe itself as serializable unless there is a
-mechanical test demonstrating it — the plan is a history-generating harness
-plus a checker, and the claim follows the evidence rather than the intention.
-The precise anomaly table — which anomalies are prevented, which are permitted,
-each backed by a test — is written as `docs/transactions.md` when Phase 6
-begins.
+Phase 6 implements **snapshot isolation**. That means write skew is
+*permitted* and has an explicit passing test. First-committer-wins rejects
+overlapping writes newer than RT. RivetDB does not describe this as
+serializable; see `docs/transactions.md`.
 
 ### 7.3 Cross-range transactions
 
@@ -403,27 +402,31 @@ key:
 ```text
 coordinator                participant ranges
     │
-    │ 1. write intents (each replicated by its own Raft group)
+    │ 1. replicate PENDING record with fixed RT/CT/epoch/participants
+    │
+    │ 2. prepare intents (each replicated by its own Raft group)
     ├──────────────────────────►  R4:  intent on account:A
     ├──────────────────────────►  R11: intent on account:B
     │
-    │ 2. commit: flip the transaction record to COMMITTED
+    │ 3. commit: flip the transaction record to COMMITTED
     │    ── this single replicated write is the atomic commit point ──
     │
-    │ 3. resolve intents (asynchronous, idempotent, restartable)
+    │ 4. resolve intents (idempotent and restartable)
     ├──────────────────────────►  R4:  intent → committed version
     └──────────────────────────►  R11: intent → committed version
 ```
 
 The property that makes this recoverable: **the transaction record is the sole
-source of truth, and it is replicated.** A coordinator that crashes after step 2
-has already committed; step 3 is cleanup that any reader can perform on
-encountering an intent. A coordinator that crashes before step 2 leaves intents
-that will be aborted when someone notices the record is missing or expired.
-There is no window in which the outcome depends on a process that is gone.
+source of truth, and it is replicated.** A coordinator that crashes after step
+3 has already committed; step 4 is physical materialization and readers can
+logically interpret the intent from the record. A coordinator that crashes
+before a decision leaves a PENDING record. Recovery first increments its
+replicated epoch, fencing the old coordinator, then records ABORTED. Missing
+records and elapsed time never invent an outcome.
 
-Step 3 must be idempotent because it will be retried by crash recovery, by
-concurrent readers, and by duplicate RPC delivery simultaneously.
+Step 4 is idempotent because coordinator retry, crash recovery, and duplicate
+delivery may all repeat it. Readers interpret authority but do not have to
+perform cleanup.
 
 ---
 
@@ -596,7 +599,7 @@ internal/multiraft/   static catalog, node registry, shared transport/scheduler 
 docs/                 this document, invariants, roadmap, ADRs
 ```
 
-Planned, in roadmap order: `internal/txn`, `internal/migration`,
+Planned, in roadmap order: `internal/migration`,
 `internal/rebalance`, `internal/telemetry`, `internal/server`, plus `cmd/`,
 `api/proto`, `tests/` and `benchmarks/`.
 
@@ -606,9 +609,10 @@ Planned, in roadmap order: `internal/txn`, `internal/migration`,
 
 Recorded here rather than silently deferred:
 
-1. **Timestamp allocation (resolved for MVCC).** ADR-0017 chooses range-scoped
-   48/16 HLC state over a cluster oracle. Phase 6 must still define how a
-   transaction-level read and commit timestamp is selected across participants.
+1. **Timestamp allocation (resolved through Phase 6).** ADR-0017 chooses
+   range-scoped 48/16 HLC state. ADR-0018 chooses one immutable RT with lazy
+   serving barriers and one CT above participant observations. No external-
+   consistency or bounded-skew claim follows.
 2. **Read path.** Routing every read through Raft is obviously correct but
    costs a round trip. ReadIndex avoids the log write; leader leases avoid the
    round trip entirely but make safety depend on clock bounds, which §11 says
@@ -628,4 +632,17 @@ codec, historical Engine reads, applied MVCC watermark and read-only snapshot
 registry. The shared physical clock provider is not mutable timestamp
 authority. Raft index, durable applied Raft frontier, volatile MVCC watermark
 and durable MVCC watermark are distinct. Timestamps are comparable across
-ranges, but there is no multi-range atomic snapshot or transaction protocol.
+ranges. Phase 6 builds explicit serving barriers and its transaction protocol
+on that property; comparability alone remains insufficient.
+
+### Phase 6 Snapshot Isolation transaction layer
+
+`internal/txn` defines bounded canonical protocol values. Multi-Raft drives a
+client/runtime coordinator, but the deterministic first-write range's
+replicated transaction record is sole outcome authority. Participant intents
+and prepared metadata are replicated independently. A durable PENDING record,
+participant prepare, terminal decision, then idempotent resolution implement
+2PC. Epoch takeover fences stale coordinators. Transaction-aware reads consult
+record status, giving one-CT logical visibility even before physical cleanup.
+This certifies Snapshot Isolation and atomic writes, not serializability,
+linearizable reads, or external consistency.

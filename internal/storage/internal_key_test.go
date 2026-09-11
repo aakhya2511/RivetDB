@@ -120,7 +120,7 @@ func TestInternalKeyEncodeDecodeRoundTrip(t *testing.T) {
 
 	for _, userKey := range [][]byte{nil, {}, {0x00}, {0xff}, {0x00, 0xff, 0x00}} {
 		for _, sequence := range []uint64{0, 1, math.MaxUint64} {
-			for _, kind := range []storage.ValueKind{storage.KindDelete, storage.KindValue} {
+			for _, kind := range []storage.ValueKind{storage.KindDelete, storage.KindValue, storage.KindTxnAbort, storage.KindIntent} {
 				want := mustInternalKey(t, userKey, sequence, kind)
 				got, err := storage.DecodeInternalKey(want.Encode())
 				if err != nil {
@@ -141,11 +141,11 @@ func TestInternalKeyRejectsMalformedInput(t *testing.T) {
 		t.Fatalf("short key error = %v, want ErrInternalKeyTooShort", err)
 	}
 	badKind := make([]byte, 9)
-	badKind[8] = 2
+	badKind[8] = 4
 	if _, err := storage.DecodeInternalKey(badKind); !errors.Is(err, storage.ErrInvalidValueKind) {
 		t.Fatalf("bad kind error = %v, want ErrInvalidValueKind", err)
 	}
-	if _, err := storage.NewInternalKey(nil, 0, 2); !errors.Is(err, storage.ErrInvalidValueKind) {
+	if _, err := storage.NewInternalKey(nil, 0, 4); !errors.Is(err, storage.ErrInvalidValueKind) {
 		t.Fatalf("constructor bad kind error = %v, want ErrInvalidValueKind", err)
 	}
 }

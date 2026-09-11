@@ -16,6 +16,7 @@ import (
 	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/storage/engine"
+	"github.com/rivetdb/rivetdb/internal/txn"
 )
 
 type RangeID uint64
@@ -120,6 +121,8 @@ type Status struct {
 	DurableAppliedRaftIndex uint64
 	LSMVisibleIndex         uint64
 	MaxAppliedMVCC          mvcc.Timestamp
+	SafeReadMVCC            mvcc.Timestamp
+	HLCFloor                mvcc.Timestamp
 	LiveTableCount          uint64
 	MaterializedCommands    uint64
 	Fatal                   error
@@ -247,7 +250,9 @@ func Open(options Options) (_ *Replica, resultErr error) {
 		return nil, fmt.Errorf("create range HLC: %w", err)
 	}
 	machine := &stateMachine{engine: local, hook: options.Hook, containsKey: options.ContainsKey,
-		mvcc: options.MVCC, maxApplied: appliedFloor, clock: hlc}
+		mvcc: options.MVCC, maxApplied: appliedFloor, safeRead: appliedFloor, clock: hlc,
+		rangeID: options.RangeID, generation: options.Generation, records: make(map[txn.ID]txn.Record),
+		participants: make(map[txn.ID]txn.ParticipantRecord)}
 	r := &Replica{rangeID: options.RangeID, replicaID: options.ReplicaID, generation: options.Generation,
 		containsKey: options.ContainsKey, containsSpan: options.ContainsSpan, engine: local, store: store, hlc: hlc, mvcc: options.MVCC, machine: machine,
 		waiters: make(map[uint64]chan Result), snapshots: make(map[uint64]mvcc.Timestamp), maxWaiters: options.MaxProposalWaiters}
@@ -451,8 +456,106 @@ func (r *Replica) Status() Status {
 		LiveTableCount: stats.Manifest.LiveTables, Fatal: errors.Join(raftStatus.Fatal, err)}
 	if r.mvcc {
 		result.MaxAppliedMVCC = r.machine.maxApplied
+		result.SafeReadMVCC = r.machine.safeRead
+		result.HLCFloor = r.hlc.Last()
 	}
 	result.MaterializedCommands = stats.Puts + stats.Deletes
+	return result
+}
+
+// ProposeTransaction replicates a fully timestamped transaction operation.
+func (r *Replica) ProposeTransaction(ctx context.Context, command Command) (uint64, []raft.Message, <-chan Result, error) {
+	if ctx == nil || !r.mvcc || command.Type < CommandTxnBarrier || command.Timestamp == 0 {
+		return 0, nil, nil, ErrInvalidOptions
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, nil, nil, fmt.Errorf("before transaction proposal admission: %w", err)
+	}
+	if r.containsKey != nil && !r.containsKey(command.Key) {
+		return 0, nil, nil, ErrKeyOutOfRange
+	}
+	if command.Type == CommandTxnPrepare {
+		operation, err := txn.DecodeOperation(command.Value)
+		if err != nil {
+			return 0, nil, nil, fmt.Errorf("decode transaction prepare: %w", err)
+		}
+		for _, write := range operation.Writes {
+			if r.containsKey != nil && !r.containsKey(write.Key) {
+				return 0, nil, nil, ErrKeyOutOfRange
+			}
+		}
+	}
+	encoded, err := EncodeCommand(command)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.node.Status().Role != raft.Leader {
+		return 0, nil, nil, raft.ErrNotLeader
+	}
+	return r.proposeLocked(encoded)
+}
+
+// AssignTransactionTimestamp advances the leader HLC above floor and
+// replicates that value as a serving barrier.
+func (r *Replica) AssignTransactionTimestamp(ctx context.Context, key []byte, floor mvcc.Timestamp) (mvcc.Timestamp, uint64, []raft.Message, <-chan Result, error) {
+	if ctx == nil || !r.mvcc {
+		return 0, 0, nil, nil, ErrInvalidOptions
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return 0, 0, nil, nil, ErrStopped
+	}
+	if r.node.Status().Role != raft.Leader {
+		return 0, 0, nil, nil, raft.ErrNotLeader
+	}
+	if r.containsKey != nil && !r.containsKey(key) {
+		return 0, 0, nil, nil, ErrKeyOutOfRange
+	}
+	state, err := r.store.Load()
+	if err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("load transaction timestamp floor: %w", err)
+	}
+	history, err := maximumCommandTimestamp(state.Entries)
+	if err != nil {
+		return 0, 0, nil, nil, err
+	}
+	r.hlc.Observe(max(floor, history))
+	timestamp, err := r.hlc.Now()
+	if err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("advance transaction HLC: %w", err)
+	}
+	encoded, err := EncodeCommand(Command{Type: CommandTxnBarrier, Key: key, Timestamp: timestamp})
+	if err != nil {
+		return 0, 0, nil, nil, err
+	}
+	index, messages, waiter, err := r.proposeLocked(encoded)
+	return timestamp, index, messages, waiter, err
+}
+
+func (r *Replica) TransactionRecord(id txn.ID) (txn.Record, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.machine.records[id]
+	return txn.CloneRecord(record), ok
+}
+
+func (r *Replica) ParticipantRecord(id txn.ID) (txn.ParticipantRecord, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.machine.participants[id]
+	return txn.CloneParticipant(record), ok
+}
+
+func (r *Replica) TransactionRecords() []txn.Record {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]txn.Record, 0, len(r.machine.records))
+	for _, record := range r.machine.records {
+		result = append(result, txn.CloneRecord(record))
+	}
 	return result
 }
 

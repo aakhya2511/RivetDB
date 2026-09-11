@@ -974,3 +974,24 @@ coverage. Legacy replicated directories retain their Raft-index meaning and
 fail a replicated-MVCC mode open. `GetAt`/`ScanAt` pass the requested timestamp
 to the existing logarithmic candidate seeks. Flush and compaction preserve all
 value and tombstone versions; Phase 5 performs no MVCC GC.
+
+## Phase 6 intent persistence
+
+Phase 6 extends the persistent kind byte without changing the nine-byte trailer:
+
+```text
+Delete=0, Value=1, TxnAbort=2, Intent=3
+```
+
+The explicit comparator still orders user key ascending, complemented HLC
+timestamp descending, then kind ascending. A resolved value/delete or abort
+marker at CT therefore sorts before the retained intent at CT. Point and scan
+selection choose the lower kind at an equal timestamp; abort markers continue
+to older history, and unresolved intents are returned only through a raw
+transaction-aware API. Ordinary reads return `ErrUnresolvedIntent`.
+
+Replicated participant batches may insert several keys at exactly one CT.
+Flush, SSTable validation, version-preserving compaction and restart retain all
+kinds. Resolution may arrive after a larger unrelated global CT, so
+replicated-MVCC generations permit overlapping timestamp ranges while the
+Manifest maximum remains monotonic. No intent or resolution-artifact GC exists.

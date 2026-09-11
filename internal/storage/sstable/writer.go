@@ -157,7 +157,7 @@ func (w *Writer) Add(key storage.InternalKey, value []byte) error {
 	if len(value) > MaxValueSize {
 		return ErrValueTooLarge
 	}
-	if key.Kind() == storage.KindDelete && len(value) != 0 {
+	if !key.Kind().CarriesValue() && len(value) != 0 {
 		return ErrDeleteHasValue
 	}
 	entrySize, ok := checkedAdd(uint64(len(encoded)), uint64(len(value)))

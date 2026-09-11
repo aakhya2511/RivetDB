@@ -62,86 +62,126 @@ func (e *Engine) GetAt(ctx context.Context, key []byte, target uint64) ([]byte, 
 }
 
 func (e *Engine) getAt(ctx context.Context, key []byte, requested *uint64) ([]byte, error) {
+	entry, err := e.getMVCCAt(ctx, key, requested)
+	if err != nil {
+		return nil, err
+	}
+	switch entry.Kind {
+	case storage.KindValue:
+		return entry.Value, nil
+	case storage.KindDelete:
+		return nil, ErrNotFound
+	case storage.KindIntent:
+		return nil, ErrUnresolvedIntent
+	default:
+		return nil, errors.Join(ErrCorruption, storage.ErrInvalidValueKind)
+	}
+}
+
+// GetMVCCAt returns the selected physical MVCC entry without interpreting a
+// transaction intent. Abort markers are skipped to older history.
+func (e *Engine) GetMVCCAt(ctx context.Context, key []byte, target uint64) (MVCCEntry, error) {
+	return e.getMVCCAt(ctx, key, &target)
+}
+
+func (e *Engine) getMVCCAt(ctx context.Context, key []byte, requested *uint64) (MVCCEntry, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
-		return nil, ErrClosed
+		return MVCCEntry{}, ErrClosed
 	}
 	if ctx == nil || len(key) > sstable.MaxUserKeySize {
-		return nil, ErrInvalidOptions
+		return MVCCEntry{}, ErrInvalidOptions
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("before point read: %w", err)
+		return MVCCEntry{}, fmt.Errorf("before point read: %w", err)
 	}
 	e.gets.Add(1)
 	view, err := e.captureReadView()
 	if err != nil {
-		return nil, err
+		return MVCCEntry{}, err
 	}
 	e.observeRead(ReadStageGetViewCaptured, view.version.Generation())
 	if !view.memtables.HaveSequence {
 		e.getMisses.Add(1)
-		return nil, ErrNotFound
+		return MVCCEntry{}, ErrNotFound
 	}
 	target := view.memtables.LatestSequence
 	if requested != nil && *requested < target {
 		target = *requested
 	}
-	var best *candidate
-	consider := func(value candidate) error {
-		if value.entry.Key.Sequence() > target {
+	for {
+		var best *candidate
+		consider := func(value candidate) error {
+			if value.entry.Key.Sequence() > target {
+				return nil
+			}
+			if best == nil || value.entry.Key.Sequence() > best.entry.Key.Sequence() {
+				winner := value
+				best = &winner
+				return nil
+			}
+			if value.entry.Key.Sequence() < best.entry.Key.Sequence() {
+				return nil
+			}
+			if value.entry.Key.Kind() != best.entry.Key.Kind() {
+				if value.entry.Key.Kind() < best.entry.Key.Kind() {
+					winner := value
+					best = &winner
+				}
+				return nil
+			}
+			if !bytes.Equal(value.entry.Value, best.entry.Value) {
+				return errors.Join(ErrCorruption, ErrDuplicateEntry)
+			}
+			if value.fileNumber == 0 || value.fileNumber != best.fileNumber {
+				return errors.Join(ErrCorruption, ErrDuplicateEntry)
+			}
 			return nil
 		}
-		if best == nil || value.entry.Key.Sequence() > best.entry.Key.Sequence() {
-			winner := value
-			best = &winner
-			return nil
-		}
-		if value.entry.Key.Sequence() < best.entry.Key.Sequence() {
-			return nil
-		}
-		if value.entry.Key.Kind() != best.entry.Key.Kind() || !bytes.Equal(value.entry.Value, best.entry.Value) {
-			return errors.Join(ErrCorruption, ErrDuplicateEntry)
-		}
-		if value.fileNumber == 0 || value.fileNumber != best.fileNumber {
-			return errors.Join(ErrCorruption, ErrDuplicateEntry)
-		}
-		return nil
-	}
-	if entry, ok := view.memtables.Active.Table.GetCandidate(key, target); ok {
-		if err := consider(candidate{entry: sstable.Entry{Key: entry.Key, Value: entry.Value}, fileNumber: view.memtables.Active.FileNumber}); err != nil {
-			return nil, err
-		}
-	}
-	for _, generation := range view.memtables.Immutables {
-		if entry, ok := generation.Table.GetCandidate(key, target); ok {
-			if err := consider(candidate{entry: sstable.Entry{Key: entry.Key, Value: entry.Value}, fileNumber: generation.FileNumber}); err != nil {
-				return nil, err
+		if entry, ok := view.memtables.Active.Table.GetCandidate(key, target); ok {
+			if err := consider(candidate{entry: sstable.Entry{Key: entry.Key, Value: entry.Value}, fileNumber: view.memtables.Active.FileNumber}); err != nil {
+				return MVCCEntry{}, err
 			}
 		}
-	}
-	for _, table := range tablesForPoint(view.version, key) {
-		if table.Level == 0 {
-			e.getL0TableReads.Add(1)
-		} else {
-			e.getHigherTableReads.Add(1)
-		}
-		value, found, readErr := e.tableCandidate(table, key, target)
-		if readErr != nil {
-			return nil, readErr
-		}
-		if found {
-			if err := consider(candidate{entry: value, fileNumber: table.FileNumber}); err != nil {
-				return nil, err
+		for _, generation := range view.memtables.Immutables {
+			if entry, ok := generation.Table.GetCandidate(key, target); ok {
+				if err := consider(candidate{entry: sstable.Entry{Key: entry.Key, Value: entry.Value}, fileNumber: generation.FileNumber}); err != nil {
+					return MVCCEntry{}, err
+				}
 			}
 		}
+		for _, table := range tablesForPoint(view.version, key) {
+			if table.Level == 0 {
+				e.getL0TableReads.Add(1)
+			} else {
+				e.getHigherTableReads.Add(1)
+			}
+			value, found, readErr := e.tableCandidate(table, key, target)
+			if readErr != nil {
+				return MVCCEntry{}, readErr
+			}
+			if found {
+				if err := consider(candidate{entry: value, fileNumber: table.FileNumber}); err != nil {
+					return MVCCEntry{}, err
+				}
+			}
+		}
+		if best == nil {
+			e.getMisses.Add(1)
+			return MVCCEntry{}, ErrNotFound
+		}
+		if best.entry.Key.Kind() == storage.KindTxnAbort {
+			if best.entry.Key.Sequence() == 0 {
+				e.getMisses.Add(1)
+				return MVCCEntry{}, ErrNotFound
+			}
+			target = best.entry.Key.Sequence() - 1
+			continue
+		}
+		e.getHits.Add(1)
+		return MVCCEntry{Key: best.entry.Key.UserKey(), Value: bytes.Clone(best.entry.Value), Timestamp: best.entry.Key.Sequence(), Kind: best.entry.Key.Kind()}, nil
 	}
-	if best == nil || best.entry.Key.Kind() == storage.KindDelete {
-		e.getMisses.Add(1)
-		return nil, ErrNotFound
-	}
-	e.getHits.Add(1)
-	return bytes.Clone(best.entry.Value), nil
 }
 
 func tablesForPoint(version *manifest.Version, key []byte) []manifest.TableMetadata {
@@ -199,6 +239,31 @@ func (e *Engine) ScanAt(ctx context.Context, start, end []byte, target uint64) (
 }
 
 func (e *Engine) scanAt(ctx context.Context, start, end []byte, requested *uint64) (result []KV, resultErr error) {
+	entries, err := e.scanMVCCAt(ctx, start, end, requested)
+	if err != nil {
+		return nil, err
+	}
+	values := make([]KV, 0, len(entries))
+	for _, entry := range entries {
+		switch entry.Kind {
+		case storage.KindValue:
+			values = append(values, KV{Key: entry.Key, Value: entry.Value})
+		case storage.KindDelete:
+		case storage.KindIntent:
+			return nil, ErrUnresolvedIntent
+		default:
+			return nil, errors.Join(ErrCorruption, storage.ErrInvalidValueKind)
+		}
+	}
+	return values, nil
+}
+
+// ScanMVCCAt selects one physical entry per user key at or below target.
+func (e *Engine) ScanMVCCAt(ctx context.Context, start, end []byte, target uint64) ([]MVCCEntry, error) {
+	return e.scanMVCCAt(ctx, start, end, &target)
+}
+
+func (e *Engine) scanMVCCAt(ctx context.Context, start, end []byte, requested *uint64) (result []MVCCEntry, resultErr error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
@@ -211,7 +276,7 @@ func (e *Engine) scanAt(ctx context.Context, start, end []byte, requested *uint6
 		return nil, ErrInvalidRange
 	}
 	if start != nil && end != nil && bytes.Equal(start, end) {
-		return []KV{}, nil
+		return []MVCCEntry{}, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("before scan: %w", err)
@@ -223,7 +288,7 @@ func (e *Engine) scanAt(ctx context.Context, start, end []byte, requested *uint6
 	}
 	e.observeRead(ReadStageScanViewCaptured, view.version.Generation())
 	if !view.memtables.HaveSequence {
-		return []KV{}, nil
+		return []MVCCEntry{}, nil
 	}
 	target := view.memtables.LatestSequence
 	if requested != nil && *requested < target {
@@ -243,16 +308,15 @@ func (e *Engine) scanAt(ctx context.Context, start, end []byte, requested *uint6
 		return nil, fmt.Errorf("construct scan merge: %w", err)
 	}
 	defer func() { resultErr = errors.Join(resultErr, merge.Close()) }()
-	var values []KV
+	var values []MVCCEntry
 	var currentUser []byte
 	var haveUser bool
 	var selected candidate
 	var haveSelected bool
 	emit := func() {
-		if haveSelected && selected.entry.Key.Kind() == storage.KindValue {
-			// Both slices are already operation-owned: UserKey returns a copy,
-			// and every child iterator returns an owned value.
-			values = append(values, KV{Key: currentUser, Value: selected.entry.Value})
+		if haveSelected && selected.entry.Key.Kind() != storage.KindTxnAbort {
+			values = append(values, MVCCEntry{Key: currentUser, Value: selected.entry.Value,
+				Timestamp: selected.entry.Key.Sequence(), Kind: selected.entry.Key.Kind()})
 		}
 		haveSelected = false
 	}
@@ -283,9 +347,19 @@ func (e *Engine) scanAt(ctx context.Context, start, end []byte, requested *uint6
 			continue
 		}
 		if entry.Key.Sequence() == selected.entry.Key.Sequence() {
-			if entry.Key.Kind() != selected.entry.Key.Kind() || !bytes.Equal(entry.Value, selected.entry.Value) || file == 0 || file != selected.fileNumber {
+			if entry.Key.Kind() != selected.entry.Key.Kind() {
+				if entry.Key.Kind() < selected.entry.Key.Kind() {
+					selected = value
+				}
+				continue
+			}
+			if !bytes.Equal(entry.Value, selected.entry.Value) || file == 0 || file != selected.fileNumber {
 				return nil, errors.Join(ErrCorruption, ErrDuplicateEntry)
 			}
+			continue
+		}
+		if selected.entry.Key.Kind() == storage.KindTxnAbort {
+			selected = value
 		}
 	}
 	if err := merge.Error(); err != nil {

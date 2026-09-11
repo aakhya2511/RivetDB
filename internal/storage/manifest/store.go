@@ -444,8 +444,11 @@ func (s *Store) InstallTable(ctx context.Context, installation pipeline.TableIns
 		edit.ReplicatedAppliedThrough = &frontier
 		if s.current.mode == ModeReplicatedMVCC {
 			maximum := installation.MaxMVCCTimestamp
-			if maximum == 0 || s.current.haveMaxAppliedMVCC && maximum < s.current.maxAppliedMVCC {
+			if maximum == 0 {
 				return ErrSequenceRegression
+			}
+			if s.current.haveMaxAppliedMVCC {
+				maximum = max(maximum, s.current.maxAppliedMVCC)
 			}
 			edit.MaxAppliedMVCC = &maximum
 		}

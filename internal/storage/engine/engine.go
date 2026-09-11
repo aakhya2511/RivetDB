@@ -75,6 +75,15 @@ type Options struct {
 // KV is one latest-state user-key/value result.
 type KV struct{ Key, Value []byte }
 
+// MVCCEntry is one uninterpreted selected version. Transaction-aware callers
+// use it to consult replicated outcome authority for KindIntent.
+type MVCCEntry struct {
+	Key       []byte
+	Value     []byte
+	Timestamp uint64
+	Kind      storage.ValueKind
+}
+
 // Stats is a point-in-time copy of local operation counters.
 type Stats struct {
 	Puts, Deletes, Gets, GetHits, GetMisses, Scans uint64
@@ -371,10 +380,30 @@ func (e *Engine) ApplyCommitted(ctx context.Context, index, term uint64, command
 // ApplyCommittedMVCC materializes one committed command using timestamp as
 // its internal-key version while index remains the replicated apply frontier.
 func (e *Engine) ApplyCommittedMVCC(ctx context.Context, index, term, timestamp uint64, commandBytes []byte, mutation storage.Mutation) error {
-	return e.applyCommitted(ctx, index, term, timestamp, commandBytes, mutation, ModeReplicatedMVCC)
+	return e.applyCommittedBatch(ctx, index, term, timestamp, commandBytes, []storage.Mutation{mutation}, ModeReplicatedMVCC, false)
+}
+
+// ApplyCommittedMVCCBatch atomically installs one participant prepare at CT.
+func (e *Engine) ApplyCommittedMVCCBatch(ctx context.Context, index, term, timestamp uint64, commandBytes []byte, mutations []storage.Mutation) error {
+	return e.applyCommittedBatch(ctx, index, term, timestamp, commandBytes, mutations, ModeReplicatedMVCC, false)
+}
+
+// ApplyPreparedMVCCBatch installs provisional versions whose globally chosen
+// CT may arrive after a larger unrelated CT on this range.
+func (e *Engine) ApplyPreparedMVCCBatch(ctx context.Context, index, term, timestamp uint64, commandBytes []byte, mutations []storage.Mutation) error {
+	return e.applyCommittedBatch(ctx, index, term, timestamp, commandBytes, mutations, ModeReplicatedMVCC, true)
+}
+
+// ResolveCommittedMVCCBatch materializes a decision at an existing intent CT.
+func (e *Engine) ResolveCommittedMVCCBatch(ctx context.Context, index, term, timestamp uint64, commandBytes []byte, mutations []storage.Mutation) error {
+	return e.applyCommittedBatch(ctx, index, term, timestamp, commandBytes, mutations, ModeReplicatedMVCC, true)
 }
 
 func (e *Engine) applyCommitted(ctx context.Context, index, term, version uint64, commandBytes []byte, mutation storage.Mutation, required Mode) error {
+	return e.applyCommittedBatch(ctx, index, term, version, commandBytes, []storage.Mutation{mutation}, required, false)
+}
+
+func (e *Engine) applyCommittedBatch(ctx context.Context, index, term, version uint64, commandBytes []byte, mutations []storage.Mutation, required Mode, allowExistingVersion bool) error {
 	if ctx == nil || index == 0 || term == 0 || version == 0 || len(commandBytes) == 0 {
 		return ErrInvalidOptions
 	}
@@ -406,14 +435,16 @@ func (e *Engine) applyCommitted(ctx context.Context, index, term, version uint64
 	if index <= stats.ReplicatedApplied {
 		return ErrApplyOrder
 	}
-	if _, err := e.pipeline.ApplyReplicatedVersion(ctx, index, version, mutation); err != nil {
+	if _, err := e.pipeline.ApplyReplicatedVersionBatch(ctx, index, version, mutations, allowExistingVersion); err != nil {
 		return fmt.Errorf("materialize committed Raft mutation: %w", err)
 	}
 	e.appliedIdentities[index] = identity
-	if mutation.Kind == storage.KindDelete {
-		e.deletes.Add(1)
-	} else {
-		e.puts.Add(1)
+	for _, mutation := range mutations {
+		if mutation.Kind == storage.KindDelete {
+			e.deletes.Add(1)
+		} else {
+			e.puts.Add(1)
+		}
 	}
 	return nil
 }

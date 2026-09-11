@@ -20,7 +20,7 @@ find than to prevent.
 | 3 | Durable replicated range (Raft + storage) | ✅ complete |
 | 4 | Multi-Raft and static range routing | ✅ complete |
 | 5 | Replicated MVCC and range-local snapshots | ✅ complete |
-| 6 | Distributed transactions | ⬜ |
+| 6 | Distributed transactions | ✅ |
 | 7 | Online range splitting | ⬜ |
 | 8 | Online replica migration | ⬜ |
 | 9 | Workload-aware rebalancer | ⬜ |
@@ -31,7 +31,9 @@ find than to prevent.
 **What exists right now:** Phase 0, the certified Phase 1 local latest-state
 engine, the mechanically qualified Phase 2 single-group Raft core, Phase 3's
 durable replicated range, Phase 4's static Multi-Raft node/catalog/router, and
-Phase 5's replicated MVCC history and range-local read-only snapshots.
+Phase 5's replicated MVCC history/range-local snapshots, and Phase 6's
+Snapshot Isolation transaction API, replicated intents/records and cross-range
+2PC. There is no serializability claim.
 There is no network database server, distributed read protocol or client.
 Anything later in [architecture.md](architecture.md) is a design, clearly
 marked as such.
@@ -239,18 +241,20 @@ See [mvcc.md](mvcc.md) and [evidence/phase-5.md](evidence/phase-5.md).
 
 ---
 
-## Phase 6 — Distributed transactions ⬜
+## Phase 6 — Distributed transactions ✅
 
-**Build:** a coordinator · two-phase commit over per-range replicated
-transaction state · idempotent intent resolution · timeout-based abort ·
-recovery for both coordinator and participant crashes.
+**Delivered:** Snapshot Isolation transactions · 128-bit TxnID · one RT and CT ·
+buffered read-your-writes · lazy participant serving barriers · replicated
+transaction records and intents · first-committer-wins · epoch-fenced 2PC ·
+logical intent interpretation · idempotent recovery and resolution.
 
-**Gate:** a two-range transfer commits atomically · a participant crashed
-between prepare and commit recovers to the correct outcome · a coordinator
-crashed after the commit point still results in a commit · a coordinator
-crashed before it results in an abort · duplicated prepare/commit/abort
-messages change nothing · a bank-transfer workload maintains a constant total
-balance under continuous fault injection (TXN-1 through TXN-6).
+**Gate:** two-, three- and eleven-range atomic commits · write/write conflicts
+and deliberate write skew · coordinator/participant leader change · stale
+epoch fencing · mixed-state full restart · real subprocess crash at every 2PC
+stage · fixed/fresh 10k+ and opt-in 100k-event SI reference campaigns · intent
+flush/compaction/restart preservation · all lower gates remain certified
+(`TXN-1` through `TXN-17`). See [transactions.md](transactions.md) and
+[evidence/phase-6.md](evidence/phase-6.md).
 
 ---
 

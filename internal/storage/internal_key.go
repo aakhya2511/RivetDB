@@ -22,7 +22,8 @@ var (
 	ErrInvalidValueKind = errors.New("invalid internal-key value kind")
 )
 
-// ValueKind distinguishes a stored value from a deletion tombstone.
+// ValueKind distinguishes committed values, tombstones, transaction abort
+// markers and provisional intents. Numeric values are persistent format.
 type ValueKind uint8
 
 const (
@@ -31,6 +32,11 @@ const (
 	KindDelete ValueKind = iota
 	// KindValue is a stored value.
 	KindValue
+	// KindTxnAbort hides an intent at the same version and continues lookup in
+	// older history. It carries no value bytes.
+	KindTxnAbort
+	// KindIntent is a canonical provisional transaction value.
+	KindIntent
 )
 
 // InternalKey is the logical key used by MemTables and SSTables. Its fields
@@ -122,5 +128,8 @@ func CompareInternal(a, b InternalKey) int {
 }
 
 func (k ValueKind) valid() bool {
-	return k == KindDelete || k == KindValue
+	return k <= KindIntent
 }
+
+// CarriesValue reports whether the on-disk entry includes a value field.
+func (k ValueKind) CarriesValue() bool { return k == KindValue || k == KindIntent }
