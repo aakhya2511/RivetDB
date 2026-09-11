@@ -45,6 +45,7 @@ Phase:    which phase this governs
 | [0014](0014-raft-core-persistence-and-apply-boundary.md) | Raft core persistence and state-machine boundary | Accepted | 2 |
 | [0015](0015-raft-to-lsm-replicated-state-machine.md) | Raft-to-LSM replicated state-machine integration | Accepted | 3 |
 | [0016](0016-multiraft-static-range-routing.md) | Multi-Raft hosting and static range routing | Accepted | 4 |
+| [0017](0017-hlc-mvcc-timestamp-authority.md) | HLC timestamp authority and replicated MVCC snapshots | Accepted | 5 |
 
 ## Planned
 

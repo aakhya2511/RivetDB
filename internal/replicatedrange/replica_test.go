@@ -12,7 +12,10 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/rivetdb/rivetdb/internal/clock"
+	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/storage/engine"
 )
@@ -73,11 +76,27 @@ type testCluster struct {
 	ids      []raft.NodeID
 	replicas map[raft.NodeID]*Replica
 	hookFor  func(raft.NodeID) Hook
+	mvcc     bool
+	clocks   map[raft.NodeID]clock.Clock
 }
 
 func newTestCluster(t testing.TB, size int) *testCluster {
 	t.Helper()
 	return newTestClusterAt(t, size, t.TempDir())
+}
+
+func newMVCCTestCluster(t testing.TB, size int) *testCluster {
+	t.Helper()
+	c := &testCluster{t: t, root: t.TempDir(), replicas: make(map[raft.NodeID]*Replica), mvcc: true, clocks: make(map[raft.NodeID]clock.Clock)}
+	for id := 1; id <= size; id++ {
+		nodeID := raft.NodeID(id)
+		c.ids = append(c.ids, nodeID)
+		physicalMillis := map[raft.NodeID]int64{1: 5000, 2: 1000, 3: 3000, 4: 2000, 5: 4000}[nodeID]
+		c.clocks[nodeID] = clock.NewMockAt(time.UnixMilli(physicalMillis))
+	}
+	c.openAll()
+	t.Cleanup(func() { c.closeAll() })
+	return c
 }
 
 func newTestClusterAt(t testing.TB, size int, root string) *testCluster {
@@ -112,12 +131,33 @@ func (c *testCluster) openAll() {
 			HeartbeatInterval: 1, Random: rand.New(rand.NewPCG(uint64(id), uint64(id)+99)),
 			Engine: engine.Options{MemTableBytes: 1 << (10 + id)},
 			Hook:   hook,
+			MVCC:   c.mvcc, Clock: c.clocks[id],
 		})
 		if err != nil {
 			c.t.Fatalf("open node %d: %v", id, err)
 		}
 		c.replicas[id] = replica
 	}
+}
+
+func (c *testCluster) proposeMVCC(leader raft.NodeID, command Command) mvcc.Timestamp {
+	c.t.Helper()
+	timestamp, index, messages, waiter, err := c.replicas[leader].ProposeMVCC(context.Background(), command)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.deliver(messages, 10000)
+	if awaitErr := c.replicas[leader].Await(context.Background(), index, waiter); awaitErr != nil {
+		c.t.Fatal(awaitErr)
+	}
+	for rounds := 0; rounds < 2; rounds++ {
+		messages, err = c.replicas[leader].Tick()
+		if err != nil {
+			c.t.Fatal(err)
+		}
+		c.deliver(messages, 10000)
+	}
+	return timestamp
 }
 
 func (c *testCluster) closeAll() {

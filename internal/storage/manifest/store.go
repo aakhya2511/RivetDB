@@ -51,6 +51,8 @@ type Stats struct {
 	Mode                     StorageMode
 	ReplicatedAppliedThrough uint64
 	HaveReplicatedApplied    bool
+	MaxAppliedMVCC           uint64
+	HaveMaxAppliedMVCC       bool
 }
 
 // Store serializes durable Manifest edits and publishes immutable Versions.
@@ -99,8 +101,8 @@ func Create(options Options) (*Store, error) {
 	comparator := ComparatorName
 	nextFile := uint64(1)
 	initial := VersionEdit{Comparator: &comparator, NextFileNumber: &nextFile}
-	if options.Mode == ModeReplicated {
-		mode, zero := ModeReplicated, uint64(0)
+	if options.Mode == ModeReplicated || options.Mode == ModeReplicatedMVCC {
+		mode, zero := options.Mode, uint64(0)
 		initial.StorageMode, initial.ReplicatedAppliedThrough = &mode, &zero
 	}
 	version, err := initialVersion().apply(initial)
@@ -242,7 +244,7 @@ func validateOptions(options Options) error {
 	if options.Directory == "" {
 		return ErrInvalidOptions
 	}
-	if options.Mode != ModeStandalone && options.Mode != ModeReplicated {
+	if options.Mode != ModeStandalone && options.Mode != ModeReplicated && options.Mode != ModeReplicatedMVCC {
 		return ErrInvalidOptions
 	}
 	info, err := os.Stat(options.Directory)
@@ -330,7 +332,7 @@ func (s *Store) RecoveredNextSequence() (uint64, bool) {
 func (s *Store) Install(edit VersionEdit) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if edit.StorageMode != nil || edit.ReplicatedAppliedThrough != nil {
+	if edit.StorageMode != nil || edit.ReplicatedAppliedThrough != nil || edit.MaxAppliedMVCC != nil {
 		return ErrModeMismatch
 	}
 	for _, table := range edit.AddedFiles {
@@ -434,12 +436,19 @@ func (s *Store) InstallTable(ctx context.Context, installation pipeline.TableIns
 		last = s.current.lastSequence
 	}
 	edit := VersionEdit{AddedFiles: []TableMetadata{table}, LastSequence: &last}
-	if s.current.mode == ModeReplicated {
+	if s.current.mode == ModeReplicated || s.current.mode == ModeReplicatedMVCC {
 		if !installation.HaveAppliedCoverage || installation.FirstAppliedIndex != s.current.replicatedApplied+1 || installation.LastAppliedIndex < installation.FirstAppliedIndex {
 			return ErrReplicatedFrontierGap
 		}
 		frontier := installation.LastAppliedIndex
 		edit.ReplicatedAppliedThrough = &frontier
+		if s.current.mode == ModeReplicatedMVCC {
+			maximum := installation.MaxMVCCTimestamp
+			if maximum == 0 || s.current.haveMaxAppliedMVCC && maximum < s.current.maxAppliedMVCC {
+				return ErrSequenceRegression
+			}
+			edit.MaxAppliedMVCC = &maximum
+		}
 	} else {
 		preliminary, applyErr := s.current.apply(edit)
 		if applyErr != nil {
@@ -591,6 +600,8 @@ func (s *Store) refreshStatsLocked() {
 	s.stats.Mode = s.current.mode
 	s.stats.ReplicatedAppliedThrough = s.current.replicatedApplied
 	s.stats.HaveReplicatedApplied = s.current.haveReplicatedApplied
+	s.stats.MaxAppliedMVCC = s.current.maxAppliedMVCC
+	s.stats.HaveMaxAppliedMVCC = s.current.haveMaxAppliedMVCC
 }
 
 // Close closes the active Manifest writer and is idempotent.

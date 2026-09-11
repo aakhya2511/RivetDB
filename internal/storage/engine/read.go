@@ -52,6 +52,16 @@ func (e *Engine) captureReadView() (readView, error) {
 // Get returns the newest value visible at the operation's captured storage
 // sequence. A newest tombstone maps to ErrNotFound.
 func (e *Engine) Get(ctx context.Context, key []byte) ([]byte, error) {
+	return e.getAt(ctx, key, nil)
+}
+
+// GetAt returns the newest value at or below target. A selected tombstone maps
+// to ErrNotFound. Callers that promise replica freshness enforce watermarks.
+func (e *Engine) GetAt(ctx context.Context, key []byte, target uint64) ([]byte, error) {
+	return e.getAt(ctx, key, &target)
+}
+
+func (e *Engine) getAt(ctx context.Context, key []byte, requested *uint64) ([]byte, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
@@ -73,9 +83,13 @@ func (e *Engine) Get(ctx context.Context, key []byte) ([]byte, error) {
 		e.getMisses.Add(1)
 		return nil, ErrNotFound
 	}
+	target := view.memtables.LatestSequence
+	if requested != nil && *requested < target {
+		target = *requested
+	}
 	var best *candidate
 	consider := func(value candidate) error {
-		if value.entry.Key.Sequence() > view.memtables.LatestSequence {
+		if value.entry.Key.Sequence() > target {
 			return nil
 		}
 		if best == nil || value.entry.Key.Sequence() > best.entry.Key.Sequence() {
@@ -94,13 +108,13 @@ func (e *Engine) Get(ctx context.Context, key []byte) ([]byte, error) {
 		}
 		return nil
 	}
-	if entry, ok := view.memtables.Active.Table.GetCandidate(key, view.memtables.LatestSequence); ok {
+	if entry, ok := view.memtables.Active.Table.GetCandidate(key, target); ok {
 		if err := consider(candidate{entry: sstable.Entry{Key: entry.Key, Value: entry.Value}, fileNumber: view.memtables.Active.FileNumber}); err != nil {
 			return nil, err
 		}
 	}
 	for _, generation := range view.memtables.Immutables {
-		if entry, ok := generation.Table.GetCandidate(key, view.memtables.LatestSequence); ok {
+		if entry, ok := generation.Table.GetCandidate(key, target); ok {
 			if err := consider(candidate{entry: sstable.Entry{Key: entry.Key, Value: entry.Value}, fileNumber: generation.FileNumber}); err != nil {
 				return nil, err
 			}
@@ -112,7 +126,7 @@ func (e *Engine) Get(ctx context.Context, key []byte) ([]byte, error) {
 		} else {
 			e.getHigherTableReads.Add(1)
 		}
-		value, found, readErr := e.tableCandidate(table, key, view.memtables.LatestSequence)
+		value, found, readErr := e.tableCandidate(table, key, target)
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -176,6 +190,15 @@ func (e *Engine) tableCandidate(table manifest.TableMetadata, key []byte, sequen
 // Scan materializes the latest logical values in user-key order over
 // [start,end). Nil bounds are unbounded; equal bounds are empty.
 func (e *Engine) Scan(ctx context.Context, start, end []byte) (result []KV, resultErr error) {
+	return e.scanAt(ctx, start, end, nil)
+}
+
+// ScanAt materializes one visible value per user key at or below target.
+func (e *Engine) ScanAt(ctx context.Context, start, end []byte, target uint64) ([]KV, error) {
+	return e.scanAt(ctx, start, end, &target)
+}
+
+func (e *Engine) scanAt(ctx context.Context, start, end []byte, requested *uint64) (result []KV, resultErr error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
@@ -201,6 +224,10 @@ func (e *Engine) Scan(ctx context.Context, start, end []byte) (result []KV, resu
 	e.observeRead(ReadStageScanViewCaptured, view.version.Generation())
 	if !view.memtables.HaveSequence {
 		return []KV{}, nil
+	}
+	target := view.memtables.LatestSequence
+	if requested != nil && *requested < target {
+		target = *requested
 	}
 	inputs, leases, err := e.scanInputs(view, start, end)
 	if err != nil {
@@ -246,7 +273,7 @@ func (e *Engine) Scan(ctx context.Context, start, end []byte) (result []KV, resu
 			currentUser = user
 			haveUser = true
 		}
-		if entry.Key.Sequence() > view.memtables.LatestSequence {
+		if entry.Key.Sequence() > target {
 			continue
 		}
 		value := candidate{entry: entry, fileNumber: file}

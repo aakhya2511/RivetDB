@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rivetdb/rivetdb/internal/raft"
+	"github.com/rivetdb/rivetdb/internal/testutil"
 )
 
 func BenchmarkCatalogLookup(b *testing.B) {
@@ -44,7 +45,7 @@ func BenchmarkTransportDemux(b *testing.B) {
 
 func BenchmarkSchedulerTick100Groups(b *testing.B) {
 	catalog := benchmarkCatalog(b, 100).Snapshot()
-	node, err := OpenNode(NodeOptions{NodeID: 1, Directory: b.TempDir(), Bootstrap: &catalog, MaxHostedRanges: 100})
+	node, err := OpenNode(NodeOptions{NodeID: 1, Directory: testutil.BenchmarkDir(b), Bootstrap: &catalog, MaxHostedRanges: 100})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -68,7 +69,7 @@ func BenchmarkSchedulerTick100Groups(b *testing.B) {
 }
 
 func BenchmarkRoutedMutation(b *testing.B) {
-	cluster := newMultiTestCluster(b)
+	cluster := newMultiTestClusterAt(b, threeRangeBootstrap(), testutil.BenchmarkDir(b))
 	cluster.elect(10, 1)
 	b.ReportAllocs()
 	b.ResetTimer()

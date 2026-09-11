@@ -9,7 +9,9 @@ import (
 	"runtime"
 	"sort"
 	"testing"
+	"time"
 
+	"github.com/rivetdb/rivetdb/internal/clock"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/replicatedrange"
 	"github.com/rivetdb/rivetdb/internal/storage/compaction"
@@ -23,15 +25,33 @@ type multiTestCluster struct {
 	transport *Transport
 	scheduler *Scheduler
 	router    *Router
+	mvcc      bool
+	clocks    map[raft.NodeID]clock.Clock
 }
 
 func newMultiTestCluster(t testing.TB) *multiTestCluster {
-	return newMultiTestClusterWithBootstrap(t, threeRangeBootstrap())
+	return newMultiTestClusterAt(t, threeRangeBootstrap(), t.TempDir())
 }
 
 func newMultiTestClusterWithBootstrap(t testing.TB, bootstrap Bootstrap) *multiTestCluster {
+	return newMultiTestClusterAt(t, bootstrap, t.TempDir())
+}
+
+func newMultiTestClusterAt(t testing.TB, bootstrap Bootstrap, root string) *multiTestCluster {
 	t.Helper()
-	cluster := &multiTestCluster{t: t, root: t.TempDir(), bootstrap: bootstrap, nodes: make(map[raft.NodeID]*Node)}
+	cluster := &multiTestCluster{t: t, root: root, bootstrap: bootstrap, nodes: make(map[raft.NodeID]*Node)}
+	cluster.openRuntime(true)
+	t.Cleanup(func() { cluster.close() })
+	return cluster
+}
+
+func newMVCCMultiTestCluster(t testing.TB) *multiTestCluster {
+	t.Helper()
+	bootstrap := threeRangeBootstrap()
+	cluster := &multiTestCluster{t: t, root: t.TempDir(), bootstrap: bootstrap, nodes: make(map[raft.NodeID]*Node), mvcc: true, clocks: make(map[raft.NodeID]clock.Clock)}
+	for _, nodeID := range bootstrap.Nodes {
+		cluster.clocks[nodeID] = clock.NewMockAt(time.UnixMilli(10_000 + int64(nodeID)*1_000))
+	}
 	cluster.openRuntime(true)
 	t.Cleanup(func() { cluster.close() })
 	return cluster
@@ -53,7 +73,8 @@ func (c *multiTestCluster) openRuntime(withBootstrap bool) {
 		if withBootstrap {
 			bootstrap = &c.bootstrap
 		}
-		node, openErr := OpenNode(NodeOptions{NodeID: nodeID, Directory: c.nodeRoot(nodeID), Bootstrap: bootstrap, MemTableBytes: 256 + uint64(nodeID)*128})
+		node, openErr := OpenNode(NodeOptions{NodeID: nodeID, Directory: c.nodeRoot(nodeID), Bootstrap: bootstrap, MemTableBytes: 256 + uint64(nodeID)*128,
+			MVCC: c.mvcc, Clock: c.clocks[nodeID]})
 		if openErr != nil {
 			c.t.Fatalf("open node %d: %v", nodeID, openErr)
 		}

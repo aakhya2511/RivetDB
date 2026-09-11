@@ -167,3 +167,12 @@ descriptor generation and a deterministic `ContainsKey` predicate. Admission
 rejects an out-of-range command before Raft proposal; committed apply checks the
 same predicate and makes the replica fatal on violation. Descriptor agreement
 is established by the authoritative catalog before groups communicate.
+## Phase 5 MVCC composition
+
+Fresh MVCC ranges use the persisted replicated-MVCC Engine mode. Canonical v2
+PUT/DELETE commands carry one nonzero HLC timestamp. `ApplyCommitted` continues
+to use Raft index for replay/application coverage while inserting the mutation
+under that timestamp. Range-local `GetAt`, `ScanAt`, `DigestAt`, `NewSnapshot`
+and `SnapshotAt` enforce ownership and the locally applied timestamp watermark.
+Snapshots are read-only, process-local handles and pin timestamps rather than
+physical VersionSets. See [mvcc.md](mvcc.md).

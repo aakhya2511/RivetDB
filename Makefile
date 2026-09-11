@@ -16,6 +16,7 @@ LOCAL_PKGS ?= ./internal/clock ./internal/invariant ./internal/rlog ./internal/s
 RAFT_PKGS ?= ./internal/raft
 RANGE_PKGS ?= ./internal/replicatedrange ./internal/storage/engine ./internal/storage/manifest ./internal/storage/pipeline
 MULTIRAFT_PKGS ?= ./internal/multiraft
+MVCC_PKGS ?= ./internal/mvcc ./internal/replicatedrange ./internal/multiraft ./internal/storage/engine ./internal/storage/manifest ./internal/storage/pipeline ./internal/storage/compaction
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -191,6 +192,36 @@ certify-multiraft: ## Run the Phase 4 gate and all frozen lower-phase certificat
 	$(MAKE) multiraft-chaos
 	$(MAKE) multiraft-crash
 	$(MAKE) certify-range
+
+.PHONY: mvcc-test
+mvcc-test: ## Run Phase 5 timestamp, historical-read, snapshot, and recovery tests
+	$(GO) test -count=1 -timeout 30m $(TEST_FLAGS) $(MVCC_PKGS)
+
+.PHONY: mvcc-race
+mvcc-race: ## Run Phase 5 twice under the race detector
+	$(GO) test -race -count=$(RACE_COUNT) -timeout 45m $(TEST_FLAGS) $(MVCC_PKGS)
+
+.PHONY: mvcc-stress
+mvcc-stress: ## Run the 100k-event Multi-Raft MVCC reference campaign
+	RIVETDB_MVCC_STRESS=1 $(GO) test -count=1 -timeout 60m -run 'RandomizedMultiRaftMVCCHeavy' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: mvcc-chaos
+mvcc-chaos: ## Run fixed/fresh historical and Multi-Raft MVCC fault campaigns
+	$(GO) test -count=1 -timeout 45m -run 'RandomizedHistoricalReadsAgainstReference|RandomizedMultiRaftMVCC$$|MVCCReplicatedHistorySnapshotLeaderChangeAndRestart|MVCCNewLeaderObservesUncommitted' $(TEST_FLAGS) ./internal/storage/engine ./internal/replicatedrange ./internal/multiraft
+
+.PHONY: mvcc-crash
+mvcc-crash: ## Run abrupt timestamped-mutation crash and historical recovery
+	$(GO) test -count=1 -timeout 15m -run 'MVCCSubprocessCrashHistoricalRecovery' $(TEST_FLAGS) ./internal/replicatedrange
+
+.PHONY: certify-mvcc
+certify-mvcc: ## Run the Phase 5 gate and every frozen lower-phase certification
+	$(MAKE) check
+	$(MAKE) mvcc-test
+	$(MAKE) mvcc-race
+	$(MAKE) mvcc-stress
+	$(MAKE) mvcc-chaos
+	$(MAKE) mvcc-crash
+	$(MAKE) certify-multiraft
 
 .PHONY: diff-check
 diff-check: ## Fail on whitespace errors in the working diff

@@ -73,6 +73,21 @@ func (d RangeDescriptor) Contains(key []byte) bool {
 		(d.EndKey.Unbounded || bytes.Compare(key, d.EndKey.Key) < 0)
 }
 
+func (d RangeDescriptor) ContainsSpan(start, end []byte) bool {
+	if start != nil && !d.Contains(start) {
+		return false
+	}
+	if end != nil {
+		if !d.EndKey.Unbounded && bytes.Compare(end, d.EndKey.Key) > 0 {
+			return false
+		}
+		if !d.StartKey.Unbounded && bytes.Compare(end, d.StartKey.Key) <= 0 {
+			return false
+		}
+	}
+	return start == nil || end == nil || bytes.Compare(start, end) <= 0
+}
+
 func (d RangeDescriptor) ReplicaOn(nodeID raft.NodeID) (ReplicaDescriptor, bool) {
 	for _, replica := range d.Replicas {
 		if replica.NodeID == nodeID {

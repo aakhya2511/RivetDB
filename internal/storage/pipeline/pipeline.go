@@ -41,6 +41,8 @@ type Options struct {
 	WriteHook           WriteHook
 	Replicated          bool
 	DurableApplied      uint64
+	ReplicatedMVCC      bool
+	DurableMVCC         uint64
 	ReplicatedApplyHook ReplicatedApplyHook
 	ReplicatedFlushHook ReplicatedFlushHook
 }
@@ -156,6 +158,7 @@ type Pipeline struct {
 	closeErr            error
 	writeHook           WriteHook
 	replicated          bool
+	replicatedMVCC      bool
 	replicatedApplied   uint64
 	durableApplied      uint64
 	coveredApplied      uint64
@@ -225,7 +228,7 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 		nextGeneration: firstGeneration + 1, nextFile: firstFile,
 		clock: options.Clock, logger: rlog.Component(options.Logger, "storage.pipeline"), accepting: true,
 		allocator: options.FileAllocator, installer: options.TableInstaller, writeHook: options.WriteHook,
-		replicated: options.Replicated, replicatedApplied: options.DurableApplied,
+		replicated: options.Replicated, replicatedMVCC: options.ReplicatedMVCC, replicatedApplied: options.DurableApplied,
 		durableApplied: options.DurableApplied, coveredApplied: options.DurableApplied,
 		replicatedApplyHook: options.ReplicatedApplyHook,
 		replicatedFlushHook: options.ReplicatedFlushHook,
@@ -245,6 +248,9 @@ func newPipeline(options Options, logWriter durableWAL, executor flushExecutor) 
 	}
 	if options.Replicated && options.DurableApplied != 0 {
 		p.visibleSequence, p.haveVisible = options.DurableApplied, true
+	}
+	if options.ReplicatedMVCC && options.DurableMVCC != 0 {
+		p.visibleSequence, p.haveVisible = options.DurableMVCC, true
 	}
 	if recovered.Len() != 0 {
 		iterator := recovered.Iterator()
@@ -391,10 +397,16 @@ func (p *Pipeline) Write(ctx context.Context, mutations []storage.Mutation) (Wri
 // ApplyReplicated applies exactly one committed mutation using its Raft index
 // as the internal storage sequence. It performs no local WAL append or sync.
 func (p *Pipeline) ApplyReplicated(ctx context.Context, index uint64, mutation storage.Mutation) (WriteResult, error) {
+	return p.ApplyReplicatedVersion(ctx, index, index, mutation)
+}
+
+// ApplyReplicatedVersion applies one committed mutation with independent Raft
+// apply index and internal MVCC version.
+func (p *Pipeline) ApplyReplicatedVersion(ctx context.Context, index, version uint64, mutation storage.Mutation) (WriteResult, error) {
 	if !p.replicated {
 		return WriteResult{}, ErrWrongMode
 	}
-	if ctx == nil || index == 0 {
+	if ctx == nil || index == 0 || version == 0 || !p.replicatedMVCC && version != index {
 		return WriteResult{}, ErrInvalidOptions
 	}
 	if err := validateMutations([]storage.Mutation{mutation}); err != nil {
@@ -426,6 +438,10 @@ func (p *Pipeline) ApplyReplicated(ctx context.Context, index uint64, mutation s
 		p.mu.Unlock()
 		return WriteResult{}, ErrApplyRegression
 	}
+	if p.replicatedMVCC && p.haveVisible && version <= p.visibleSequence {
+		p.mu.Unlock()
+		return WriteResult{}, ErrApplyRegression
+	}
 	p.mu.Unlock()
 	if err := p.ensureActiveFile(ctx); err != nil {
 		return WriteResult{}, err
@@ -433,24 +449,24 @@ func (p *Pipeline) ApplyReplicated(ctx context.Context, index uint64, mutation s
 	p.mu.Lock()
 	generationID, table := p.active.id, p.active.table
 	p.mu.Unlock()
-	result := WriteResult{FirstSequence: index, LastSequence: index, Generation: generationID}
+	result := WriteResult{FirstSequence: version, LastSequence: version, Generation: generationID}
 	p.observeReplicated(WriteStageApplyStarted, result)
-	applyErr := table.ApplyBatch(storage.WriteBatch{FirstSequence: index, Mutations: []storage.Mutation{mutation}})
+	applyErr := table.ApplyBatch(storage.WriteBatch{FirstSequence: version, Mutations: []storage.Mutation{mutation}})
 	invariant.Assert(applyErr == nil, "REPLICA-13", "apply prevalidated committed mutation: %v", applyErr)
 	p.observeReplicated(WriteStageApplyCompleted, result)
 	p.mu.Lock()
 	invariant.Assert(p.active.id == generationID && p.active.table == table, "REPLICA-4", "generation changed during replicated apply")
 	if !p.active.haveSeq {
-		p.active.smallestSeq = index
+		p.active.smallestSeq = version
 	}
-	p.active.haveSeq, p.active.largestSeq = true, index
+	p.active.haveSeq, p.active.largestSeq = true, version
 	if !p.active.haveApplied {
 		p.active.haveApplied = true
 		p.active.firstApplied = p.coveredApplied + 1
 	}
 	p.active.lastApplied = index
 	p.coveredApplied, p.replicatedApplied = index, index
-	p.visibleSequence, p.haveVisible = index, true
+	p.visibleSequence, p.haveVisible = version, true
 	rotate := p.active.table.ReachedSize(p.threshold)
 	if rotate {
 		p.rotateLocked()
@@ -482,7 +498,9 @@ func (p *Pipeline) AdvanceReplicatedApplied(index uint64) error {
 		return nil
 	}
 	p.replicatedApplied = index
-	p.visibleSequence, p.haveVisible = index, true
+	if !p.replicatedMVCC {
+		p.visibleSequence, p.haveVisible = index, true
+	}
 	if p.active.haveApplied {
 		p.active.lastApplied = index
 		p.coveredApplied = index

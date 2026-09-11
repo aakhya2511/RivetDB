@@ -83,3 +83,11 @@ a dedicated meta-range, a distributed catalog, or an external placement
 driver. It also does not integrate LSM Raft snapshots, online splitting,
 migration, rebalancing, dynamic membership, MVCC, cross-range atomicity,
 ReadIndex, or leader leases.
+## 6. Phase 5 MVCC extension
+
+Node construction may enable fresh MVCC ranges and inject a physical clock per
+node. Every hosted replica still owns independent mutable HLC state. Routed
+MVCC PUT/DELETE asks the owning leader to assign the timestamp and returns only
+after the unchanged quorum-commit plus leader-local-apply boundary. Static
+catalogs, generations, transport envelopes, scheduling and failure domains are
+unchanged.

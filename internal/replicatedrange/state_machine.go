@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/storage"
 	"github.com/rivetdb/rivetdb/internal/storage/engine"
@@ -16,6 +17,9 @@ type stateMachine struct {
 	engine      *engine.Engine
 	hook        Hook
 	containsKey func([]byte) bool
+	mvcc        bool
+	maxApplied  mvcc.Timestamp
+	clock       *mvcc.Clock
 }
 
 func (m *stateMachine) Apply(entry raft.Entry) error {
@@ -29,6 +33,20 @@ func (m *stateMachine) Apply(entry raft.Entry) error {
 	if m.containsKey != nil && !m.containsKey(command.Key) {
 		return ErrKeyOutOfRange
 	}
+	if m.mvcc != (command.Timestamp != 0) {
+		return ErrInvalidCommand
+	}
+	alreadyDurable := false
+	if m.mvcc {
+		frontier, frontierErr := m.engine.DurableAppliedRaftIndex()
+		if frontierErr != nil {
+			return fmt.Errorf("read durable apply frontier: %w", frontierErr)
+		}
+		alreadyDurable = entry.Index <= frontier
+		if !alreadyDurable && command.Timestamp <= m.maxApplied {
+			return ErrMVCCRegression
+		}
+	}
 	mutation := storage.Mutation{Key: command.Key, Value: command.Value}
 	switch command.Type {
 	case CommandPut:
@@ -38,8 +56,18 @@ func (m *stateMachine) Apply(entry raft.Entry) error {
 	default:
 		return ErrInvalidCommand
 	}
-	if err := m.engine.ApplyCommitted(context.Background(), entry.Index, entry.Term, entry.Command, mutation); err != nil && !errors.Is(err, engine.ErrAlreadyApplied) {
-		return fmt.Errorf("apply committed command to LSM: %w", err)
+	var applyErr error
+	if m.mvcc {
+		applyErr = m.engine.ApplyCommittedMVCC(context.Background(), entry.Index, entry.Term, uint64(command.Timestamp), entry.Command, mutation)
+	} else {
+		applyErr = m.engine.ApplyCommitted(context.Background(), entry.Index, entry.Term, entry.Command, mutation)
+	}
+	if applyErr != nil && !errors.Is(applyErr, engine.ErrAlreadyApplied) {
+		return fmt.Errorf("apply committed command to LSM: %w", applyErr)
+	}
+	if m.mvcc && !alreadyDurable {
+		m.maxApplied = command.Timestamp
+		m.clock.Observe(command.Timestamp)
 	}
 	return nil
 }

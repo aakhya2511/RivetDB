@@ -91,3 +91,10 @@ Replica migration likewise retains RangeID while assigning a new ReplicaID to
 a NodeID and physical directory. Phase 8 must design snapshot/state transfer,
 catch-up, placement authority, joint membership transition, cutover, and
 cleanup.
+## 5. Phase 5 routed MVCC mutations
+
+`PutMVCC` and `DeleteMVCC` retain the Phase 4 lookup, generation validation,
+range-scoped leader hint and bounded pre-admission retry. The router never
+chooses a timestamp: the selected range leader does so after leadership is
+established. Historical reads remain range-local inspection; no ReadIndex,
+leader lease, cluster snapshot or linearizable distributed read is introduced.

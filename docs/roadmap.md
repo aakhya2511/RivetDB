@@ -19,7 +19,7 @@ find than to prevent.
 | 2 | Single Raft group | ✅ complete |
 | 3 | Durable replicated range (Raft + storage) | ✅ complete |
 | 4 | Multi-Raft and static range routing | ✅ complete |
-| 5 | MVCC | ⬜ |
+| 5 | Replicated MVCC and range-local snapshots | ✅ complete |
 | 6 | Distributed transactions | ⬜ |
 | 7 | Online range splitting | ⬜ |
 | 8 | Online replica migration | ⬜ |
@@ -30,7 +30,8 @@ find than to prevent.
 
 **What exists right now:** Phase 0, the certified Phase 1 local latest-state
 engine, the mechanically qualified Phase 2 single-group Raft core, Phase 3's
-durable replicated range, and Phase 4's static Multi-Raft node/catalog/router.
+durable replicated range, Phase 4's static Multi-Raft node/catalog/router, and
+Phase 5's replicated MVCC history and range-local read-only snapshots.
 There is no network database server, distributed read protocol or client.
 Anything later in [architecture.md](architecture.md) is a design, clearly
 marked as such.
@@ -220,19 +221,21 @@ online split, migration, dynamic membership, distributed reads and RPC.
 
 ---
 
-## Phase 5 — MVCC ⬜
+## Phase 5 — Replicated MVCC and range-local snapshots ✅
 
-**Build:** timestamped version encoding in the storage engine · write intents ·
-transaction records · snapshot reads · write/write conflict detection · version
-garbage collection.
+**Delivered:** canonical replicated HLC timestamps · a distinct persistent MVCC
+storage mode · timestamped PUT/DELETE commands · historical `GetAt`/`ScanAt` ·
+range-local read-only snapshots · applied/durable timestamp watermarks ·
+leader-change, clock-skew, crash, compaction and reclamation preservation.
 
-**Gate:** concurrent transaction tests for MVCC-1 through MVCC-7 · a documented
-anomaly table stating exactly which anomalies are prevented and which are
-permitted, each entry backed by a test that demonstrates the behaviour · GC
-never removes a version a live reader could see · restart preserves visibility.
+**Gate:** `MVCC-1` through `MVCC-14` · fixed/fresh 10k-event reference campaigns
+and opt-in 100k-event Multi-Raft campaign · exact tombstone/version visibility ·
+lagging-replica refusal · snapshots stable across newer writes, flush,
+compaction, reclamation and restart · every lower phase remains certified.
+See [mvcc.md](mvcc.md) and [evidence/phase-5.md](evidence/phase-5.md).
 
-**Also decides:** timestamp allocation and isolation level, each recorded in
-the next available ADR at that phase.
+**Deferred deliberately:** intents, write transactions, conflict detection,
+2PC, isolation claims, distributed snapshots, MVCC GC and linearizable reads.
 
 ---
 

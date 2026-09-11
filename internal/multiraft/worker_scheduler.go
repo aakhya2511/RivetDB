@@ -142,9 +142,12 @@ func (s *WorkerScheduler) worker() {
 				}
 			}
 		}
+		s.finish(group, err)
+		// Publish completion only after accounting and the per-group active
+		// state are updated. A receiver that observes done may then safely
+		// inspect Pending/Stats without racing this worker's bookkeeping.
 		item.done <- err
 		close(item.done)
-		s.finish(group, err)
 	}
 }
 

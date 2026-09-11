@@ -2,7 +2,8 @@
 
 **Status:** design baseline for the implementation. Phase 0, Phase 1A through
 1K, the Phase 2 single-group Raft core, the Phase 3 static durable replicated
-range, and the Phase 4 static Multi-Raft/routing composition are implemented. See
+range, the Phase 4 static Multi-Raft/routing composition, and Phase 5
+replicated MVCC/range-local snapshots are implemented. See
 [roadmap.md](roadmap.md) for what exists today
 and [invariants.md](invariants.md) for the properties each subsystem must
 uphold.
@@ -389,7 +390,7 @@ The initial target is **snapshot isolation**. That means write skew is
 mechanical test demonstrating it — the plan is a history-generating harness
 plus a checker, and the claim follows the evidence rather than the intention.
 The precise anomaly table — which anomalies are prevented, which are permitted,
-each backed by a test — is written as `docs/transactions.md` when Phase 5
+each backed by a test — is written as `docs/transactions.md` when Phase 6
 begins.
 
 ### 7.3 Cross-range transactions
@@ -595,7 +596,7 @@ internal/multiraft/   static catalog, node registry, shared transport/scheduler 
 docs/                 this document, invariants, roadmap, ADRs
 ```
 
-Planned, in roadmap order: `internal/mvcc`, `internal/txn`, `internal/migration`,
+Planned, in roadmap order: `internal/txn`, `internal/migration`,
 `internal/rebalance`, `internal/telemetry`, `internal/server`, plus `cmd/`,
 `api/proto`, `tests/` and `benchmarks/`.
 
@@ -605,10 +606,9 @@ Planned, in roadmap order: `internal/mvcc`, `internal/txn`, `internal/migration`
 
 Recorded here rather than silently deferred:
 
-1. **Timestamp allocation.** A single timestamp oracle is simple but is a
-   cluster-wide bottleneck and a failure domain; per-node hybrid logical clocks
-   remove it but bound the achievable isolation guarantees. Undecided; will
-   become an ADR at Phase 5.
+1. **Timestamp allocation (resolved for MVCC).** ADR-0017 chooses range-scoped
+   48/16 HLC state over a cluster oracle. Phase 6 must still define how a
+   transaction-level read and commit timestamp is selected across participants.
 2. **Read path.** Routing every read through Raft is obviously correct but
    costs a round trip. ReadIndex avoids the log write; leader leases avoid the
    round trip entirely but make safety depend on clock bounds, which §11 says
@@ -621,3 +621,11 @@ Recorded here rather than silently deferred:
 4. **Split key selection.** Sampling gives a size-balanced split; a
    load-balanced split needs per-key access statistics, which cost memory
    proportional to the working set. Undecided.
+### Phase 5 replicated MVCC layer
+
+Each range now optionally composes a range-scoped HLC, timestamped command
+codec, historical Engine reads, applied MVCC watermark and read-only snapshot
+registry. The shared physical clock provider is not mutable timestamp
+authority. Raft index, durable applied Raft frontier, volatile MVCC watermark
+and durable MVCC watermark are distinct. Timestamps are comparable across
+ranges, but there is no multi-range atomic snapshot or transaction protocol.

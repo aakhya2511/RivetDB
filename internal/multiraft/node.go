@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/rivetdb/rivetdb/internal/clock"
+	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/replicatedrange"
 	"github.com/rivetdb/rivetdb/internal/storage/engine"
@@ -30,6 +32,8 @@ type NodeOptions struct {
 	CatalogHook        CatalogPublishHook
 	RangeHook          func(RangeID) replicatedrange.Hook
 	BootstrapRangeHook func(RangeID) error
+	MVCC               bool
+	Clock              clock.Clock
 }
 
 type RangeFailure struct {
@@ -137,7 +141,8 @@ func (n *Node) openReplica(descriptor RangeDescriptor) (*replicatedrange.Replica
 		ElectionTimeoutMin: 5 + uint64(n.id%3) + uint64(descriptor.RangeID%3),
 		ElectionTimeoutMax: 5 + uint64(n.id%3) + uint64(descriptor.RangeID%3), HeartbeatInterval: 1,
 		Random: rand.New(rand.NewPCG(uint64(n.id), uint64(descriptor.RangeID))), MaxProposalWaiters: n.options.MaxProposalWaiters, //nolint:gosec // deterministic election source, not security randomness
-		ContainsKey: descriptor.Contains, Hook: hook,
+		ContainsKey: descriptor.Contains, ContainsSpan: descriptor.ContainsSpan, Hook: hook,
+		MVCC: n.options.MVCC, Clock: n.options.Clock,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open replicated range %d: %w", descriptor.RangeID, err)
@@ -250,6 +255,35 @@ func (n *Node) Propose(ctx context.Context, route Route, encoded []byte) (*Pendi
 		return nil, nil, err
 	}
 	return &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
+}
+
+func (n *Node) ProposeMVCC(ctx context.Context, route Route, command replicatedrange.Command) (mvcc.Timestamp, *Pending, []Envelope, error) {
+	descriptor, err := n.catalog.LookupByID(route.RangeID)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if route.Generation != descriptor.Generation {
+		return 0, nil, nil, &StaleRangeError{Current: descriptor}
+	}
+	if !descriptor.Contains(route.Key) || !bytes.Equal(command.Key, route.Key) {
+		return 0, nil, nil, ErrWrongRangeKey
+	}
+	replica, err := n.liveReplica(route.RangeID)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	timestamp, index, messages, waiter, err := replica.ProposeMVCC(ctx, command)
+	if err != nil {
+		if errors.Is(err, raft.ErrNotLeader) {
+			return 0, nil, nil, &NotLeaderError{RangeID: route.RangeID, Leader: replica.Status().Raft.LeaderID}
+		}
+		return 0, nil, nil, fmt.Errorf("propose MVCC to range %d: %w", route.RangeID, err)
+	}
+	envelopes, err := n.wrapMessages(route.RangeID, messages)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return timestamp, &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
 }
 
 func (p *Pending) poll() (bool, error) {

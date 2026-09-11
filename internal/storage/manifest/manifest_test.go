@@ -271,6 +271,41 @@ func TestCreateInstallRecoverRewriteAndDiscovery(t *testing.T) {
 	}
 }
 
+func TestMVCCWatermarkCodecAndSnapshotRoundTrip(t *testing.T) {
+	comparator, next := ComparatorName, uint64(1)
+	mode, frontier, watermark := ModeReplicatedMVCC, uint64(17), uint64(9_001)
+	edit := VersionEdit{
+		Comparator: &comparator, NextFileNumber: &next, StorageMode: &mode,
+		ReplicatedAppliedThrough: &frontier, MaxAppliedMVCC: &watermark,
+	}
+	encoded, err := EncodeVersionEdit(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeVersionEdit(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := initialVersion().apply(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := version.MaxAppliedMVCC(); !ok || got != watermark {
+		t.Fatalf("watermark=%d/%v want=%d", got, ok, watermark)
+	}
+	snapshot, err := version.snapshotEdit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := initialVersion().apply(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateEquivalent(version, rewritten); err != nil {
+		t.Fatalf("snapshot round trip: %v", err)
+	}
+}
+
 func TestOrphansTempsMissingCorruptAndNumberRecovery(t *testing.T) {
 	directory := t.TempDir()
 	store, err := Create(Options{Directory: directory})

@@ -8,13 +8,16 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/storage/sstable"
 )
 
 const (
-	commandHeaderSize = 16
-	commandVersion    = uint8(1)
+	commandHeaderSize     = 16
+	mvccCommandHeaderSize = 24
+	commandVersion        = uint8(1)
+	mvccCommandVersion    = uint8(2)
 )
 
 var commandMagic = [4]byte{'R', 'V', 'C', 'M'}
@@ -27,9 +30,10 @@ const (
 )
 
 type Command struct {
-	Type  CommandType
-	Key   []byte
-	Value []byte
+	Type      CommandType
+	Key       []byte
+	Value     []byte
+	Timestamp mvcc.Timestamp
 }
 
 var (
@@ -42,13 +46,23 @@ func EncodeCommand(command Command) ([]byte, error) {
 	if err := validateCommand(command); err != nil {
 		return nil, err
 	}
-	result := make([]byte, commandHeaderSize+len(command.Key)+len(command.Value))
+	headerSize := commandHeaderSize
+	version := commandVersion
+	if command.Timestamp != 0 {
+		headerSize, version = mvccCommandHeaderSize, mvccCommandVersion
+	}
+	result := make([]byte, headerSize+len(command.Key)+len(command.Value))
 	copy(result[:4], commandMagic[:])
-	result[4], result[5] = commandVersion, byte(command.Type)
-	binary.LittleEndian.PutUint32(result[8:12], uint32(len(command.Key)))    //nolint:gosec // storage bound fits u32
-	binary.LittleEndian.PutUint32(result[12:16], uint32(len(command.Value))) //nolint:gosec // storage bound fits u32
-	copy(result[commandHeaderSize:], command.Key)
-	copy(result[commandHeaderSize+len(command.Key):], command.Value)
+	result[4], result[5] = version, byte(command.Type)
+	lengthOffset := 8
+	if version == mvccCommandVersion {
+		binary.BigEndian.PutUint64(result[8:16], uint64(command.Timestamp))
+		lengthOffset = 16
+	}
+	binary.LittleEndian.PutUint32(result[lengthOffset:lengthOffset+4], uint32(len(command.Key)))     //nolint:gosec // storage bound fits u32
+	binary.LittleEndian.PutUint32(result[lengthOffset+4:lengthOffset+8], uint32(len(command.Value))) //nolint:gosec // storage bound fits u32
+	copy(result[headerSize:], command.Key)
+	copy(result[headerSize+len(command.Key):], command.Value)
 	return result, nil
 }
 
@@ -56,25 +70,38 @@ func DecodeCommand(encoded []byte) (Command, error) {
 	if len(encoded) < commandHeaderSize || !bytes.Equal(encoded[:4], commandMagic[:]) {
 		return Command{}, ErrInvalidCommand
 	}
-	if encoded[4] != commandVersion {
+	version := encoded[4]
+	if version != commandVersion && version != mvccCommandVersion {
 		return Command{}, ErrUnsupportedCommand
 	}
 	if encoded[6] != 0 || encoded[7] != 0 {
 		return Command{}, ErrInvalidCommand
 	}
-	keyLength := uint64(binary.LittleEndian.Uint32(encoded[8:12]))
-	valueLength := uint64(binary.LittleEndian.Uint32(encoded[12:16]))
+	headerSize, lengthOffset := commandHeaderSize, 8
+	var timestamp mvcc.Timestamp
+	if version == mvccCommandVersion {
+		if len(encoded) < mvccCommandHeaderSize {
+			return Command{}, ErrInvalidCommand
+		}
+		headerSize, lengthOffset = mvccCommandHeaderSize, 16
+		timestamp = mvcc.Timestamp(binary.BigEndian.Uint64(encoded[8:16]))
+		if timestamp == 0 {
+			return Command{}, ErrInvalidCommand
+		}
+	}
+	keyLength := uint64(binary.LittleEndian.Uint32(encoded[lengthOffset : lengthOffset+4]))
+	valueLength := uint64(binary.LittleEndian.Uint32(encoded[lengthOffset+4 : lengthOffset+8]))
 	if keyLength > sstable.MaxUserKeySize || valueLength > sstable.MaxValueSize {
 		return Command{}, ErrCommandTooLarge
 	}
-	if keyLength+valueLength > raft.MaxCommandBytes-commandHeaderSize {
+	if keyLength+valueLength > uint64(raft.MaxCommandBytes-headerSize) { //nolint:gosec // positive compile-time resource bound
 		return Command{}, ErrCommandTooLarge
 	}
-	if keyLength+valueLength != uint64(len(encoded)-commandHeaderSize) { //nolint:gosec // header length checked
+	if keyLength+valueLength != uint64(len(encoded)-headerSize) { //nolint:gosec // header length checked
 		return Command{}, ErrInvalidCommand
 	}
-	keyEnd := commandHeaderSize + int(keyLength) //nolint:gosec // bounded by exact encoded length
-	command := Command{Type: CommandType(encoded[5]), Key: bytes.Clone(encoded[commandHeaderSize:keyEnd]), Value: bytes.Clone(encoded[keyEnd:])}
+	keyEnd := headerSize + int(keyLength) //nolint:gosec // bounded by exact encoded length
+	command := Command{Type: CommandType(encoded[5]), Timestamp: timestamp, Key: bytes.Clone(encoded[headerSize:keyEnd]), Value: bytes.Clone(encoded[keyEnd:])}
 	if err := validateCommand(command); err != nil {
 		return Command{}, err
 	}
@@ -88,7 +115,11 @@ func validateCommand(command Command) error {
 	if len(command.Key) > sstable.MaxUserKeySize || len(command.Value) > sstable.MaxValueSize {
 		return ErrCommandTooLarge
 	}
-	if len(command.Key) > raft.MaxCommandBytes-commandHeaderSize || len(command.Value) > raft.MaxCommandBytes-commandHeaderSize-len(command.Key) {
+	headerSize := commandHeaderSize
+	if command.Timestamp != 0 {
+		headerSize = mvccCommandHeaderSize
+	}
+	if len(command.Key) > raft.MaxCommandBytes-headerSize || len(command.Value) > raft.MaxCommandBytes-headerSize-len(command.Key) {
 		return ErrCommandTooLarge
 	}
 	if command.Type == CommandDelete && len(command.Value) != 0 {

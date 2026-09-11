@@ -22,6 +22,8 @@ type Version struct {
 	modeExplicit          bool
 	replicatedApplied     uint64
 	haveReplicatedApplied bool
+	maxAppliedMVCC        uint64
+	haveMaxAppliedMVCC    bool
 }
 
 func initialVersion() *Version { return &Version{nextFileNumber: 1, mode: ModeStandalone} }
@@ -84,6 +86,8 @@ func (v *Version) ReplicatedAppliedThrough() (uint64, bool) {
 	return v.replicatedApplied, v.haveReplicatedApplied
 }
 
+func (v *Version) MaxAppliedMVCC() (uint64, bool) { return v.maxAppliedMVCC, v.haveMaxAppliedMVCC }
+
 // Contains reports whether the same file metadata is live at its stated level.
 func (v *Version) Contains(table TableMetadata) bool {
 	if v == nil || table.Level >= MaxLevels {
@@ -111,7 +115,7 @@ func (v *Version) apply(edit VersionEdit) (*Version, error) {
 		return nil, ErrComparatorMismatch
 	}
 	if edit.StorageMode != nil {
-		if (*edit.StorageMode != ModeStandalone && *edit.StorageMode != ModeReplicated) || next.modeExplicit || next.generation != 0 {
+		if (*edit.StorageMode != ModeStandalone && *edit.StorageMode != ModeReplicated && *edit.StorageMode != ModeReplicatedMVCC) || next.modeExplicit || next.generation != 0 {
 			return nil, ErrModeMismatch
 		}
 		next.mode, next.modeExplicit = *edit.StorageMode, true
@@ -176,12 +180,18 @@ func (v *Version) apply(edit VersionEdit) (*Version, error) {
 		next.frontier, next.haveFrontier = *edit.ReplayFrontier, true
 	}
 	if edit.ReplicatedAppliedThrough != nil {
-		if next.mode != ModeReplicated || next.haveReplicatedApplied && *edit.ReplicatedAppliedThrough < next.replicatedApplied {
+		if next.mode != ModeReplicated && next.mode != ModeReplicatedMVCC || next.haveReplicatedApplied && *edit.ReplicatedAppliedThrough < next.replicatedApplied {
 			return nil, ErrModeMismatch
 		}
 		next.replicatedApplied, next.haveReplicatedApplied = *edit.ReplicatedAppliedThrough, true
 	}
-	if next.mode == ModeStandalone && next.haveReplicatedApplied || next.mode == ModeReplicated && next.haveFrontier {
+	if edit.MaxAppliedMVCC != nil {
+		if next.mode != ModeReplicatedMVCC || *edit.MaxAppliedMVCC == 0 || next.haveMaxAppliedMVCC && *edit.MaxAppliedMVCC < next.maxAppliedMVCC {
+			return nil, ErrSequenceRegression
+		}
+		next.maxAppliedMVCC, next.haveMaxAppliedMVCC = *edit.MaxAppliedMVCC, true
+	}
+	if next.mode == ModeStandalone && next.haveReplicatedApplied || (next.mode == ModeReplicated || next.mode == ModeReplicatedMVCC) && next.haveFrontier || next.mode != ModeReplicatedMVCC && next.haveMaxAppliedMVCC {
 		return nil, ErrModeMismatch
 	}
 	if highest := next.highestFile(); highest >= next.nextFileNumber {
@@ -361,13 +371,17 @@ func (v *Version) snapshotEdit() (VersionEdit, error) {
 		frontier := v.frontier
 		edit.ReplayFrontier = &frontier
 	}
-	if v.mode == ModeReplicated {
+	if v.mode == ModeReplicated || v.mode == ModeReplicatedMVCC {
 		mode := v.mode
 		edit.StorageMode = &mode
 	}
 	if v.haveReplicatedApplied {
 		frontier := v.replicatedApplied
 		edit.ReplicatedAppliedThrough = &frontier
+	}
+	if v.haveMaxAppliedMVCC {
+		value := v.maxAppliedMVCC
+		edit.MaxAppliedMVCC = &value
 	}
 	for _, level := range v.levels {
 		edit.AddedFiles = append(edit.AddedFiles, cloneTables(level)...)
@@ -382,7 +396,8 @@ func validateEquivalent(left, right *Version) error {
 	if left.comparator != right.comparator || left.nextFileNumber != right.nextFileNumber ||
 		left.haveLastSequence != right.haveLastSequence || left.lastSequence != right.lastSequence ||
 		left.haveFrontier != right.haveFrontier || left.frontier != right.frontier ||
-		left.mode != right.mode || left.haveReplicatedApplied != right.haveReplicatedApplied || left.replicatedApplied != right.replicatedApplied {
+		left.mode != right.mode || left.haveReplicatedApplied != right.haveReplicatedApplied || left.replicatedApplied != right.replicatedApplied ||
+		left.haveMaxAppliedMVCC != right.haveMaxAppliedMVCC || left.maxAppliedMVCC != right.maxAppliedMVCC {
 		return ErrManifestCorrupt
 	}
 	for level := range left.levels {

@@ -196,3 +196,11 @@ drives Tick/Step through a shared bounded fair scheduler. Quorum, term, leader,
 log, snapshot and fatal state remain independent per group. Node and
 range-specific faults are composed outside the core and the existing Phase 2
 simulator continues checking RAFT invariants separately for every group.
+## Phase 5 MVCC command boundary
+
+Raft still treats commands as opaque bytes and orders them only by log index.
+The Phase 5 leader assigns an HLC timestamp before proposal; that timestamp is
+inside the command and followers apply it verbatim. No-op entries advance Raft
+application but not the MVCC watermark. On leadership, the range timestamp
+authority conservatively observes its complete durable local command history,
+including uncommitted timestamped entries, before assigning another value.

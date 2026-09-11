@@ -99,11 +99,16 @@ func (p *Pipeline) finishPhysicalFlush(item *generation, result flushResult, flu
 		invariant.Assert(false, "STORAGE-65", "%v", err)
 	}
 	p.validateIfEnabledLocked()
+	maximumMVCC := uint64(0)
+	if p.replicatedMVCC {
+		maximumMVCC = item.largestSeq
+	}
 	return TableInstallation{
 		Generation: item.id, SmallestSequence: item.smallestSeq,
 		LargestSequence: item.largestSeq, Metadata: result.metadata, Path: result.path,
 		HaveAppliedCoverage: item.haveApplied, FirstAppliedIndex: item.firstApplied,
 		LastAppliedIndex: item.lastApplied,
+		MaxMVCCTimestamp: maximumMVCC,
 	}, true
 }
 

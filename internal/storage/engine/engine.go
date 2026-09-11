@@ -48,8 +48,9 @@ type ReplicatedHook func(ReplicatedStage, uint64)
 type Mode = manifest.StorageMode
 
 const (
-	ModeStandalone = manifest.ModeStandalone
-	ModeReplicated = manifest.ModeReplicated
+	ModeStandalone     = manifest.ModeStandalone
+	ModeReplicated     = manifest.ModeReplicated
+	ModeReplicatedMVCC = manifest.ModeReplicatedMVCC
 )
 
 // Options configures one local storage engine.
@@ -128,7 +129,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	if options.Mode == 0 {
 		options.Mode = ModeStandalone
 	}
-	if options.Mode != ModeStandalone && options.Mode != ModeReplicated {
+	if options.Mode != ModeStandalone && options.Mode != ModeReplicated && options.Mode != ModeReplicatedMVCC {
 		return nil, ErrInvalidOptions
 	}
 	if options.MemTableBytes == 0 {
@@ -169,7 +170,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 		return nil, fmt.Errorf("inspect CURRENT: %w", currentErr)
 	}
 	wPath := filepath.Join(options.Directory, pipeline.WALFileName)
-	if options.Mode == ModeReplicated {
+	if options.Mode == ModeReplicated || options.Mode == ModeReplicatedMVCC {
 		if _, err := os.Lstat(wPath); err == nil {
 			return nil, ErrUnexpectedWAL
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -221,13 +222,17 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	}
 	nextSequence, exhausted := store.RecoveredNextSequence()
 	var durableApplied uint64
-	if options.Mode == ModeReplicated {
+	if options.Mode == ModeReplicated || options.Mode == ModeReplicatedMVCC {
 		var ok bool
 		durableApplied, ok = version.ReplicatedAppliedThrough()
 		if !ok {
 			return nil, errors.Join(ErrCorruption, manifest.ErrModeMismatch)
 		}
 		nextSequence, exhausted = 0, false
+	}
+	var durableMVCC uint64
+	if options.Mode == ModeReplicatedMVCC {
+		durableMVCC, _ = version.MaxAppliedMVCC()
 	}
 	firstGeneration := nextGeneration(version)
 	replicatedApplyHook := options.ReplicatedApplyHook
@@ -254,7 +259,8 @@ func Open(options Options) (_ *Engine, resultErr error) {
 		SSTableOptions: options.SSTableOptions, Clock: options.Clock, Logger: options.Logger,
 		FileAllocator: store, TableInstaller: store, RecoveredTable: recovered,
 		WriteHook:  options.WriteHook,
-		Replicated: options.Mode == ModeReplicated, DurableApplied: durableApplied,
+		Replicated: options.Mode == ModeReplicated || options.Mode == ModeReplicatedMVCC, DurableApplied: durableApplied,
+		ReplicatedMVCC: options.Mode == ModeReplicatedMVCC, DurableMVCC: durableMVCC,
 		ReplicatedApplyHook: replicatedApplyHook,
 		ReplicatedFlushHook: func(index uint64) {
 			if options.ReplicatedHook != nil {
@@ -359,7 +365,17 @@ func (e *Engine) writeBatch(ctx context.Context, mutations []storage.Mutation) e
 // ApplyCommitted materializes one committed Raft mutation without using the
 // standalone WAL or local sequence allocator. commandBytes identifies replay.
 func (e *Engine) ApplyCommitted(ctx context.Context, index, term uint64, commandBytes []byte, mutation storage.Mutation) error {
-	if ctx == nil || index == 0 || term == 0 || len(commandBytes) == 0 {
+	return e.applyCommitted(ctx, index, term, index, commandBytes, mutation, ModeReplicated)
+}
+
+// ApplyCommittedMVCC materializes one committed command using timestamp as
+// its internal-key version while index remains the replicated apply frontier.
+func (e *Engine) ApplyCommittedMVCC(ctx context.Context, index, term, timestamp uint64, commandBytes []byte, mutation storage.Mutation) error {
+	return e.applyCommitted(ctx, index, term, timestamp, commandBytes, mutation, ModeReplicatedMVCC)
+}
+
+func (e *Engine) applyCommitted(ctx context.Context, index, term, version uint64, commandBytes []byte, mutation storage.Mutation, required Mode) error {
+	if ctx == nil || index == 0 || term == 0 || version == 0 || len(commandBytes) == 0 {
 		return ErrInvalidOptions
 	}
 	e.applyMu.Lock()
@@ -369,7 +385,7 @@ func (e *Engine) ApplyCommitted(ctx context.Context, index, term uint64, command
 	if e.closed {
 		return ErrClosed
 	}
-	if e.mode != ModeReplicated {
+	if e.mode != required {
 		return ErrWrongMode
 	}
 	identity := applyIdentity{term: term, digest: sha256.Sum256(commandBytes)}
@@ -379,18 +395,18 @@ func (e *Engine) ApplyCommitted(ctx context.Context, index, term uint64, command
 		}
 		return ErrAlreadyApplied
 	}
-	version, err := e.manifest.Current()
+	storageVersion, err := e.manifest.Current()
 	if err != nil {
 		return fmt.Errorf("read replicated applied frontier: %w", err)
 	}
-	if durable, ok := version.ReplicatedAppliedThrough(); ok && index <= durable {
+	if durable, ok := storageVersion.ReplicatedAppliedThrough(); ok && index <= durable {
 		return ErrAlreadyApplied
 	}
 	stats := e.pipeline.Stats()
 	if index <= stats.ReplicatedApplied {
 		return ErrApplyOrder
 	}
-	if _, err := e.pipeline.ApplyReplicated(ctx, index, mutation); err != nil {
+	if _, err := e.pipeline.ApplyReplicatedVersion(ctx, index, version, mutation); err != nil {
 		return fmt.Errorf("materialize committed Raft mutation: %w", err)
 	}
 	e.appliedIdentities[index] = identity
@@ -411,13 +427,45 @@ func (e *Engine) AdvanceApplied(index uint64) error {
 	if e.closed {
 		return ErrClosed
 	}
-	if e.mode != ModeReplicated {
+	if e.mode != ModeReplicated && e.mode != ModeReplicatedMVCC {
 		return ErrWrongMode
 	}
 	if err := e.pipeline.AdvanceReplicatedApplied(index); err != nil {
 		return fmt.Errorf("advance replicated applied progress: %w", err)
 	}
 	return nil
+}
+
+// MaxAppliedMVCC returns the locally applied volatile MVCC watermark.
+func (e *Engine) MaxAppliedMVCC() (uint64, bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return 0, false, ErrClosed
+	}
+	if e.mode != ModeReplicatedMVCC {
+		return 0, false, ErrWrongMode
+	}
+	stats := e.pipeline.Stats()
+	return stats.VisibleSequence, stats.HaveVisible, nil
+}
+
+// DurableMaxAppliedMVCC returns the Manifest-authoritative durable watermark.
+func (e *Engine) DurableMaxAppliedMVCC() (uint64, bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return 0, false, ErrClosed
+	}
+	if e.mode != ModeReplicatedMVCC {
+		return 0, false, ErrWrongMode
+	}
+	version, err := e.manifest.Current()
+	if err != nil {
+		return 0, false, fmt.Errorf("read Manifest MVCC watermark: %w", err)
+	}
+	value, ok := version.MaxAppliedMVCC()
+	return value, ok, nil
 }
 
 // DurableAppliedRaftIndex returns the authoritative local Manifest frontier.

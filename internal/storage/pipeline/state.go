@@ -93,6 +93,7 @@ type TableInstallation struct {
 	HaveAppliedCoverage bool
 	FirstAppliedIndex   uint64
 	LastAppliedIndex    uint64
+	MaxMVCCTimestamp    uint64
 }
 
 // Stats is a point-in-time copy of pipeline lifecycle counters and memory.

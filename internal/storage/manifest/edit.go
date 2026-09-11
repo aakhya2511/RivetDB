@@ -34,6 +34,7 @@ const (
 	fieldAddFile
 	fieldStorageMode
 	fieldReplicatedFrontier
+	fieldMaxAppliedMVCC byte = 0x81
 )
 
 // StorageMode identifies which durability authority owns logical writes.
@@ -42,6 +43,7 @@ type StorageMode uint8
 const (
 	ModeStandalone StorageMode = iota + 1
 	ModeReplicated
+	ModeReplicatedMVCC
 )
 
 // DeletedFile identifies one live file removal. Phase 1G persists this shape
@@ -95,6 +97,7 @@ type VersionEdit struct {
 	ReplayFrontier           *uint64
 	StorageMode              *StorageMode
 	ReplicatedAppliedThrough *uint64
+	MaxAppliedMVCC           *uint64
 	DeletedFiles             []DeletedFile
 	AddedFiles               []TableMetadata
 }
@@ -122,6 +125,9 @@ func EncodeVersionEdit(edit VersionEdit) ([]byte, error) {
 	}
 	if edit.ReplicatedAppliedThrough != nil {
 		fields = append(fields, encodedField{tag: fieldReplicatedFrontier, payload: appendUint64(nil, *edit.ReplicatedAppliedThrough)})
+	}
+	if edit.MaxAppliedMVCC != nil {
+		fields = append(fields, encodedField{tag: fieldMaxAppliedMVCC, payload: appendUint64(nil, *edit.MaxAppliedMVCC)})
 	}
 	deletions := slices.Clone(edit.DeletedFiles)
 	slices.SortFunc(deletions, compareDeleted)
@@ -195,7 +201,7 @@ func DecodeVersionEdit(encoded []byte) (VersionEdit, error) {
 			value := string(payload)
 			edit.Comparator = &value
 			seenScalar[tag] = true
-		case fieldNextFile, fieldLastSequence, fieldReplayFrontier, fieldReplicatedFrontier:
+		case fieldNextFile, fieldLastSequence, fieldReplayFrontier, fieldReplicatedFrontier, fieldMaxAppliedMVCC:
 			if seenScalar[tag] || len(payload) != 8 {
 				return VersionEdit{}, ErrInvalidEdit
 			}
@@ -209,6 +215,8 @@ func DecodeVersionEdit(encoded []byte) (VersionEdit, error) {
 				edit.ReplayFrontier = &value
 			case fieldReplicatedFrontier:
 				edit.ReplicatedAppliedThrough = &value
+			case fieldMaxAppliedMVCC:
+				edit.MaxAppliedMVCC = &value
 			}
 			seenScalar[tag] = true
 		case fieldStorageMode:
@@ -259,13 +267,13 @@ type encodedField struct {
 }
 
 func validateEditShape(edit VersionEdit) error {
-	if edit.Comparator == nil && edit.NextFileNumber == nil && edit.LastSequence == nil && edit.ReplayFrontier == nil && edit.StorageMode == nil && edit.ReplicatedAppliedThrough == nil && len(edit.AddedFiles) == 0 && len(edit.DeletedFiles) == 0 {
+	if edit.Comparator == nil && edit.NextFileNumber == nil && edit.LastSequence == nil && edit.ReplayFrontier == nil && edit.StorageMode == nil && edit.ReplicatedAppliedThrough == nil && edit.MaxAppliedMVCC == nil && len(edit.AddedFiles) == 0 && len(edit.DeletedFiles) == 0 {
 		return ErrInvalidEdit
 	}
 	if len(edit.AddedFiles) > MaxChangesPerEdit || len(edit.DeletedFiles) > MaxChangesPerEdit {
 		return ErrInvalidEdit
 	}
-	if edit.StorageMode != nil && *edit.StorageMode != ModeStandalone && *edit.StorageMode != ModeReplicated || edit.ReplayFrontier != nil && edit.ReplicatedAppliedThrough != nil {
+	if edit.StorageMode != nil && *edit.StorageMode != ModeStandalone && *edit.StorageMode != ModeReplicated && *edit.StorageMode != ModeReplicatedMVCC || edit.ReplayFrontier != nil && edit.ReplicatedAppliedThrough != nil || edit.MaxAppliedMVCC != nil && edit.ReplicatedAppliedThrough == nil {
 		return ErrInvalidEdit
 	}
 	if edit.Comparator != nil && (*edit.Comparator == "" || len(*edit.Comparator) > 128) {

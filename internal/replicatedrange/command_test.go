@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+
+	"github.com/rivetdb/rivetdb/internal/mvcc"
 )
 
 func TestCommandRoundTripCanonicalAndOwned(t *testing.T) {
@@ -12,16 +14,17 @@ func TestCommandRoundTripCanonicalAndOwned(t *testing.T) {
 		{Type: CommandPut, Key: []byte{0, 0xff}, Value: []byte{}},
 		{Type: CommandPut, Key: []byte("key"), Value: []byte("value")},
 		{Type: CommandDelete, Key: []byte("gone")},
+		{Type: CommandPut, Timestamp: mvcc.Timestamp(^uint64(0)), Key: []byte{0, 0xff}, Value: []byte("mvcc")},
 	} {
 		encoded, err := EncodeCommand(command)
 		if err != nil {
 			t.Fatal(err)
 		}
 		decoded, err := DecodeCommand(encoded)
-		if err != nil || decoded.Type != command.Type || !bytes.Equal(decoded.Key, command.Key) || !bytes.Equal(decoded.Value, command.Value) {
+		if err != nil || decoded.Type != command.Type || decoded.Timestamp != command.Timestamp || !bytes.Equal(decoded.Key, command.Key) || !bytes.Equal(decoded.Value, command.Value) {
 			t.Fatalf("decoded=%+v want=%+v err=%v", decoded, command, err)
 		}
-		wantDecoded := Command{Type: command.Type, Key: bytes.Clone(command.Key), Value: bytes.Clone(command.Value)}
+		wantDecoded := Command{Type: command.Type, Timestamp: command.Timestamp, Key: bytes.Clone(command.Key), Value: bytes.Clone(command.Value)}
 		reencoded, err := EncodeCommand(decoded)
 		if err != nil || !bytes.Equal(reencoded, encoded) {
 			t.Fatalf("noncanonical re-encode: %x != %x err=%v", reencoded, encoded, err)
@@ -62,5 +65,24 @@ func TestCommandRejectsMalformedInputAtEveryTruncation(t *testing.T) {
 	deleteWithValue := Command{Type: CommandDelete, Key: []byte("key"), Value: []byte("bad")}
 	if _, err := EncodeCommand(deleteWithValue); !errors.Is(err, ErrInvalidCommand) {
 		t.Fatalf("DELETE value error=%v", err)
+	}
+}
+
+func TestMVCCCommandRejectsEveryTruncationAndMalformedTimestamp(t *testing.T) {
+	valid, err := EncodeCommand(Command{Type: CommandPut, Timestamp: 123, Key: []byte("key"), Value: []byte("value")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for offset := range len(valid) {
+		if _, err := DecodeCommand(valid[:offset]); !errors.Is(err, ErrInvalidCommand) {
+			t.Fatalf("truncation %d=%v", offset, err)
+		}
+	}
+	zero := bytes.Clone(valid)
+	for i := 8; i < 16; i++ {
+		zero[i] = 0
+	}
+	if _, err := DecodeCommand(zero); !errors.Is(err, ErrInvalidCommand) {
+		t.Fatalf("zero=%v", err)
 	}
 }

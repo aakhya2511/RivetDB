@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/rivetdb/rivetdb/internal/clock"
+	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/storage/engine"
 )
@@ -61,7 +63,27 @@ var (
 	ErrStopped        = errors.New("replicated range: stopped")
 	ErrTooManyWaiters = errors.New("replicated range: proposal waiter capacity reached")
 	ErrKeyOutOfRange  = errors.New("replicated range: command key outside configured range")
+	ErrMVCCRegression = errors.New("replicated range: MVCC timestamp regression")
+	ErrReplicaBehind  = errors.New("replicated range: requested MVCC timestamp exceeds applied watermark")
+	ErrSnapshotClosed = errors.New("replicated range: MVCC snapshot closed")
 )
+
+func maximumCommandTimestamp(entries []raft.Entry) (mvcc.Timestamp, error) {
+	var maximum mvcc.Timestamp
+	for _, entry := range entries {
+		if entry.Type != raft.EntryCommand {
+			continue
+		}
+		command, err := DecodeCommand(entry.Command)
+		if err != nil {
+			return 0, fmt.Errorf("decode durable timestamp history at index %d: %w", entry.Index, err)
+		}
+		if command.Timestamp > maximum {
+			maximum = command.Timestamp
+		}
+	}
+	return maximum, nil
+}
 
 type Options struct {
 	RangeID            RangeID
@@ -79,6 +101,9 @@ type Options struct {
 	Hook               Hook
 	Generation         uint64
 	ContainsKey        func([]byte) bool
+	ContainsSpan       func([]byte, []byte) bool
+	MVCC               bool
+	Clock              clock.Clock
 }
 
 type Result struct {
@@ -94,6 +119,7 @@ type Status struct {
 	Raft                    raft.Status
 	DurableAppliedRaftIndex uint64
 	LSMVisibleIndex         uint64
+	MaxAppliedMVCC          mvcc.Timestamp
 	LiveTableCount          uint64
 	MaterializedCommands    uint64
 	Fatal                   error
@@ -102,16 +128,23 @@ type Status struct {
 // Replica is one deterministic Raft group plus one range-scoped replicated LSM.
 // It owns no timer or transport goroutine; callers drive Tick and Step.
 type Replica struct {
-	mu          sync.Mutex
-	rangeID     RangeID
-	replicaID   ReplicaID
-	generation  uint64
-	containsKey func([]byte) bool
-	node        *raft.Node
-	engine      *engine.Engine
-	waiters     map[uint64]chan Result
-	maxWaiters  int
-	stopped     bool
+	mu           sync.Mutex
+	rangeID      RangeID
+	replicaID    ReplicaID
+	generation   uint64
+	containsKey  func([]byte) bool
+	containsSpan func([]byte, []byte) bool
+	node         *raft.Node
+	engine       *engine.Engine
+	store        raft.Store
+	hlc          *mvcc.Clock
+	mvcc         bool
+	machine      *stateMachine
+	waiters      map[uint64]chan Result
+	snapshots    map[uint64]mvcc.Timestamp
+	nextSnapshot uint64
+	maxWaiters   int
+	stopped      bool
 }
 
 func Open(options Options) (_ *Replica, resultErr error) {
@@ -134,7 +167,17 @@ func Open(options Options) (_ *Replica, resultErr error) {
 		}
 		options.Engine.Directory = filepath.Join(options.Directory, "data")
 	}
+	if options.Clock == nil {
+		options.Clock = options.Engine.Clock
+	}
+	if options.Clock == nil {
+		options.Clock = clock.System()
+	}
+	options.Engine.Clock = options.Clock
 	options.Engine.Mode = engine.ModeReplicated
+	if options.MVCC {
+		options.Engine.Mode = engine.ModeReplicatedMVCC
+	}
 	if options.Hook != nil {
 		engineHook := options.Engine.ReplicatedHook
 		options.Engine.ReplicatedHook = func(stage engine.ReplicatedStage, index uint64) {
@@ -178,12 +221,40 @@ func Open(options Options) (_ *Replica, resultErr error) {
 			return nil, fmt.Errorf("open range Raft store: %w", err)
 		}
 	}
+	appliedFloor := mvcc.Timestamp(0)
+	clockFloor := mvcc.Timestamp(0)
+	if options.MVCC {
+		if durable, ok, durableErr := local.DurableMaxAppliedMVCC(); durableErr != nil {
+			return nil, fmt.Errorf("read durable MVCC watermark: %w", durableErr)
+		} else if ok {
+			appliedFloor = mvcc.Timestamp(durable)
+			clockFloor = appliedFloor
+		}
+		state, loadErr := store.Load()
+		if loadErr != nil {
+			return nil, fmt.Errorf("load Raft timestamp history: %w", loadErr)
+		}
+		observed, observeErr := maximumCommandTimestamp(state.Entries)
+		if observeErr != nil {
+			return nil, observeErr
+		}
+		if observed > clockFloor {
+			clockFloor = observed
+		}
+	}
+	hlc, err := mvcc.NewClock(options.Clock, clockFloor)
+	if err != nil {
+		return nil, fmt.Errorf("create range HLC: %w", err)
+	}
+	machine := &stateMachine{engine: local, hook: options.Hook, containsKey: options.ContainsKey,
+		mvcc: options.MVCC, maxApplied: appliedFloor, clock: hlc}
 	r := &Replica{rangeID: options.RangeID, replicaID: options.ReplicaID, generation: options.Generation,
-		containsKey: options.ContainsKey, engine: local, waiters: make(map[uint64]chan Result), maxWaiters: options.MaxProposalWaiters}
+		containsKey: options.ContainsKey, containsSpan: options.ContainsSpan, engine: local, store: store, hlc: hlc, mvcc: options.MVCC, machine: machine,
+		waiters: make(map[uint64]chan Result), snapshots: make(map[uint64]mvcc.Timestamp), maxWaiters: options.MaxProposalWaiters}
 	r.node, err = raft.NewNode(raft.Config{
 		ID: options.NodeID, Peers: options.Peers, ElectionTimeoutMin: options.ElectionTimeoutMin,
 		ElectionTimeoutMax: options.ElectionTimeoutMax, HeartbeatInterval: options.HeartbeatInterval,
-		Random: options.Random, Store: store, StateMachine: &stateMachine{engine: local, hook: options.Hook, containsKey: options.ContainsKey},
+		Random: options.Random, Store: store, StateMachine: machine,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open range Raft node: %w", err)
@@ -232,6 +303,9 @@ func (r *Replica) Propose(ctx context.Context, encoded []byte) (uint64, []raft.M
 	if err := ctx.Err(); err != nil {
 		return 0, nil, nil, fmt.Errorf("before proposal admission: %w", err)
 	}
+	if r.mvcc {
+		return 0, nil, nil, ErrInvalidCommand
+	}
 	command, err := DecodeCommand(encoded)
 	if err != nil {
 		return 0, nil, nil, err
@@ -239,8 +313,54 @@ func (r *Replica) Propose(ctx context.Context, encoded []byte) (uint64, []raft.M
 	if r.containsKey != nil && !r.containsKey(command.Key) {
 		return 0, nil, nil, ErrKeyOutOfRange
 	}
+	if command.Timestamp != 0 {
+		return 0, nil, nil, ErrInvalidCommand
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.proposeLocked(encoded)
+}
+
+// ProposeMVCC assigns and replicates one timestamped mutation. The timestamp
+// is generated only on a leader and becomes part of the durable command.
+func (r *Replica) ProposeMVCC(ctx context.Context, command Command) (mvcc.Timestamp, uint64, []raft.Message, <-chan Result, error) {
+	if ctx == nil || !r.mvcc || command.Timestamp != 0 {
+		return 0, 0, nil, nil, ErrInvalidOptions
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("before MVCC proposal admission: %w", err)
+	}
+	if r.containsKey != nil && !r.containsKey(command.Key) {
+		return 0, 0, nil, nil, ErrKeyOutOfRange
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.node.Status().Role != raft.Leader {
+		return 0, 0, nil, nil, raft.ErrNotLeader
+	}
+	state, err := r.store.Load()
+	if err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("load timestamp floor before proposal: %w", err)
+	}
+	floor, err := maximumCommandTimestamp(state.Entries)
+	if err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("assign MVCC timestamp: %w", err)
+	}
+	r.hlc.Observe(floor)
+	timestamp, err := r.hlc.Now()
+	if err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("advance range HLC: %w", err)
+	}
+	command.Timestamp = timestamp
+	encoded, err := EncodeCommand(command)
+	if err != nil {
+		return 0, 0, nil, nil, err
+	}
+	index, messages, waiter, err := r.proposeLocked(encoded)
+	return timestamp, index, messages, waiter, err
+}
+
+func (r *Replica) proposeLocked(encoded []byte) (uint64, []raft.Message, <-chan Result, error) {
 	if r.stopped {
 		return 0, nil, nil, ErrStopped
 	}
@@ -329,6 +449,9 @@ func (r *Replica) Status() Status {
 	result := Status{RangeID: r.rangeID, Generation: r.generation, NodeID: raftStatus.ID, ReplicaID: r.replicaID, Raft: raftStatus,
 		DurableAppliedRaftIndex: durable, LSMVisibleIndex: stats.Pipeline.VisibleSequence,
 		LiveTableCount: stats.Manifest.LiveTables, Fatal: errors.Join(raftStatus.Fatal, err)}
+	if r.mvcc {
+		result.MaxAppliedMVCC = r.machine.maxApplied
+	}
 	result.MaterializedCommands = stats.Puts + stats.Deletes
 	return result
 }
@@ -358,6 +481,14 @@ func (r *Replica) Compact(ctx context.Context) error {
 		return fmt.Errorf("compact range LSM: %w", err)
 	}
 	return nil
+}
+
+func (r *Replica) ReclaimObsoleteTables(ctx context.Context) (engine.TableReclamationResult, error) {
+	result, err := r.engine.ReclaimObsoleteTables(ctx)
+	if err != nil {
+		return result, fmt.Errorf("reclaim range LSM tables: %w", err)
+	}
+	return result, nil
 }
 func (r *Replica) Validate() error {
 	if err := r.engine.Validate(); err != nil {

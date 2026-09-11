@@ -965,3 +965,12 @@ SSTables, compaction, table caches, failures, and durable applied frontiers are
 therefore range-local. The static catalog lives separately under `cluster/`
 and cannot make a range directory authoritative by discovery. No shared data
 WAL or shared LSM was introduced.
+## Phase 5 MVCC interpretation
+
+Phase 5 leaves the byte encoding and comparator unchanged. In the distinct
+persisted replicated-MVCC mode, internal-key `sequence` is the canonical HLC
+timestamp carried by the replicated command; Raft index remains separate apply
+coverage. Legacy replicated directories retain their Raft-index meaning and
+fail a replicated-MVCC mode open. `GetAt`/`ScanAt` pass the requested timestamp
+to the existing logarithmic candidate seeks. Flush and compaction preserve all
+value and tombstone versions; Phase 5 performs no MVCC GC.

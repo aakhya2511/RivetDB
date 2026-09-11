@@ -12,7 +12,7 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phases 0–4 are complete and certified. Phase 5 MVCC is next.**
+**Phases 0–5 are complete and certified. Phase 6 distributed transactions is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -24,8 +24,10 @@ Raft core, memory/file Raft stores, simulator and snapshot foundation under
 Raft-index apply path, explicit durable local frontier and bounded proposal
 waiters. `internal/multiraft` adds the authoritative static catalog, per-node
 hosting, shared bounded transport/schedulers and routed mutations. There is no
-server, client, distributed read protocol, dynamic range metadata or MVCC
-layer.
+server, client, distributed read protocol or dynamic range metadata.
+`internal/mvcc` plus the Phase 5 replicated-range/storage extensions provide
+replicated HLC versions and range-local historical read-only snapshots. There
+are no intents, write transactions, 2PC, isolation guarantee or MVCC GC.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
@@ -198,6 +200,7 @@ Design is written before the code it governs.
 | [docs/replicated-range.md](docs/replicated-range.md) | Phase 3 Raft-to-LSM ordering, durability, replay and runtime contract |
 | [docs/multiraft.md](docs/multiraft.md) | Phase 4 node composition, static metadata authority, shared runtime and failure domains |
 | [docs/range-routing.md](docs/range-routing.md) | Phase 4 descriptors, catalog format, routing and future split/migration seams |
+| [docs/mvcc.md](docs/mvcc.md) | Phase 5 HLC authority, historical visibility, snapshots, watermarks and Phase 6 boundary |
 | [docs/correctness.md](docs/correctness.md) | Test strategy, reproducibility mechanism, and §5's explicit list of what is *not* tested |
 | [docs/roadmap.md](docs/roadmap.md) | The twelve phases and each gate |
 | [docs/design-decisions/](docs/design-decisions/) | ADRs. An ADR records a contested decision with the alternatives that lost, and is superseded rather than rewritten. |
@@ -219,7 +222,9 @@ Decisions recorded: [ADR-0001](docs/design-decisions/0001-lsm-tree-over-b-tree.m
 [ADR-0015](docs/design-decisions/0015-raft-to-lsm-replicated-state-machine.md)
 (Raft-to-LSM integration), and
 [ADR-0016](docs/design-decisions/0016-multiraft-static-range-routing.md)
-(static Multi-Raft hosting and routing). The ADR index lists the complete
+(static Multi-Raft hosting and routing), and
+[ADR-0017](docs/design-decisions/0017-hlc-mvcc-timestamp-authority.md)
+(HLC MVCC timestamp authority). The ADR index lists the complete
 sequence. They list the rejected options' genuine
 advantages, not strawmen — keep that standard.
 
@@ -279,10 +284,9 @@ Open questions retained for their owning later phases:
   not a distributed read surface. Architecture §11 assumes nothing about clock
   skew, while leader leases would make safety depend on clock bounds. See §14.
 
-Phase 4 is frozen at [docs/multiraft.md](docs/multiraft.md) and
-[docs/range-routing.md](docs/range-routing.md): persisted static catalog
-authority, explicit unbounded user-key bounds, independent per-range
-Raft/LSM/frontiers, shared bounded runtime services, and no distributed-read
-claim. Run `make certify-multiraft`; it includes every lower regression gate.
-Phase 5 must not weaken the Phase 1 internal-key comparator, Phase 3 durability
-boundary, or Phase 4 range ownership and generation contracts.
+Phase 5 is frozen at [docs/mvcc.md](docs/mvcc.md): 48/16 HLC timestamps carried
+in replicated commands, distinct Raft/MVCC authorities, local applied-read
+watermarks, version-preserving history, read-only range snapshots and no GC or
+distributed-read freshness claim. Run `make certify-mvcc`; it includes every
+lower regression gate. Phase 6 must not weaken the Phase 1 comparator, Phase 3
+durability boundary, Phase 4 ownership, or Phase 5 historical visibility.

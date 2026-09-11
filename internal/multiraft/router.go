@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/replicatedrange"
 )
@@ -59,6 +60,75 @@ func (r *Router) Put(ctx context.Context, key, value []byte) error {
 
 func (r *Router) Delete(ctx context.Context, key []byte) error {
 	return r.mutate(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandDelete, Key: key})
+}
+
+func (r *Router) PutMVCC(ctx context.Context, key, value []byte) (mvcc.Timestamp, error) {
+	return r.mutateMVCC(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandPut, Key: key, Value: value})
+}
+
+func (r *Router) DeleteMVCC(ctx context.Context, key []byte) (mvcc.Timestamp, error) {
+	return r.mutateMVCC(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandDelete, Key: key})
+}
+
+func (r *Router) mutateMVCC(ctx context.Context, key []byte, command replicatedrange.Command) (mvcc.Timestamp, error) {
+	route, err := r.Route(key)
+	if err != nil {
+		return 0, err
+	}
+	descriptor, err := r.catalog.LookupByID(route.RangeID)
+	if err != nil {
+		return 0, err
+	}
+	candidates := r.candidates(descriptor)
+	nodes := r.scheduler.Nodes()
+	attempts := 0
+	for _, nodeID := range candidates {
+		if attempts >= r.maxAttempts {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, fmt.Errorf("during routed MVCC proposal: %w", err)
+		}
+		node := nodes[nodeID]
+		if node == nil {
+			continue
+		}
+		attempts++
+		timestamp, pending, outbound, proposeErr := node.ProposeMVCC(ctx, route, command)
+		if proposeErr != nil {
+			var notLeader *NotLeaderError
+			if errors.As(proposeErr, &notLeader) {
+				if notLeader.Leader != 0 {
+					r.RecordLeader(route.RangeID, notLeader.Leader)
+				}
+				continue
+			}
+			return 0, proposeErr
+		}
+		for _, envelope := range outbound {
+			if err := r.transport.Send(envelope); err != nil {
+				return 0, err
+			}
+		}
+		for work := 0; work < r.maxWork; work++ {
+			done, resultErr := pending.poll()
+			if done {
+				if resultErr == nil {
+					r.RecordLeader(route.RangeID, nodeID)
+				}
+				return timestamp, resultErr
+			}
+			delivered, schedulerErr := r.scheduler.DeliverNext()
+			if schedulerErr == nil && !delivered {
+				_, schedulerErr = r.scheduler.TickNext()
+			}
+			if schedulerErr != nil && !errors.Is(schedulerErr, ErrUnknownRange) && !errors.Is(schedulerErr, ErrNodeStopped) {
+				return 0, schedulerErr
+			}
+		}
+		return 0, fmt.Errorf("%w: MVCC proposal exceeded bounded scheduler work", ErrLeaderUnknown)
+	}
+	return 0, ErrLeaderUnknown
 }
 
 func (r *Router) mutate(ctx context.Context, key []byte, command replicatedrange.Command) error {

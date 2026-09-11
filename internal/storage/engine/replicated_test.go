@@ -73,6 +73,64 @@ func TestReplicatedModeUsesRaftIndexWithoutDataWALAndPersistsFrontier(t *testing
 	}
 }
 
+func TestMVCCGetAtAcrossActiveImmutableL0AndL1(t *testing.T) {
+	reached, release := make(chan struct{}), make(chan struct{})
+	e, err := Open(Options{Directory: t.TempDir(), Mode: ModeReplicatedMVCC, MemTableBytes: 1 << 20, L0Trigger: 2, ReplicatedHook: func(stage ReplicatedStage, index uint64) {
+		if stage == ReplicatedStageSSTableDurable && index == 4 {
+			close(reached)
+			<-release
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close(context.Background())
+	apply := func(index, timestamp uint64, kind storage.ValueKind, value string) {
+		t.Helper()
+		if applyErr := e.ApplyCommittedMVCC(context.Background(), index, 1, timestamp, []byte{byte(index)}, storage.Mutation{Kind: kind, Key: []byte("foo"), Value: []byte(value)}); applyErr != nil {
+			t.Fatal(applyErr)
+		}
+	}
+	apply(1, 100, storage.KindValue, "A")
+	if err = e.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	apply(2, 200, storage.KindValue, "B")
+	if err = e.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = e.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	apply(3, 250, storage.KindValue, "B2")
+	if err = e.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	apply(4, 300, storage.KindDelete, "")
+	flushDone := make(chan error, 1)
+	go func() { flushDone <- e.Flush(context.Background()) }()
+	<-reached
+	apply(5, 400, storage.KindValue, "C")
+	cases := []struct {
+		ts   uint64
+		want string
+	}{{50, ""}, {150, "A"}, {225, "B"}, {275, "B2"}, {350, ""}, {450, "C"}}
+	for _, tc := range cases {
+		value, getErr := e.GetAt(context.Background(), []byte("foo"), tc.ts)
+		if tc.want == "" {
+			if !errors.Is(getErr, ErrNotFound) {
+				t.Fatalf("T=%d value=%q err=%v", tc.ts, value, getErr)
+			}
+		} else if getErr != nil || string(value) != tc.want {
+			t.Fatalf("T=%d value=%q err=%v want=%q", tc.ts, value, getErr, tc.want)
+		}
+	}
+	close(release)
+	if err = <-flushDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReplicatedCompactionCannotAdvanceAppliedFrontier(t *testing.T) {
 	e, err := Open(Options{Directory: t.TempDir(), Mode: ModeReplicated, MemTableBytes: 1 << 20, L0Trigger: 4})
 	if err != nil {
@@ -169,5 +227,81 @@ func TestReplicatedMutationIsInvisibleBeforePublication(t *testing.T) {
 	}
 	if value, getErr := e.Get(context.Background(), mutation.Key); getErr != nil || string(value) != "published" {
 		t.Fatalf("published value=%q err=%v", value, getErr)
+	}
+}
+
+func TestReplicatedMVCCHistorySurvivesFlushCompactionReclamationAndRestart(t *testing.T) {
+	directory := t.TempDir()
+	e, err := Open(Options{Directory: directory, Mode: ModeReplicatedMVCC, MemTableBytes: 1 << 20, L0Trigger: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	timestamps := []uint64{100, 200, 300, 400}
+	mutations := []storage.Mutation{
+		{Kind: storage.KindValue, Key: []byte("foo"), Value: []byte("A")},
+		{Kind: storage.KindValue, Key: []byte("foo"), Value: []byte("B")},
+		{Kind: storage.KindDelete, Key: []byte("foo")},
+		{Kind: storage.KindValue, Key: []byte("foo"), Value: []byte("C")},
+	}
+	for offset, timestamp := range timestamps {
+		if applyErr := e.ApplyCommittedMVCC(context.Background(), uint64(offset+1), 1, timestamp, []byte{byte(offset + 1)}, mutations[offset]); applyErr != nil {
+			t.Fatal(applyErr)
+		}
+		if flushErr := e.Flush(context.Background()); flushErr != nil {
+			t.Fatal(flushErr)
+		}
+	}
+	assertEngineMVCCMatrix(t, e)
+	before, ok, err := e.DurableMaxAppliedMVCC()
+	if err != nil || !ok || before != 400 {
+		t.Fatalf("durable max=%d/%v err=%v", before, ok, err)
+	}
+	if _, compactErr := e.Compact(context.Background()); compactErr != nil {
+		t.Fatal(compactErr)
+	}
+	assertEngineMVCCMatrix(t, e)
+	after, ok, err := e.DurableMaxAppliedMVCC()
+	if err != nil || !ok || after != before {
+		t.Fatalf("compaction advanced MVCC max=%d/%v err=%v", after, ok, err)
+	}
+	if _, reclaimErr := e.ReclaimObsoleteTables(context.Background()); reclaimErr != nil {
+		t.Fatal(reclaimErr)
+	}
+	assertEngineMVCCMatrix(t, e)
+	if closeErr := e.Close(context.Background()); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	reopened, err := Open(Options{Directory: directory, Mode: ModeReplicatedMVCC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(context.Background())
+	assertEngineMVCCMatrix(t, reopened)
+	if _, err := Open(Options{Directory: directory, Mode: ModeReplicated}); !errors.Is(err, manifest.ErrModeMismatch) {
+		t.Fatalf("legacy reinterpretation=%v", err)
+	}
+}
+
+func assertEngineMVCCMatrix(t testing.TB, e *Engine) {
+	t.Helper()
+	cases := []struct {
+		timestamp uint64
+		value     string
+	}{{50, ""}, {100, "A"}, {150, "A"}, {200, "B"}, {250, "B"}, {300, ""}, {350, ""}, {400, "C"}, {500, "C"}}
+	for _, tc := range cases {
+		value, err := e.GetAt(context.Background(), []byte("foo"), tc.timestamp)
+		if tc.value == "" {
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("GetAt %d=%q/%v", tc.timestamp, value, err)
+			}
+			continue
+		}
+		if err != nil || string(value) != tc.value {
+			t.Fatalf("GetAt %d=%q/%v want %q", tc.timestamp, value, err, tc.value)
+		}
+		values, scanErr := e.ScanAt(context.Background(), nil, nil, tc.timestamp)
+		if scanErr != nil || len(values) != 1 || string(values[0].Value) != tc.value {
+			t.Fatalf("ScanAt %d=%v/%v", tc.timestamp, values, scanErr)
+		}
 	}
 }

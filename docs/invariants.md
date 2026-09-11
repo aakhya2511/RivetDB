@@ -333,11 +333,20 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 
 | ID | Invariant | Status |
 |---|---|---|
-| MVCC-1 | A read at timestamp `T` observes exactly the writes committed with a timestamp `≤ T`, and no others, for its whole lifetime. | planned (Phase 5) |
-| MVCC-2 | Writes of an uncommitted transaction are invisible to every other transaction. | planned (Phase 5) |
-| MVCC-3 | An aborted transaction leaves no externally visible state. Every intent it wrote is eventually removed. | planned (Phase 5) |
-| MVCC-4 | Two concurrent transactions writing the same key cannot both commit. At least one aborts. | planned (Phase 5) |
-| MVCC-5 | A committed version's timestamp is greater than the read timestamp of any transaction that observed the prior version and then wrote it. | planned (Phase 5) |
+| MVCC-1 | A committed mutation timestamp is canonical replicated command data and every replica applies exactly that timestamp. | verified (Phase 5) |
+| MVCC-2 | Committed mutation timestamps within one range are strictly increasing and never reused. | verified (Phase 5) |
+| MVCC-3 | `GetAt(K,T)` returns exactly the newest committed version of K whose timestamp is at most T. | verified (Phase 5) |
+| MVCC-4 | A tombstone hides earlier values only at reads at or after its timestamp and never destroys historical versions. | verified (Phase 5) |
+| MVCC-5 | `ScanAt` emits at most one newest visible value per user key in bytewise key order. | verified (Phase 5) |
+| MVCC-6 | Flush and compaction preserve every historical `GetAt` and `ScanAt` result. | verified (Phase 5) |
+| MVCC-7 | Obsolete-table reclamation cannot remove history because authoritative compaction outputs preserve every MVCC entry. | verified (Phase 5) |
+| MVCC-8 | Every open range snapshot uses one immutable timestamp for all operations. | verified (Phase 5) |
+| MVCC-9 | Mutations assigned after snapshot creation never affect that snapshot. | verified (Phase 5) |
+| MVCC-10 | Phase 5 garbage-collects no value version or tombstone. | verified (Phase 5) |
+| MVCC-11 | A replica never claims visibility above its locally applied MVCC watermark. | verified (Phase 5) |
+| MVCC-12 | Raft applied index and MVCC timestamp remain distinct range-scoped authorities. | verified (Phase 5) |
+| MVCC-13 | Leadership change, physical clock skew or regression cannot make a range's timestamps regress. | verified (Phase 5) |
+| MVCC-14 | Restart recovers a timestamp floor at least as high as durable MVCC state and local durable timestamped Raft history. | verified (Phase 5) |
 | MVCC-6 | Garbage collection never removes a version that a live read timestamp could observe. | planned (Phase 5) |
 | MVCC-7 | A key has at most one write intent at a time. | planned (Phase 5) |
 

@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+
+	"github.com/rivetdb/rivetdb/internal/testutil"
 )
 
 // BenchmarkThreeNodeDurableCommitApply includes three local FileStore
 // publications and leader/follower WAL-free LSM apply. It is a local
 // engineering baseline, not a network or production-latency measurement.
 func BenchmarkThreeNodeDurableCommitApply(b *testing.B) {
-	cluster := newTestCluster(b, 3)
+	cluster := newTestClusterAt(b, 3, testutil.BenchmarkDir(b))
 	cluster.elect(1)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -23,7 +25,7 @@ func BenchmarkThreeNodeDurableCommitApply(b *testing.B) {
 func BenchmarkFollowerCatchUp100(b *testing.B) {
 	for iteration := 0; iteration < b.N; iteration++ {
 		b.StopTimer()
-		cluster := newTestClusterAt(b, 3, filepath.Join(b.TempDir(), fmt.Sprintf("iteration-%d", iteration)))
+		cluster := newTestClusterAt(b, 3, filepath.Join(testutil.BenchmarkDir(b), fmt.Sprintf("iteration-%d", iteration)))
 		cluster.elect(1)
 		if err := cluster.replicas[3].Close(context.Background()); err != nil {
 			b.Fatal(err)
@@ -49,7 +51,7 @@ func BenchmarkFollowerCatchUp100(b *testing.B) {
 func BenchmarkFullRestartReplay100(b *testing.B) {
 	for iteration := 0; iteration < b.N; iteration++ {
 		b.StopTimer()
-		cluster := newTestClusterAt(b, 3, filepath.Join(b.TempDir(), fmt.Sprintf("iteration-%d", iteration)))
+		cluster := newTestClusterAt(b, 3, filepath.Join(testutil.BenchmarkDir(b), fmt.Sprintf("iteration-%d", iteration)))
 		cluster.elect(1)
 		for index := 0; index < 100; index++ {
 			cluster.propose(1, Command{Type: CommandPut, Key: []byte(fmt.Sprintf("key-%03d", index)), Value: []byte("value")})

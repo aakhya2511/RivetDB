@@ -4,10 +4,11 @@ A distributed database is only as credible as the evidence that it is correct.
 This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
-**Current scope:** Phases 0–4 exist: the complete local LSM, deterministic Raft,
-durable replicated range, and static Multi-Raft catalog/hosting/routed-mutation
-composition. There is no network service, distributed read protocol, dynamic
-range metadata, transactional, serializability or linearizability claim.
+**Current scope:** Phases 0–5 exist: the complete local LSM, deterministic Raft,
+durable replicated range, static Multi-Raft composition, and replicated MVCC
+history with range-local read-only snapshots. There is no network service,
+distributed read protocol, dynamic metadata, transaction, isolation,
+serializability or linearizability claim.
 Sections marked *planned* are plans, not results.
 
 ---
@@ -355,10 +356,11 @@ Stated plainly, because an unlisted gap reads as a claim:
   corruption within a record or block. Corruption that a valid checksum would
   also accept — a whole stale-but-consistent file, for instance — is not
   detected.
-- **Clock skew as a safety concern.** RivetDB does not use time for safety.
-  Phase 3 deliberately added no leader lease or distributed read protocol; any
-  future lease design would require an explicit bounded-skew assumption and
-  new tests.
+- **Bounded clock skew.** Phase 5 HLC values use physical milliseconds but
+  preserve monotonicity through replicated observation and logical increments;
+  they make no bounded-skew or external-consistency claim. Phase 3 deliberately
+  added no leader lease or distributed read protocol; any future lease design
+  would require an explicit bounded-skew assumption and new tests.
 - **Linearizable distributed reads.** Phase 3/4 `LocalGet`/`LocalScan` are replica
   inspection and may be stale. ReadIndex and lease reads are not tested because
   they are not implemented.
@@ -375,3 +377,17 @@ Stated plainly, because an unlisted gap reads as a claim:
   testing.
 - **Performance under sustained multi-day load.** Benchmarks are minutes, not
   days. Slow leaks and long-horizon compaction behaviour are not covered.
+### Phase 5 MVCC gate
+
+`make certify-mvcc` adds deterministic HLC regression/overflow tests,
+timestamped-command validation, reference-model `GetAt`/`ScanAt`, active/
+immutable/L0/L1 history, long-lived snapshot lifecycle, compaction/reclamation,
+leader skew/change, durable restart, abrupt subprocess crash, Multi-Raft
+historical digest, normal 10k-event fixed/fresh campaigns and an opt-in
+100k-event campaign. It then runs every frozen Phase 4 and lower gate.
+
+Certified visibility means the newest applied committed version at or below a
+requested timestamp. It does not certify that a local replica is current with
+the cluster; requests above its applied MVCC watermark return
+`ErrReplicaBehind`. There is no transaction, isolation or linearizability
+claim.
