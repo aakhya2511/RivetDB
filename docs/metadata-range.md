@@ -84,3 +84,13 @@ digest. It is placement authority, not Raft membership authority. The final
 placement CAS occurs only after the user range commits its stable final Raft
 configuration. Split and migration records are mutually exclusive per range;
 unrelated ranges remain independent.
+
+## 7. Phase 9 controller authority
+
+MetaRange also persists the versioned rebalancing policy identity, active
+planner epoch, monotonic ActionID, bounded action history, certified operation
+linkage, terminal errors, and absolute range/node cooldown deadlines. These
+records authorize control-plane work but never replace the catalog, split
+record, migration record, or user-range Raft state as data-plane authority.
+Metadata version 3 appends this state; the decoder accepts certified version 2
+snapshots with rebalancing disabled until an explicit policy is installed.

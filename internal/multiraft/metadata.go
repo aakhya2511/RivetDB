@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/rivetdb/rivetdb/internal/raft"
 )
@@ -17,7 +18,7 @@ const (
 	MaxMigrationRecords             = 4096
 	MaxLineageDepth                 = 128
 	maxMetadataCatalogBytes         = 32 << 20
-	metadataVersion                 = uint16(2)
+	metadataVersion                 = uint16(3)
 )
 
 var metadataMagic = [4]byte{'R', 'V', 'M', 'D'}
@@ -126,6 +127,7 @@ type MetadataSnapshot struct {
 	NextMigrationID MigrationID
 	Migrations      []MigrationRecord
 	Lineage         []LineageRecord
+	Rebalance       RebalanceControlSnapshot
 }
 
 // RecoveryRanges returns non-authoritative physical groups that a node may
@@ -153,6 +155,7 @@ type metadataState struct {
 	nextMigrationID MigrationID
 	migrations      map[MigrationID]MigrationRecord
 	lineage         map[RangeRef]LineageRecord
+	rebalance       RebalanceControlSnapshot
 }
 
 func newMetadataState(catalog *Catalog) (*metadataState, error) {
@@ -171,7 +174,8 @@ func newMetadataState(catalog *Catalog) (*metadataState, error) {
 		return nil, ErrResourceLimit
 	}
 	return &metadataState{catalog: catalog, nextRangeID: largest + 1, nextSplitID: 1, nextReplicaID: largestReplica + 1, nextMigrationID: 1,
-		splits: make(map[SplitID]SplitRecord), migrations: make(map[MigrationID]MigrationRecord), lineage: make(map[RangeRef]LineageRecord)}, nil
+		splits: make(map[SplitID]SplitRecord), migrations: make(map[MigrationID]MigrationRecord), lineage: make(map[RangeRef]LineageRecord),
+		rebalance: RebalanceControlSnapshot{NextActionID: 1, Cooldowns: RebalanceCooldowns{Ranges: make(map[RangeID]time.Time), Nodes: make(map[raft.NodeID]time.Time)}}}, nil
 }
 
 func cloneSplit(value SplitRecord) SplitRecord {
@@ -182,7 +186,7 @@ func cloneSplit(value SplitRecord) SplitRecord {
 
 func cloneMetadata(source *metadataState) *metadataState {
 	result := &metadataState{catalog: source.catalog, nextRangeID: source.nextRangeID, nextSplitID: source.nextSplitID,
-		nextReplicaID: source.nextReplicaID, nextMigrationID: source.nextMigrationID, splits: make(map[SplitID]SplitRecord, len(source.splits)), migrations: make(map[MigrationID]MigrationRecord, len(source.migrations)), lineage: make(map[RangeRef]LineageRecord, len(source.lineage))}
+		nextReplicaID: source.nextReplicaID, nextMigrationID: source.nextMigrationID, splits: make(map[SplitID]SplitRecord, len(source.splits)), migrations: make(map[MigrationID]MigrationRecord, len(source.migrations)), lineage: make(map[RangeRef]LineageRecord, len(source.lineage)), rebalance: cloneRebalanceControl(source.rebalance)}
 	for id, record := range source.splits {
 		result.splits[id] = cloneSplit(record)
 	}
@@ -198,6 +202,7 @@ func cloneMetadata(source *metadataState) *metadataState {
 
 func (s *metadataState) snapshot() MetadataSnapshot {
 	result := MetadataSnapshot{Catalog: s.catalog, NextRangeID: s.nextRangeID, NextSplitID: s.nextSplitID, NextReplicaID: s.nextReplicaID, NextMigrationID: s.nextMigrationID}
+	result.Rebalance = cloneRebalanceControl(s.rebalance)
 	for _, record := range s.splits {
 		result.Splits = append(result.Splits, cloneSplit(record))
 	}
@@ -415,10 +420,78 @@ func encodeMetadata(s *metadataState) ([]byte, error) {
 	for _, edge := range snapshot.Lineage {
 		result = appendLineage(result, edge)
 	}
+	result, err = appendRebalanceControl(result, snapshot.Rebalance)
+	if err != nil {
+		return nil, err
+	}
 	if len(result) > raft.MaxCommandBytes {
 		return nil, ErrResourceLimit
 	}
 	return result, nil
+}
+
+func appendRebalanceControl(dst []byte, control RebalanceControlSnapshot) ([]byte, error) {
+	if len(control.History) > MaxRebalanceActionRecords || len(control.Cooldowns.Ranges) > MaxCatalogRanges || len(control.Cooldowns.Nodes) > MaxCatalogNodes {
+		return nil, ErrResourceLimit
+	}
+	if control.PolicyVersion != control.Policy.Version {
+		return nil, ErrCorruptMetadata
+	}
+	dst = appendRebalancePolicy(dst, control.Policy)
+	dst = binary.LittleEndian.AppendUint64(dst, control.ControllerEpoch)
+	dst = binary.LittleEndian.AppendUint64(dst, control.NextActionID)
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(control.History))) //nolint:gosec // bounded above
+	for _, record := range control.History {
+		if len(record.Action.SplitKey) > 1<<20 || len(record.Action.Reason) > 1<<16 || len(record.LastError) > 1<<16 || len(record.Action.Constraints) > 64 {
+			return nil, ErrResourceLimit
+		}
+		values := []uint64{record.Action.ActionID, uint64(record.Action.Type), uint64(record.Action.RangeID), record.Action.RangeGeneration,
+			record.Action.CatalogGeneration, uint64(record.Action.SourceReplicaID), uint64(record.Action.SourceNodeID), uint64(record.Action.TargetNodeID),
+			record.Action.SourceScore, record.Action.TargetScore, record.Action.EstimatedCost, record.Action.ExpectedImprovement,
+			record.ControllerEpoch, record.PolicyVersion, uint64(record.State), uint64(record.MigrationID), uint64(record.SplitID),
+			uint64(record.PlannedAt.UnixNano()), uint64(record.UpdatedAt.UnixNano()), 0} //nolint:gosec // signed nanoseconds are stored bit-for-bit
+		if record.Action.Emergency {
+			values[len(values)-1] = 1
+		}
+		for _, value := range values {
+			dst = binary.LittleEndian.AppendUint64(dst, value)
+		}
+		dst = binary.LittleEndian.AppendUint32(dst, uint32(len(record.Action.SplitKey)))    //nolint:gosec
+		dst = binary.LittleEndian.AppendUint32(dst, uint32(len(record.Action.Reason)))      //nolint:gosec
+		dst = binary.LittleEndian.AppendUint32(dst, uint32(len(record.LastError)))          //nolint:gosec
+		dst = binary.LittleEndian.AppendUint32(dst, uint32(len(record.Action.Constraints))) //nolint:gosec
+		dst = append(dst, record.Action.SplitKey...)
+		dst = append(dst, record.Action.Reason...)
+		dst = append(dst, record.LastError...)
+		for _, constraint := range record.Action.Constraints {
+			if len(constraint) > 1<<16 {
+				return nil, ErrResourceLimit
+			}
+			dst = binary.LittleEndian.AppendUint32(dst, uint32(len(constraint))) //nolint:gosec
+			dst = append(dst, constraint...)
+		}
+	}
+	ranges := make([]RangeID, 0, len(control.Cooldowns.Ranges))
+	for id := range control.Cooldowns.Ranges {
+		ranges = append(ranges, id)
+	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i] < ranges[j] })
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(ranges))) //nolint:gosec
+	for _, id := range ranges {
+		dst = binary.LittleEndian.AppendUint64(dst, uint64(id))
+		dst = binary.LittleEndian.AppendUint64(dst, uint64(control.Cooldowns.Ranges[id].UnixNano())) //nolint:gosec // signed nanoseconds are stored bit-for-bit
+	}
+	nodes := make([]raft.NodeID, 0, len(control.Cooldowns.Nodes))
+	for id := range control.Cooldowns.Nodes {
+		nodes = append(nodes, id)
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i] < nodes[j] })
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(nodes))) //nolint:gosec
+	for _, id := range nodes {
+		dst = binary.LittleEndian.AppendUint64(dst, uint64(id))
+		dst = binary.LittleEndian.AppendUint64(dst, uint64(control.Cooldowns.Nodes[id].UnixNano())) //nolint:gosec // signed nanoseconds are stored bit-for-bit
+	}
+	return dst, nil
 }
 
 func appendDescriptorBytes(dst []byte, descriptor RangeDescriptor) []byte {
@@ -588,7 +661,8 @@ func decodeMetadata(data []byte) (*metadataState, error) {
 	if e != nil {
 		return nil, e
 	}
-	if binary.LittleEndian.Uint16(versionBytes) != metadataVersion {
+	version := binary.LittleEndian.Uint16(versionBytes)
+	if version != 2 && version != metadataVersion {
 		return nil, ErrUnsupportedMetadata
 	}
 	reserved, e := d.take(2)
@@ -626,7 +700,7 @@ func decodeMetadata(data []byte) (*metadataState, error) {
 	if e != nil {
 		return nil, errors.Join(ErrCorruptMetadata, e)
 	}
-	state := &metadataState{catalog: catalog, nextRangeID: RangeID(nextRange), nextSplitID: SplitID(nextSplit), nextReplicaID: ReplicaID(nextReplica), nextMigrationID: MigrationID(nextMigration), splits: make(map[SplitID]SplitRecord), migrations: make(map[MigrationID]MigrationRecord), lineage: make(map[RangeRef]LineageRecord)}
+	state := &metadataState{catalog: catalog, nextRangeID: RangeID(nextRange), nextSplitID: SplitID(nextSplit), nextReplicaID: ReplicaID(nextReplica), nextMigrationID: MigrationID(nextMigration), splits: make(map[SplitID]SplitRecord), migrations: make(map[MigrationID]MigrationRecord), lineage: make(map[RangeRef]LineageRecord), rebalance: RebalanceControlSnapshot{NextActionID: 1, Cooldowns: RebalanceCooldowns{Ranges: make(map[RangeID]time.Time), Nodes: make(map[raft.NodeID]time.Time)}}}
 	splitN, e := d.u32()
 	if e != nil {
 		return nil, e
@@ -678,6 +752,13 @@ func decodeMetadata(data []byte) (*metadataState, error) {
 		}
 		state.lineage[edge.Parent] = edge
 	}
+	if version >= 3 {
+		control, decodeErr := decodeRebalanceControl(&d)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		state.rebalance = control
+	}
 	if d.at != len(data) || state.nextRangeID == 0 || state.nextSplitID == 0 || state.nextReplicaID == 0 || state.nextMigrationID == 0 {
 		return nil, ErrCorruptMetadata
 	}
@@ -685,6 +766,102 @@ func decodeMetadata(data []byte) (*metadataState, error) {
 		return nil, e
 	}
 	return state, nil
+}
+
+func decodeRebalanceControl(d *metadataDecoder) (RebalanceControlSnapshot, error) {
+	policy, err := decodeRebalancePolicy(d)
+	if err != nil {
+		return RebalanceControlSnapshot{}, err
+	}
+	epoch, err := d.u64()
+	if err != nil {
+		return RebalanceControlSnapshot{}, err
+	}
+	nextAction, err := d.u64()
+	if err != nil {
+		return RebalanceControlSnapshot{}, err
+	}
+	historyN, err := d.u32()
+	if err != nil || historyN > MaxRebalanceActionRecords {
+		return RebalanceControlSnapshot{}, ErrResourceLimit
+	}
+	result := RebalanceControlSnapshot{Policy: policy, PolicyVersion: policy.Version, ControllerEpoch: epoch, NextActionID: nextAction,
+		Cooldowns: RebalanceCooldowns{Ranges: make(map[RangeID]time.Time), Nodes: make(map[raft.NodeID]time.Time)}}
+	for range historyN {
+		values := make([]uint64, 20)
+		for index := range values {
+			values[index], err = d.u64()
+			if err != nil {
+				return RebalanceControlSnapshot{}, err
+			}
+		}
+		keyN, keyErr := d.u32()
+		reasonN, reasonErr := d.u32()
+		errorN, errorErr := d.u32()
+		constraintN, constraintErr := d.u32()
+		if keyErr != nil || reasonErr != nil || errorErr != nil || constraintErr != nil || keyN > 1<<20 || reasonN > 1<<16 || errorN > 1<<16 || constraintN > 64 {
+			return RebalanceControlSnapshot{}, ErrResourceLimit
+		}
+		key, keyErr := d.take(int(keyN))
+		if keyErr != nil {
+			return RebalanceControlSnapshot{}, keyErr
+		}
+		reason, reasonErr := d.take(int(reasonN))
+		if reasonErr != nil {
+			return RebalanceControlSnapshot{}, reasonErr
+		}
+		last, lastErr := d.take(int(errorN))
+		if lastErr != nil {
+			return RebalanceControlSnapshot{}, lastErr
+		}
+		if values[1] > uint64(RebalanceTransferLeader) || values[14] > uint64(RebalanceActionFailed) || values[19] > 1 {
+			return RebalanceControlSnapshot{}, ErrCorruptMetadata
+		}
+		record := RebalanceActionRecord{Action: RebalanceAction{ActionID: values[0], Type: RebalanceActionType(values[1]), RangeID: RangeID(values[2]), RangeGeneration: values[3], CatalogGeneration: values[4], SourceReplicaID: ReplicaID(values[5]), SourceNodeID: raft.NodeID(values[6]), TargetNodeID: raft.NodeID(values[7]), SourceScore: values[8], TargetScore: values[9], EstimatedCost: values[10], ExpectedImprovement: values[11], SplitKey: bytes.Clone(key), Reason: RebalanceReason(reason), Emergency: values[19] == 1}, ControllerEpoch: values[12], PolicyVersion: values[13], State: RebalanceActionState(values[14]), MigrationID: MigrationID(values[15]), SplitID: SplitID(values[16]), PlannedAt: time.Unix(0, int64(values[17])), UpdatedAt: time.Unix(0, int64(values[18])), LastError: string(last)} //nolint:gosec // validated enums and bit-preserving signed timestamps
+		for range constraintN {
+			n, nErr := d.u32()
+			if nErr != nil || n > 1<<16 {
+				return RebalanceControlSnapshot{}, ErrResourceLimit
+			}
+			value, valueErr := d.take(int(n))
+			if valueErr != nil {
+				return RebalanceControlSnapshot{}, valueErr
+			}
+			record.Action.Constraints = append(record.Action.Constraints, string(value))
+		}
+		if record.Action.ActionID == 0 || record.Action.RangeID == 0 || record.Action.Type < RebalanceMoveReplica || record.Action.Type > RebalanceTransferLeader || !record.State.valid() {
+			return RebalanceControlSnapshot{}, ErrCorruptMetadata
+		}
+		result.History = append(result.History, record)
+	}
+	rangeN, err := d.u32()
+	if err != nil || rangeN > MaxCatalogRanges {
+		return RebalanceControlSnapshot{}, ErrResourceLimit
+	}
+	for range rangeN {
+		id, idErr := d.u64()
+		deadline, deadlineErr := d.u64()
+		if idErr != nil || deadlineErr != nil || id == 0 {
+			return RebalanceControlSnapshot{}, ErrCorruptMetadata
+		}
+		result.Cooldowns.Ranges[RangeID(id)] = time.Unix(0, int64(deadline)) //nolint:gosec // bit-preserving signed timestamp
+	}
+	nodeN, err := d.u32()
+	if err != nil || nodeN > MaxCatalogNodes {
+		return RebalanceControlSnapshot{}, ErrResourceLimit
+	}
+	for range nodeN {
+		id, idErr := d.u64()
+		deadline, deadlineErr := d.u64()
+		if idErr != nil || deadlineErr != nil || id == 0 {
+			return RebalanceControlSnapshot{}, ErrCorruptMetadata
+		}
+		result.Cooldowns.Nodes[raft.NodeID(id)] = time.Unix(0, int64(deadline)) //nolint:gosec // bit-preserving signed timestamp
+	}
+	if result.NextActionID == 0 {
+		return RebalanceControlSnapshot{}, ErrCorruptMetadata
+	}
+	return result, nil
 }
 
 func decodeMigrationRecord(d *metadataDecoder) (MigrationRecord, error) {

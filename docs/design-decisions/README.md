@@ -49,6 +49,7 @@ Phase:    which phase this governs
 | [0018](0018-snapshot-isolation-transactions-and-2pc.md) | Snapshot Isolation transactions, replicated intents, and 2PC | Accepted | 6 |
 | [0019](0019-online-range-splitting-and-replicated-metadata.md) | Online range splitting and replicated metadata authority | Accepted | 7 |
 | [0020](0020-online-replica-migration-and-joint-consensus.md) | Online replica migration with learners and joint consensus | Accepted | 8 |
+| [0021](0021-workload-aware-deterministic-rebalancing.md) | Workload-aware deterministic rebalancing | Accepted | 9 |
 
 ## Planned
 
@@ -59,4 +60,3 @@ visible rather than implicit; each is noted in
 | Topic | Decided in |
 |---|---|
 | Read path: Raft read vs ReadIndex vs leader lease | Phase 3 |
-| Automatic split key selection: size-based vs load-based | Phase 9 |

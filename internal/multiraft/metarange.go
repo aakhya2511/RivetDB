@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/rivetdb/rivetdb/internal/raft"
 )
@@ -83,6 +85,13 @@ func validateMetadataTransition(old, next *metadataState) error {
 		len(next.splits) < len(old.splits) || len(next.migrations) < len(old.migrations) || len(next.lineage) < len(old.lineage) {
 		return ErrCorruptMetadata
 	}
+	controlChanged := !sameRebalanceControl(old.rebalance, next.rebalance)
+	if controlChanged {
+		if !sameMetadataCore(old, next) || !validRebalanceControlTransition(old.rebalance, next.rebalance) {
+			return ErrCorruptMetadata
+		}
+		return nil
+	}
 	for parent, edge := range old.lineage {
 		other, ok := next.lineage[parent]
 		if !ok || edge.SplitID != other.SplitID || edge.Parent != other.Parent || edge.Children != other.Children ||
@@ -152,6 +161,124 @@ func validateMetadataTransition(old, next *metadataState) error {
 		return ErrCorruptMetadata
 	}
 	return next.validateLineage()
+}
+
+func sameMetadataCore(left, right *metadataState) bool {
+	if left.nextRangeID != right.nextRangeID || left.nextSplitID != right.nextSplitID || left.nextReplicaID != right.nextReplicaID || left.nextMigrationID != right.nextMigrationID ||
+		left.catalog.Fingerprint() != right.catalog.Fingerprint() || len(left.splits) != len(right.splits) || len(left.migrations) != len(right.migrations) || len(left.lineage) != len(right.lineage) {
+		return false
+	}
+	for id, record := range left.splits {
+		if other, ok := right.splits[id]; !ok || !splitRecordsEqual(record, other) {
+			return false
+		}
+	}
+	for id, record := range left.migrations {
+		if other, ok := right.migrations[id]; !ok || record != other {
+			return false
+		}
+	}
+	for id, record := range left.lineage {
+		other, ok := right.lineage[id]
+		if !ok || record.SplitID != other.SplitID || record.Parent != other.Parent || record.Children != other.Children || record.CutoverCatalogGeneration != other.CutoverCatalogGeneration || !bytes.Equal(record.SplitKey, other.SplitKey) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameRebalanceControl(left, right RebalanceControlSnapshot) bool {
+	if left.Policy != right.Policy || left.PolicyVersion != right.PolicyVersion || left.ControllerEpoch != right.ControllerEpoch || left.NextActionID != right.NextActionID || len(left.History) != len(right.History) || len(left.Cooldowns.Ranges) != len(right.Cooldowns.Ranges) || len(left.Cooldowns.Nodes) != len(right.Cooldowns.Nodes) {
+		return false
+	}
+	for index := range left.History {
+		if !sameRebalanceRecord(left.History[index], right.History[index]) {
+			return false
+		}
+	}
+	for id, deadline := range left.Cooldowns.Ranges {
+		if other, ok := right.Cooldowns.Ranges[id]; !ok || !deadline.Equal(other) {
+			return false
+		}
+	}
+	for id, deadline := range left.Cooldowns.Nodes {
+		if other, ok := right.Cooldowns.Nodes[id]; !ok || !deadline.Equal(other) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameRebalanceRecord(left, right RebalanceActionRecord) bool {
+	return sameRebalanceAction(left.Action, right.Action) && left.ControllerEpoch == right.ControllerEpoch && left.PolicyVersion == right.PolicyVersion && left.State == right.State &&
+		left.PlannedAt.Equal(right.PlannedAt) && left.UpdatedAt.Equal(right.UpdatedAt) && left.MigrationID == right.MigrationID && left.SplitID == right.SplitID && left.LastError == right.LastError
+}
+
+func validRebalanceControlTransition(old, next RebalanceControlSnapshot) bool {
+	if next.PolicyVersion != next.Policy.Version || next.PolicyVersion < old.PolicyVersion || next.ControllerEpoch < old.ControllerEpoch || next.ControllerEpoch > old.ControllerEpoch+1 || next.NextActionID < old.NextActionID || next.NextActionID > old.NextActionID+1 || len(next.History) > MaxRebalanceActionRecords {
+		return false
+	}
+	if next.Policy != old.Policy && next.PolicyVersion <= old.PolicyVersion {
+		return false
+	}
+	if next.ControllerEpoch == old.ControllerEpoch+1 && (next.PolicyVersion != old.PolicyVersion || next.NextActionID != old.NextActionID || len(next.History) != len(old.History)) {
+		return false
+	}
+	if len(old.History) != 0 && len(next.History) == len(old.History) && next.NextActionID == old.NextActionID+1 {
+		for index := 1; index < len(old.History); index++ {
+			if !sameRebalanceRecord(old.History[index], next.History[index-1]) {
+				return false
+			}
+		}
+		record := next.History[len(next.History)-1]
+		return record.Action.ActionID == old.NextActionID && record.State == RebalanceActionPlanned && record.ControllerEpoch == next.ControllerEpoch && record.PolicyVersion == next.PolicyVersion && cooldownsDoNotRegress(old.Cooldowns, next.Cooldowns)
+	}
+	if len(next.History) < len(old.History) || len(next.History) > len(old.History)+1 {
+		return false
+	}
+	for index := 0; index < min(len(old.History), len(next.History)); index++ {
+		if index == len(old.History)-1 && len(next.History) == len(old.History) {
+			continue
+		}
+		if !sameRebalanceRecord(old.History[index], next.History[index]) {
+			return false
+		}
+	}
+	if len(next.History) == len(old.History)+1 {
+		record := next.History[len(next.History)-1]
+		if next.NextActionID != old.NextActionID+1 || record.Action.ActionID != old.NextActionID || record.State != RebalanceActionPlanned || record.ControllerEpoch != next.ControllerEpoch || record.PolicyVersion != next.PolicyVersion {
+			return false
+		}
+	} else if len(old.History) != 0 && !sameRebalanceRecord(old.History[len(old.History)-1], next.History[len(next.History)-1]) {
+		before, after := old.History[len(old.History)-1], next.History[len(next.History)-1]
+		if before.Action.ActionID != after.Action.ActionID || before.ControllerEpoch != after.ControllerEpoch || before.PolicyVersion != after.PolicyVersion ||
+			!sameRebalanceAction(before.Action, after.Action) || !legalRebalanceActionTransition(before.State, after.State) || after.UpdatedAt.Before(before.UpdatedAt) {
+			return false
+		}
+	}
+	return cooldownsDoNotRegress(old.Cooldowns, next.Cooldowns)
+}
+
+func sameRebalanceAction(left, right RebalanceAction) bool {
+	return left.ActionID == right.ActionID && left.Type == right.Type && left.Reason == right.Reason && left.RangeID == right.RangeID && left.RangeGeneration == right.RangeGeneration && left.CatalogGeneration == right.CatalogGeneration && left.SourceReplicaID == right.SourceReplicaID && left.SourceNodeID == right.SourceNodeID && left.TargetNodeID == right.TargetNodeID && bytes.Equal(left.SplitKey, right.SplitKey) && left.SourceScore == right.SourceScore && left.TargetScore == right.TargetScore && left.EstimatedCost == right.EstimatedCost && left.ExpectedImprovement == right.ExpectedImprovement && left.Emergency == right.Emergency && slices.Equal(left.Constraints, right.Constraints)
+}
+
+func legalRebalanceActionTransition(before, after RebalanceActionState) bool {
+	return before == RebalanceActionPlanned && (after == RebalanceActionExecuting || after == RebalanceActionFailed) || before == RebalanceActionExecuting && (after == RebalanceActionSucceeded || after == RebalanceActionFailed)
+}
+
+func cooldownsDoNotRegress(old, next RebalanceCooldowns) bool {
+	for id, deadline := range old.Ranges {
+		if other, ok := next.Ranges[id]; !ok || other.Before(deadline) {
+			return false
+		}
+	}
+	for id, deadline := range old.Nodes {
+		if other, ok := next.Nodes[id]; !ok || other.Before(deadline) {
+			return false
+		}
+	}
+	return true
 }
 
 func splitRecordsEqual(a, b SplitRecord) bool {
@@ -311,6 +438,105 @@ func (m *MetaRange) Snapshot() MetadataSnapshot {
 		return m.machines[leader].state.snapshot()
 	}
 	return m.machines[m.peers[0]].state.snapshot()
+}
+
+func (m *MetaRange) SetRebalancePolicy(ctx context.Context, policy RebalancePolicy) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	return m.mutate(ctx, func(state *metadataState) error {
+		if policy.Version < state.rebalance.PolicyVersion {
+			return ErrStaleRebalancePlan
+		}
+		if policy.Version == state.rebalance.PolicyVersion && policy != state.rebalance.Policy {
+			return ErrStaleRebalancePlan
+		}
+		state.rebalance.Policy, state.rebalance.PolicyVersion = policy, policy.Version
+		return nil
+	})
+}
+
+func (m *MetaRange) SetRebalancePolicyVersion(ctx context.Context, version uint64) error {
+	policy := DefaultRebalancePolicy()
+	policy.Version = version
+	return m.SetRebalancePolicy(ctx, policy)
+}
+
+func (m *MetaRange) TakeoverRebalanceController(ctx context.Context) (uint64, error) {
+	var epoch uint64
+	err := m.mutate(ctx, func(state *metadataState) error {
+		if state.rebalance.ControllerEpoch == ^uint64(0) {
+			return ErrResourceLimit
+		}
+		state.rebalance.ControllerEpoch++
+		epoch = state.rebalance.ControllerEpoch
+		return nil
+	})
+	return epoch, err
+}
+
+func (m *MetaRange) BeginRebalanceAction(ctx context.Context, action RebalanceAction, at time.Time) (RebalanceActionRecord, error) {
+	return m.BeginRebalanceActionWithLimit(ctx, action, at, MaxRebalanceActionRecords)
+}
+
+func (m *MetaRange) BeginRebalanceActionWithLimit(ctx context.Context, action RebalanceAction, at time.Time, historyLimit uint32) (RebalanceActionRecord, error) {
+	var result RebalanceActionRecord
+	err := m.mutate(ctx, func(state *metadataState) error {
+		control := &state.rebalance
+		if control.PolicyVersion == 0 || control.ControllerEpoch == 0 || control.NextActionID == 0 || action.RangeID == 0 || action.Type < RebalanceMoveReplica || action.Type > RebalanceTransferLeader || historyLimit == 0 || historyLimit > MaxRebalanceActionRecords {
+			return ErrResourceLimit
+		}
+		if uint32(len(control.History)) >= historyLimit { //nolint:gosec // history is bounded by MaxRebalanceActionRecords
+			if control.History[0].State != RebalanceActionSucceeded && control.History[0].State != RebalanceActionFailed {
+				return ErrResourceLimit
+			}
+			copy(control.History, control.History[1:])
+			control.History = control.History[:len(control.History)-1]
+		}
+		action.ActionID = control.NextActionID
+		result = RebalanceActionRecord{Action: cloneRebalanceAction(action), ControllerEpoch: control.ControllerEpoch, PolicyVersion: control.PolicyVersion, State: RebalanceActionPlanned, PlannedAt: at, UpdatedAt: at}
+		control.History = append(control.History, result)
+		control.NextActionID++
+		return nil
+	})
+	return result, err
+}
+
+func (m *MetaRange) AdvanceRebalanceAction(ctx context.Context, actionID uint64, state RebalanceActionState, migrationID MigrationID, splitID SplitID, lastError string, at time.Time, rangeUntil, sourceUntil, targetUntil time.Time) (RebalanceActionRecord, error) {
+	var result RebalanceActionRecord
+	err := m.mutate(ctx, func(meta *metadataState) error {
+		if len(meta.rebalance.History) == 0 {
+			return ErrRangeNotFound
+		}
+		index := len(meta.rebalance.History) - 1
+		record := meta.rebalance.History[index]
+		if record.Action.ActionID != actionID {
+			return ErrStaleRebalancePlan
+		}
+		if record.State == state {
+			result = record
+			return nil
+		}
+		if !legalRebalanceActionTransition(record.State, state) {
+			return ErrStaleRebalancePlan
+		}
+		record.State, record.MigrationID, record.SplitID, record.LastError, record.UpdatedAt = state, migrationID, splitID, lastError, at
+		meta.rebalance.History[index] = record
+		if state == RebalanceActionSucceeded || state == RebalanceActionFailed {
+			if !rangeUntil.IsZero() {
+				meta.rebalance.Cooldowns.Ranges[record.Action.RangeID] = rangeUntil
+			}
+			if record.Action.SourceNodeID != 0 && !sourceUntil.IsZero() {
+				meta.rebalance.Cooldowns.Nodes[record.Action.SourceNodeID] = sourceUntil
+			}
+			if record.Action.TargetNodeID != 0 && !targetUntil.IsZero() {
+				meta.rebalance.Cooldowns.Nodes[record.Action.TargetNodeID] = targetUntil
+			}
+		}
+		result = record
+		return nil
+	})
+	return result, err
 }
 
 // Sync elects a metadata leader and causes retained committed history to be

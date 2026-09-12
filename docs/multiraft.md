@@ -129,3 +129,13 @@ epoch and finishes forward from committed authority. The scheduler transports
 learner traffic using the transition descriptor without exposing the learner
 to ordinary routing; status separates published placement, current Raft voters,
 learners and the desired target.
+
+## 10. Phase 9 rebalancing composition
+
+The collector freezes catalog, node, range, replica and operation observations
+into one canonical snapshot. The pure planner cannot mutate cluster state.
+After fresh-generation validation, `RebalanceController` records its action in
+MetaRange and delegates only to `MoveReplica`, `SplitRange`, or the existing
+leadership-transfer API. Stop disables new plans without aborting either
+certified state machine; restart reconciliation follows their authoritative
+records.

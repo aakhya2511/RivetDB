@@ -136,16 +136,19 @@ transactions, ReadIndex, or leases. Ordinary nontransactional traffic remains
 available through bulk copy and catch-up; a short final write fence is required
 for atomic cutover. No zero-downtime or linearizable-read claim is made.
 
-## 9. Phase 8/9 readiness
+## 9. Phase 8/9 composition
 
 The canonical image, provenance, chunk validation and durable catch-up frontier
-can be reused to bootstrap a replica on a new node. Phase 8 must add placement
+is reused to bootstrap a replica on a new node. Phase 8 adds placement
 edits, ReplicaID rules, joint-consensus membership transition, learner/catch-up
 semantics, deletion proof and transaction interaction. Split does not solve
-those problems. Future rebalancing needs range bytes, read/write rates, apply
-backlog, CPU, placement and split history; Phase 7 gathers no automatic policy.
+those problems. Phase 9 collects mechanically available bytes, read/write
+rates, apply backlog, placement and split/migration state; it does not fake CPU
+or memory attribution.
 
 Phase 8 implements those migration primitives without changing split
 semantics. MetaRange rejects a split and migration on the same range, while
 operations on different ranges may proceed independently. A split child is an
 ordinary ACTIVE range and can subsequently migrate without changing lineage.
+Phase 9 selects an interior current-user-key median and calls this certified
+protocol; it does not reimplement split transfer or cutover.

@@ -114,3 +114,11 @@ home TxnRecords, participant records and prepared intents; ordinary replicated
 transaction commands after snapshot index S reach the learner through normal
 Raft catch-up. Readiness compares full logical digests through promotion
 barrier P before the target can vote.
+
+## 9. Phase 9 rebalancing interaction
+
+Automatic migration uses the unchanged Phase 8 protocol and automatic split
+uses the unchanged Phase 7 transaction fence/drain. The planner observes but
+never interprets intents or changes transaction outcomes. Same-range active
+operations exclude another automatic action; an action failure is recorded and
+cooled down without stopping transaction traffic on unrelated ranges.

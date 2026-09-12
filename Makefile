@@ -20,6 +20,7 @@ MVCC_PKGS ?= ./internal/mvcc ./internal/replicatedrange ./internal/multiraft ./i
 TXN_PKGS ?= ./internal/txn ./internal/multiraft ./internal/replicatedrange ./internal/storage/engine ./internal/storage/pipeline ./internal/storage/compaction
 SPLIT_PKGS ?= ./internal/multiraft ./internal/replicatedrange ./internal/storage/engine
 MIGRATION_PKGS ?= ./internal/raft ./internal/replicatedrange ./internal/multiraft
+REBALANCE_PKGS ?= ./internal/multiraft ./internal/replicatedrange
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -317,6 +318,42 @@ certify-migration: ## Run the Phase 8 gate and every frozen lower-phase certific
 	$(MAKE) migration-stress
 	$(MAKE) migration-chaos
 	$(MAKE) migration-crash
+	$(MAKE) split-stress split-chaos split-crash
+	$(MAKE) txn-stress txn-chaos txn-crash
+	$(MAKE) mvcc-stress mvcc-chaos mvcc-crash
+	$(MAKE) multiraft-stress multiraft-chaos multiraft-crash
+	$(MAKE) range-stress range-crash
+	$(MAKE) raft-stress raft-chaos raft-exhaustive
+	$(MAKE) stress crash exhaustive PKGS="$(LOCAL_PKGS)"
+
+.PHONY: rebalance-test
+rebalance-test: ## Run deterministic Phase 9 telemetry, planner, controller, and integration tests
+	$(GO) test -count=1 -timeout 90m $(TEST_FLAGS) $(REBALANCE_PKGS)
+
+.PHONY: rebalance-race
+rebalance-race: ## Run Phase 9 packages under the race detector
+	$(GO) test -race -count=1 -timeout 90m $(TEST_FLAGS) $(REBALANCE_PKGS)
+
+.PHONY: rebalance-stress
+rebalance-stress: ## Run the 100k-event workload-placement policy model
+	RIVETDB_REBALANCE_STRESS=1 $(GO) test -count=1 -timeout 90m -run '^TestRandomizedRebalancePlannerHeavy$$' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: rebalance-chaos
+rebalance-chaos: ## Run automatic move, split, leadership, restart, and adversarial planner tests
+	$(GO) test -count=1 -timeout 30m -run 'AutomaticRebalance|RebalanceControllerRestart|PlannerRejects|HysteresisAndCooldown' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: rebalance-crash
+rebalance-crash: ## Run controller interruption and certified operation recovery seams
+	RIVETDB_REBALANCE_CRASH=1 $(GO) test -count=1 -timeout 30m -run 'RebalanceController(SubprocessCrashMatrix|Restart)' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: certify-rebalance
+certify-rebalance: ## Run the Phase 9 gate and all frozen Phase 8-through-1 tiers
+	$(MAKE) check
+	$(MAKE) race RACE_COUNT=1
+	$(MAKE) rebalance-stress
+	$(MAKE) rebalance-chaos
+	$(MAKE) rebalance-crash
+	$(MAKE) migration-stress migration-chaos migration-crash
 	$(MAKE) split-stress split-chaos split-crash
 	$(MAKE) txn-stress txn-chaos txn-crash
 	$(MAKE) mvcc-stress mvcc-chaos mvcc-crash

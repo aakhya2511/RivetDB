@@ -492,10 +492,12 @@ The controller runs a fixed pipeline on each cycle:
 collect telemetry  →  detect  →  propose  →  validate  →  admit  →  execute  →  verify
 ```
 
-Detection covers hot ranges (QPS or bytes far above the cluster median),
+Phase 9 implements this pipeline over one canonical immutable snapshot; see
+[rebalancing.md](rebalancing.md). Detection covers hot ranges (QPS or bytes far above the cluster median),
 overloaded nodes, storage imbalance, leadership concentration, and replica
-count imbalance. Proposals are drawn from a fixed vocabulary: `SplitRange`,
-`MoveReplica`, `AddReplica`, `RemoveReplica`, `TransferLeader`.
+count imbalance. Plans use `SplitRange`, `MoveReplica`, and `TransferLeader`.
+Add/remove are internal steps of the Phase 8 migration authority, never
+standalone planner actions.
 
 Validation is a hard gate. A proposal is rejected unless all of these hold:
 

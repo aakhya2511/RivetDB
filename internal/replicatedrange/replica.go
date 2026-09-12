@@ -15,6 +15,7 @@ import (
 	"github.com/rivetdb/rivetdb/internal/clock"
 	"github.com/rivetdb/rivetdb/internal/mvcc"
 	"github.com/rivetdb/rivetdb/internal/raft"
+	"github.com/rivetdb/rivetdb/internal/storage"
 	"github.com/rivetdb/rivetdb/internal/storage/engine"
 	"github.com/rivetdb/rivetdb/internal/txn"
 )
@@ -709,6 +710,51 @@ func (r *Replica) ExportMVCCVersions(ctx context.Context) ([]engine.MVCCVersion,
 		return nil, fmt.Errorf("export range MVCC history: %w", err)
 	}
 	return versions, nil
+}
+
+// RebalanceTelemetry is logical, engine-independent placement input. Bytes
+// include all MVCC history as an estimate; no physical SSTable identity leaks
+// into the controller contract.
+type RebalanceTelemetry struct {
+	LogicalBytes, HistoricalBytes, KeyCount uint64
+	UserKeys                                [][]byte
+	Reads, Writes, Requests                 uint64
+}
+
+func (r *Replica) RebalanceTelemetry(ctx context.Context) (RebalanceTelemetry, error) {
+	versions, err := r.ExportMVCCVersions(ctx)
+	if err != nil {
+		return RebalanceTelemetry{}, err
+	}
+	stats := r.engine.Stats()
+	result := RebalanceTelemetry{Reads: stats.Gets + stats.Scans, Writes: stats.Puts + stats.Deletes}
+	result.Requests = result.Reads + result.Writes
+	var previous []byte
+	haveUser, choseCommitted := false, false
+	for _, version := range versions {
+		result.HistoricalBytes = saturatingTelemetryAdd(result.HistoricalBytes, uint64(len(version.Key)+len(version.Value)+9)) //nolint:gosec // key/value lengths are bounded
+		if !haveUser || !bytes.Equal(previous, version.Key) {
+			previous = bytes.Clone(version.Key)
+			haveUser, choseCommitted = true, false
+		}
+		if choseCommitted || version.Kind != storage.KindValue && version.Kind != storage.KindDelete {
+			continue
+		}
+		choseCommitted = true
+		if version.Kind == storage.KindValue {
+			result.UserKeys = append(result.UserKeys, bytes.Clone(version.Key))
+			result.KeyCount++
+			result.LogicalBytes = saturatingTelemetryAdd(result.LogicalBytes, uint64(len(version.Key)+len(version.Value))) //nolint:gosec // key/value lengths are bounded
+		}
+	}
+	return result, nil
+}
+
+func saturatingTelemetryAdd(left, right uint64) uint64 {
+	if ^uint64(0)-left < right {
+		return ^uint64(0)
+	}
+	return left + right
 }
 
 func (r *Replica) CommittedEntries(from, through uint64) ([]raft.Entry, error) {

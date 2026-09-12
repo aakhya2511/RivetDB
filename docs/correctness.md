@@ -4,7 +4,7 @@ A distributed database is only as credible as the evidence that it is correct.
 This document describes how RivetDB produces that evidence, and — equally
 important — states the boundary of what is currently checked.
 
-**Current scope:** Phases 0–6 exist: the complete local LSM, deterministic Raft,
+**Current scope:** Phases 0–9 exist: the complete local LSM, deterministic Raft,
 durable replicated range, static Multi-Raft composition, and replicated MVCC
 history with range-local snapshots, plus Snapshot Isolation transactions and
 cross-range atomic commit. There is no network service, general distributed
@@ -367,9 +367,10 @@ Stated plainly, because an unlisted gap reads as a claim:
 - **Integrated Raft/LSM snapshots.** Snapshot export and replace-state restore
   are deferred. Integrated ranges retain required history and do not expose log
   compaction.
-- **Replica migration and placement.** Phase 7 has replicated dynamic metadata
-  and online splitting, but no replica migration, automatic placement,
-  rebalancing, dynamic user-range membership, or range merge.
+- **Placement limits.** Phase 9 has automatic placement, splitting and leader
+  balancing over the Phase 7/8 authorities. Its failure domain is NodeID; it
+  has no topology/locality model, range merge, drain workflow, CPU/memory
+  attribution, or performance-improvement claim.
 - **Serializable or linearizable distributed reads.** Phase 6 certifies
   Snapshot Isolation transaction snapshots and atomic write commit. It does not
   add SSI, predicate validation, ReadIndex, leases, external consistency or a
@@ -432,3 +433,15 @@ ReplicaID allocation, stale-message rejection, durable retirement and real
 deletion, plus abrupt subprocess recovery at partial-transfer, installed-
 snapshot, joint, final-config, metadata-cutover and deletion boundaries. It
 composes the exact Phase 7 and lower certification tiers.
+
+### Phase 9 workload-aware rebalancing gate
+
+`make certify-rebalance` adds injected-clock rates and integer EWMA tests,
+warm-up/reset/overflow handling, shuffled-input determinism, hard placement
+filters, hysteresis and durable cooldowns, 10,000-event fixed/fresh reference
+campaigns and an opt-in 100,000-event campaign. Integration tests prove that
+automatic plans invoke the certified move, split and leadership-transfer
+paths. Abrupt subprocess exits cover action durability, operation submission,
+and operation completion before controller-history completion; restart
+reconciles the existing operation without duplication. The target composes
+the exact Phase 8 through Phase 1 tiers.

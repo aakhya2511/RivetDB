@@ -84,3 +84,10 @@ encodes every committed MVCC version, tombstone, intent, abort marker,
 transaction/participant record, applied watermark and HLC floor. Target restore
 is incremental and durable, and a logical digest—not physical SSTable layout—
 proves equivalence through the promotion barrier. Migration adds no MVCC GC.
+
+## 8. Phase 9 telemetry and split keys
+
+Telemetry derives latest committed logical bytes and distinct current user
+keys from canonical all-version export. Historical bytes remain a movement-cost
+estimate. The planner never splits an encoded internal key and never drops or
+rewrites a version; all state movement remains owned by the Phase 7/8 protocols.

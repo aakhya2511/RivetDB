@@ -4,14 +4,14 @@ RivetDB is an experimental database built from first principles. Its local LSM
 storage engine, Raft core, durable replicated ranges, static Multi-Raft node,
 range catalog, mutation router, replicated MVCC versions, range-local
 historical snapshots, Snapshot Isolation transactions with cross-range 2PC,
-transaction-safe online range splitting, and explicitly driven online replica
-migration are implemented; workload-adaptive placement does not exist yet.
+transaction-safe online range splitting, online replica migration, and a
+deterministic workload-aware placement controller are implemented.
 
 Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 8 complete — online replica migration certified.**
+> **Project status: Phase 9 complete — workload-aware rebalancing certified.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -58,6 +58,10 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > learners, bounded checksummed snapshot/bootstrap state transfer, Raft
 > catch-up, joint-consensus membership transition, leadership transfer,
 > replicated placement metadata, and crash-safe old-replica retirement.
+> Phase 9 adds injected-clock telemetry and integer EWMA rates, immutable
+> canonical planning snapshots, hard placement/capacity filters, projected
+> load scoring, deterministic move/split/leader plans, replicated action and
+> cooldown state, and restart reconciliation through the Phase 7/8 authorities.
 >
 > **There is no distributed read protocol, network database service, server or
 > client yet.** Phase 4/5 local inspection and historical snapshots are
@@ -178,6 +182,7 @@ make certify-mvcc   # Phase 5 MVCC gate plus every lower regression gate
 make certify-txn    # Phase 6 transaction gate plus every lower regression gate
 make certify-split  # Phase 7 online split gate plus every lower regression gate
 make certify-migration # Phase 8 migration gate plus every lower regression gate
+make certify-rebalance # Phase 9 controller gate plus every lower regression tier
 make benchmark      # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover     # coverage profile and HTML report
 make help      # all targets
@@ -212,7 +217,7 @@ or CI execution modifying the working tree.
 
 ## What is implemented today
 
-The Phase 0 foundation and completed Phase 1–7 units. Each piece exists because
+The Phase 0 foundation and completed Phase 1–9 units. Each piece exists because
 a later phase cannot be tested honestly without it.
 
 | Package | Purpose |
@@ -222,7 +227,7 @@ a later phase cannot be tested honestly without it.
 | [`internal/storage`](internal/storage) | Integrated local LSM engine over internal-key/write-batch codecs, WAL, skip-list MemTables, SSTables, bounded FIFO flush, Manifest/VersionSet authority and version-preserving L0-to-L1 compaction. |
 | [`internal/raft`](internal/raft) | Deterministic static-membership Raft with durable term/vote/log, quorum commit, ordered apply, snapshots, crash/restart and an adversarial simulator. |
 | [`internal/replicatedrange`](internal/replicatedrange) | One range-scoped Raft replica, WAL-free Raft-index LSM application, MVCC/transaction commands, split fences, shadow/active/retired lifecycle, logical bootstrap and parent replay provenance. |
-| [`internal/multiraft`](internal/multiraft) | Range hosting/routing plus the replicated MetaRange, monotonic metadata allocators, immutable lineage, online split coordinator, dynamic lifecycle and bounded stale-router refresh. |
+| [`internal/multiraft`](internal/multiraft) | Range hosting/routing plus replicated metadata, online split/migration coordinators, and the deterministic telemetry/planning/execution/reconciliation controller. |
 | [`internal/mvcc`](internal/mvcc) | Canonical 48-bit physical/16-bit logical HLC timestamps with injected time, observation, regression resistance and explicit exhaustion. |
 | [`internal/txn`](internal/txn) | Canonical transaction IDs, records, participants, intents and bounded hostile-input-safe protocol codecs. |
 | [`internal/invariant`](internal/invariant) | Named, typed assertions so a violation identifies itself, plus an `Expensive()` tier for O(n) structural checks enabled in tests and chaos runs. |
@@ -246,12 +251,6 @@ SSD with `RIVETDB_BENCH_DIR`; no volume name is hard-coded.
 Everything here is designed and specified but **not yet built**. Each links to
 its phase gate.
 
-- **Online range splitting and replica migration** — reconfiguration as
-  restartable state machines, with the data plane serving throughout.
-  [Phases 7–8](docs/roadmap.md#phase-7--range-splitting-)
-- **Workload-aware rebalancing** — the signature feature, with a before/after
-  experiment on a skewed workload.
-  [Phase 9](docs/roadmap.md#phase-9--workload-aware-rebalancer-)
 - **Chaos and correctness campaigns** — fault injection, seeded randomized
   campaigns, history-based consistency checking.
   [Phase 10](docs/roadmap.md#phase-10--chaos-and-correctness-)

@@ -23,7 +23,7 @@ find than to prevent.
 | 6 | Distributed transactions | ✅ |
 | 7 | Online range splitting | ✅ complete |
 | 8 | Online replica migration | ✅ |
-| 9 | Workload-aware rebalancer | ⬜ |
+| 9 | Workload-aware rebalancer | ✅ complete |
 | 10 | Chaos and correctness campaigns | ⬜ |
 | 11 | Performance engineering | ⬜ |
 | 12 | Optional AI operator | ⬜ |
@@ -292,29 +292,30 @@ through deletion · full lower-phase regression (`MIGRATE-1` through
 
 ---
 
-## Phase 9 — Workload-aware rebalancer ⬜
+## Phase 9 — Workload-aware rebalancer ✅
 
 The signature feature.
 
-**Build:** per-range telemetry collection and aggregation · hotspot, node
+**Built:** per-range telemetry collection and aggregation · hotspot, node
 overload, storage imbalance and leader concentration detectors · the proposal
 generator · the safety validator · the admission controller with cooldown and
-concurrency limits.
+concurrency limits · replicated controller epoch/action history · dry-run plans
+· certified migration/split/leadership execution adapters.
 
 **Gate:** an artificially created hot range is detected · the proposed action
 is the expected one, asserted by a unit test with a synthetic telemetry
-snapshot and no cluster · execution completes under load · safety constraints
-provably gate every action · a stable workload reaches a fixed point without
-oscillating (BALANCE-1 through BALANCE-5) · **the before/after experiment
-below**.
+snapshot and no cluster · execution completes through the Phase 7/8 protocols ·
+safety constraints gate every action · a stable workload reaches a fixed point
+without oscillating (`REBALANCE-1` through `REBALANCE-18`).
 
-### The signature experiment
+### Deferred Phase 11 performance experiment
 
-Five nodes, 32 ranges, 70% of traffic on two ranges. Measure per-node CPU, P50
+Five nodes, 32 ranges, 70% of traffic on two ranges. Phase 11 will measure per-node CPU, P50
 and P99 latency, throughput and range distribution before rebalancing; enable
 the controller; measure the same afterwards. Publish the method, the raw data,
 the seed and the numbers — including any that are unflattering. Fabricated or
-cherry-picked results would defeat the purpose of building this.
+cherry-picked results would defeat the purpose of building this. Phase 9 does
+not publish a performance improvement claim from this correctness gate.
 
 ---
 
@@ -352,7 +353,7 @@ No optimisation is claimed without a before-and-after number.
 Only after the database gates pass. A component that consumes telemetry and
 explains *why* a range is hot or a node is overloaded, and suggests actions.
 Its suggestions enter the same validator as every other proposal
-(BALANCE-2) — it recommends, it never executes, and no database correctness
+(REBALANCE-2) — it recommends, it never executes, and no database correctness
 property depends on it.
 
 ---

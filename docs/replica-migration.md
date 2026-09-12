@@ -107,6 +107,7 @@ Migration installs no transaction or user-write fence during bootstrap and
 catch-up. Prepared intents and home records remain live. A leader-source move
 has a bounded transfer window and does not claim zero downtime. Same-range
 split/migration and multiple membership changes are rejected; operations on
-different ranges may overlap. Phase 8 contains no automatic placement,
-rebalancing policy, automatic trigger, merge, MVCC/transaction GC, stronger
+different ranges may overlap. Phase 9 may select and submit `MoveReplica`, but
+does not alter any migration state transition or authority rule. The system
+still contains no range merge, MVCC/transaction GC, stronger
 isolation, ReadIndex, leases, SQL, or AI operator.

@@ -12,7 +12,7 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phases 0–8 are complete and certified. Phase 9 automatic rebalancing is next.**
+**Phases 0–9 are complete and certified. Phase 10 chaos hardening is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -28,8 +28,10 @@ a reserved replicated MetaRange, canonical dynamic catalog/ID authority,
 logical all-version transfer, delta replay, transaction fence/drain, atomic
 cutover and immutable lineage. Phase 8 adds learners, logical Raft snapshots,
 joint consensus, explicit migration records, placement cutover, and durable
-replica retirement. There is no server, client, distributed read protocol, or
-automatic placement/rebalancing policy.
+replica retirement. Phase 9 adds canonical workload telemetry, a deterministic
+pure planner, hard placement validation, replicated controller action/cooldown
+state, and execution through the certified Phase 7/8 APIs. There is no server,
+client, distributed read protocol, topology/locality model, or range merge.
 `internal/mvcc` plus the Phase 5 replicated-range/storage extensions provide
 replicated HLC versions and range-local historical read-only snapshots.
 `internal/txn` plus the Multi-Raft transaction coordinator provide replicated
@@ -91,6 +93,7 @@ make raft-stress # 100k-event simulation and durable-store stress
 make raft-chaos # fixed/fresh adversarial cluster schedules
 make raft-exhaustive # every-byte Raft-store campaigns
 make certify-raft # complete Phase 2 gate plus certify-local
+make certify-rebalance # complete Phase 9 gate plus every frozen lower tier
 make benchmark # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover    # coverage profile + HTML report in bin/
 make tidy     # go mod tidy, fails if it was not already tidy

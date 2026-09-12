@@ -420,13 +420,26 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 
 ## Rebalancing
 
-| ID | Invariant | Status |
-|---|---|---|
-| BALANCE-1 | The controller is deterministic: identical telemetry and configuration yield an identical plan. | planned (Phase 9) |
-| BALANCE-2 | No proposal executes without passing the safety validator, regardless of its source. | planned (Phase 9) |
-| BALANCE-3 | Concurrent migrations never exceed the configured maximum. | planned (Phase 9) |
-| BALANCE-4 | A range that has just been reconfigured is not reconfigured again before its cooldown expires. | planned (Phase 9) |
-| BALANCE-5 | The controller does not oscillate: a stable workload reaches a fixed point and stops proposing actions. | planned (Phase 9) |
+| ID | Invariant | Status | Evidence |
+|---|---|---|---|
+| REBALANCE-1 | Identical canonical telemetry and policy produce an identical ordered plan. | verified (Phase 9) | `TestPlanRebalanceDeterministicUnderShuffledInput`, `TestRandomizedRebalancePlannerModel` |
+| REBALANCE-2 | The planner never mutates membership or catalog ownership; execution uses certified APIs. | verified (Phase 9) | `TestAutomaticRebalanceUsesCertifiedMoveReplica`, `TestAutomaticRebalanceUsesCertifiedSplitRange` |
+| REBALANCE-3 | Every replica move satisfies placement uniqueness, replication factor and identity constraints. | verified (Phase 9) | `TestPlannerRejectsFailedFullAndDuplicateTargets`, randomized policy model |
+| REBALANCE-4 | Every split targets an active splittable range and a valid interior user key. | verified (Phase 9) | `TestPlanSplitUsesUserKeyMedianAndRejectsOneKey`, `TestHotTinyRangeDoesNotSplit` |
+| REBALANCE-5 | Cluster and per-node operation concurrency never exceed policy. | verified (Phase 9) | planner constraint tests and randomized policy model |
+| REBALANCE-6 | Split and migration remain mutually exclusive for one range. | verified (Phase 9) | Phase 7/8 exclusion tests plus operation snapshot filtering |
+| REBALANCE-7 | Hysteresis and durable cooldown prevent immediate reverse movement. | verified (Phase 9) | `TestPlanRebalanceHysteresisAndCooldown` |
+| REBALANCE-8 | Stale catalog/range/replica telemetry cannot execute. | verified (Phase 9) | `TestValidateRebalancePlanRejectsStaleCatalog` |
+| REBALANCE-9 | Controller restart cannot duplicate an authoritative migration or split. | verified (Phase 9) | `TestRebalanceControllerSubprocessCrashMatrix` |
+| REBALANCE-10 | Failed, unavailable or full nodes are never selected as targets. | verified (Phase 9) | `TestPlannerRejectsFailedFullAndDuplicateTargets` |
+| REBALANCE-11 | Learners and retired replicas are excluded from normal balance counts. | verified (Phase 9) | collector role filtering and Phase 8 learner tests |
+| REBALANCE-12 | Leader transfer uses only healthy caught-up voters. | verified (Phase 9) | `TestPlanPrefersLeaderTransferForLeaderOnlySkew`, Phase 8 lagging-transfer tests |
+| REBALANCE-13 | A static feasible workload reaches a no-op state within tolerance. | verified (Phase 9) | `TestProjectedMoveConvergesWithoutReverseChurn` |
+| REBALANCE-14 | Unchanged converged telemetry cannot cause perpetual movement. | verified (Phase 9) | `TestProjectedMoveConvergesWithoutReverseChurn`, cooldown test |
+| REBALANCE-15 | No automatic action reduces replication safety. | verified (Phase 9) | automatic integration tests plus composed Phase 7/8 gates |
+| REBALANCE-16 | Automatic actions preserve MVCC and transaction semantics through certified execution. | verified (Phase 9) | automatic migration bank-total and historical-read assertions |
+| REBALANCE-17 | Action history and cooldown survive controller restart. | verified (Phase 9) | `TestRebalanceControllerRestartReconcilesCompletedSplit`, control codec test |
+| REBALANCE-18 | Every action records reason, cost and expected benefit. | verified (Phase 9) | `TestRebalanceControlReplicatesAndCodecRoundTrips` |
 
 ## Foundation
 
