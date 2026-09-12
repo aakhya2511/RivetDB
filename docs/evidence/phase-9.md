@@ -5,7 +5,7 @@
 - Hardware: Apple M4, arm64
 - OS: macOS 15.7.4 (24G517)
 - Go: 1.25.14 darwin/arm64 (`GOTOOLCHAIN=local`)
-- Repository: `/Users/aakhy/Documents/RivetDB`
+- Repository: clean local checkout
 - Build cache: `/private/tmp/rivet-phase9-closure-cache`
 - Test temporary root: `/private/tmp/rivet-phase9-closure-tmp`
 - Filesystem: APFS, nearly full during closure work

@@ -24,3 +24,8 @@ coverage.html
 .idea/
 .vscode/
 *.swp
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example

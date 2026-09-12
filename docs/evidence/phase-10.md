@@ -5,7 +5,7 @@
 - Hardware: Apple M4, arm64
 - OS: macOS 15.7.4 (24G517)
 - Go floor: 1.25.14 darwin/arm64 (`GOTOOLCHAIN=local`)
-- Repository: `/Users/aakhy/Documents/RivetDB`
+- Repository: clean local checkout
 - Build/test cache: `/private/tmp/rivet-phase10-*`
 - Durable test roots: RivetDB-owned directories below the configured `TMPDIR`
 - Filesystem: APFS, 228 GiB volume, 3.1 GiB free and 99% utilized before final gate
