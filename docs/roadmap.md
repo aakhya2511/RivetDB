@@ -24,7 +24,7 @@ find than to prevent.
 | 7 | Online range splitting | ✅ complete |
 | 8 | Online replica migration | ✅ |
 | 9 | Workload-aware rebalancer | ✅ complete |
-| 10 | Chaos and correctness campaigns | ⬜ |
+| 10 | Chaos and correctness campaigns | ✅ complete |
 | 11 | Performance engineering | ⬜ |
 | 12 | Optional AI operator | ⬜ |
 
@@ -319,18 +319,21 @@ not publish a performance improvement claim from this correctness gate.
 
 ---
 
-## Phase 10 — Chaos and correctness ⬜
+## Phase 10 — Chaos and correctness ✅
 
-**Build:** the fault-injection framework (`KillNode`, `RestartNode`,
-`PauseNode`, `DropMessage`, `DelayMessage`, `DuplicateMessage`,
-`PartitionNodes`, `HealPartition`, `ThrottleDisk`, `ThrottleNetwork`,
-`CorruptWALRecord`) · seeded randomized campaigns · a history recorder · a
-consistency checker for whatever RivetDB actually claims.
+**Built:** a versioned deterministic scheduler · bounded event trace · global
+logical catalog/membership/MVCC/transaction/operation reference model · cheap
+continuous and periodic digest checkers · directed network, node/range,
+controller, MetaRange and full-restart fault events · explicit overlap matrix ·
+real five-node FileStore/LSM composition · combined abrupt-process crash tier ·
+resource and orphan audits.
 
-**Gate:** long campaigns run repeatedly with no invariant violation · every
-failure's seed is committed and replays deterministically · the checker's scope
-is documented precisely, and any property it does not check is listed as
-unchecked.
+**Gate:** fixed/fresh normal campaigns total at least 100,000 events · a
+one-million-event heavy run · exact replay and earliest-prefix reporting ·
+continuous `CHAOS-1` through `CHAOS-16` checks · durable transaction, split,
+migration, joint consensus, controller, historical MVCC and full-restart
+composition · every Phase 1--9 gate remains green. See
+[chaos-testing.md](chaos-testing.md) and [evidence/phase-10.md](evidence/phase-10.md).
 
 ---
 

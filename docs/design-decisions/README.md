@@ -50,6 +50,7 @@ Phase:    which phase this governs
 | [0019](0019-online-range-splitting-and-replicated-metadata.md) | Online range splitting and replicated metadata authority | Accepted | 7 |
 | [0020](0020-online-replica-migration-and-joint-consensus.md) | Online replica migration with learners and joint consensus | Accepted | 8 |
 | [0021](0021-workload-aware-deterministic-rebalancing.md) | Workload-aware deterministic rebalancing | Accepted | 9 |
+| [0022](0022-compositional-distributed-chaos.md) | Compositional distributed chaos and reference-model certification | Accepted | 10 |
 
 ## Planned
 

@@ -336,24 +336,35 @@ func (m *stateMachine) restoreSnapshot(encoded []byte) error { //nolint:contextc
 	if err != nil {
 		return fmt.Errorf("read durable apply frontier: %w", err)
 	}
+	existing, exportErr := m.engine.ExportMVCCVersions(context.Background(), nil, nil)
+	if exportErr != nil {
+		return fmt.Errorf("export existing MVCC state: %w", exportErr)
+	}
+	identity := func(v engine.MVCCVersion) string {
+		b := appendBytes(nil, v.Key)
+		b = binary.LittleEndian.AppendUint64(b, v.Timestamp)
+		b = append(b, byte(v.Kind))
+		return string(b)
+	}
+	have := make(map[string][]byte, len(existing))
+	for _, v := range existing {
+		have[identity(v)] = v.Value
+	}
 	if durable > image.applied {
-		return ErrSnapshotBehind
+		// A learner may flush a caught-up suffix after installing its durable
+		// bootstrap snapshot. Its LSM frontier can therefore legitimately be
+		// ahead of the Raft snapshot retained for restart. Accept that ordering
+		// only when every version asserted by the older snapshot is already
+		// present byte-for-byte; later entries remain the authority for rebuilding
+		// transaction and split metadata after consensus re-establishes commitment.
+		for _, v := range image.versions {
+			value, ok := have[identity(v)]
+			if !ok || !bytes.Equal(value, v.Value) {
+				return ErrSnapshotBehind
+			}
+		}
 	}
 	if durable <= image.applied {
-		existing, exportErr := m.engine.ExportMVCCVersions(context.Background(), nil, nil)
-		if exportErr != nil {
-			return fmt.Errorf("export existing MVCC state: %w", exportErr)
-		}
-		identity := func(v engine.MVCCVersion) string {
-			b := appendBytes(nil, v.Key)
-			b = binary.LittleEndian.AppendUint64(b, v.Timestamp)
-			b = append(b, byte(v.Kind))
-			return string(b)
-		}
-		have := make(map[string][]byte, len(existing))
-		for _, v := range existing {
-			have[identity(v)] = v.Value
-		}
 		versions := make([]engine.MVCCVersion, 0, len(image.versions))
 		for _, v := range image.versions {
 			if value, ok := have[identity(v)]; ok {
@@ -402,7 +413,8 @@ func (m *stateMachine) restoreSnapshot(encoded []byte) error { //nolint:contextc
 	for _, r := range image.participants {
 		m.participants[r.ID] = txn.CloneParticipant(r)
 	}
-	m.maxApplied, m.safeRead = mvcc.Timestamp(image.maxApplied), mvcc.Timestamp(image.safeRead)
+	m.maxApplied = max(m.maxApplied, mvcc.Timestamp(image.maxApplied))
+	m.safeRead = mvcc.Timestamp(image.safeRead)
 	m.clock.Observe(mvcc.Timestamp(image.hlc))
 	if m.lifecycle != LifecycleLearner {
 		m.lifecycle = image.lifecycle

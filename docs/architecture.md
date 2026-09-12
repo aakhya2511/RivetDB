@@ -571,8 +571,9 @@ RivetDB assumes:
   recovery from a corrupt replica is to rebuild it from a peer.
 
 What is *not* assumed, and therefore must be tested: that any of this is
-handled correctly. The fault-injection framework, chaos campaigns and invariant
-checks in [correctness.md](correctness.md) exist to produce that evidence.
+handled correctly. The fault schedules, two-tier chaos campaigns and invariant
+checks in [chaos-testing.md](chaos-testing.md) and
+[correctness.md](correctness.md) produce bounded evidence.
 
 ---
 
@@ -606,6 +607,7 @@ internal/storage/     key/batch, WAL, MemTable, SSTable writer/reader and flush 
 internal/raft/        deterministic Raft core, stores and simulator
 internal/replicatedrange/ one durable Raft-to-LSM replica
 internal/multiraft/   static catalog, node registry, shared transport/scheduler and router
+internal/chaos/       deterministic bounded global logical model and replay trace
 docs/                 this document, invariants, roadmap, ADRs
 ```
 

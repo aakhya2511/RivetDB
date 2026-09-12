@@ -11,7 +11,7 @@ Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 9 complete — workload-aware rebalancing certified.**
+> **Project status: Phase 10 complete — compositional chaos certified.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -62,6 +62,10 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > canonical planning snapshots, hard placement/capacity filters, projected
 > load scoring, deterministic move/split/leader plans, replicated action and
 > cooldown state, and restart reconciliation through the Phase 7/8 authorities.
+> Phase 10 composes every certified subsystem in a deterministic global
+> reference model (including a one-million-event heavy campaign) and a real
+> five-node durable crash/recovery campaign with bounded replay traces,
+> continuous invariants, historical digests and resource audits.
 >
 > **There is no distributed read protocol, network database service, server or
 > client yet.** Phase 4/5 local inspection and historical snapshots are
@@ -183,6 +187,10 @@ make certify-txn    # Phase 6 transaction gate plus every lower regression gate
 make certify-split  # Phase 7 online split gate plus every lower regression gate
 make certify-migration # Phase 8 migration gate plus every lower regression gate
 make certify-rebalance # Phase 9 controller gate plus every lower regression tier
+make chaos-test       # Phase 10 normal model and targeted composition
+make chaos-stress     # deterministic one-million-event global model
+make chaos-durable    # real five-node FileStore/LSM composition
+make certify-chaos    # Phase 10 gate plus every Phase 1-9 gate
 make benchmark      # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover     # coverage profile and HTML report
 make help      # all targets

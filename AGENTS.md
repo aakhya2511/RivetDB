@@ -12,7 +12,7 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phases 0–9 are complete and certified. Phase 10 chaos hardening is next.**
+**Phases 0–10 are complete and certified. Phase 11 performance engineering is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -37,6 +37,12 @@ replicated HLC versions and range-local historical read-only snapshots.
 `internal/txn` plus the Multi-Raft transaction coordinator provide replicated
 intents/records, Snapshot Isolation, cross-range 2PC and epoch-fenced recovery.
 There is still no MVCC, tombstone or transaction-record GC.
+
+Phase 10 adds `internal/chaos`: a bounded deterministic global logical model,
+exact replay trace and continuous/periodic invariant checkers. Its real durable
+tier composes the existing five-node FileStore/LSM, transaction, split,
+migration, controller and restart fixtures. See `docs/chaos-testing.md`; do not
+turn Phase 11 profiling into feature work or weaken the inherited gate.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for
@@ -94,6 +100,10 @@ make raft-chaos # fixed/fresh adversarial cluster schedules
 make raft-exhaustive # every-byte Raft-store campaigns
 make certify-raft # complete Phase 2 gate plus certify-local
 make certify-rebalance # complete Phase 9 gate plus every frozen lower tier
+make chaos-test # bounded Phase 10 model and targeted overlap tests
+make chaos-stress # one-million-event deterministic model
+make chaos-durable # real five-node durable composition
+make certify-chaos # complete Phase 10 plus every frozen lower tier
 make benchmark # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover    # coverage profile + HTML report in bin/
 make tidy     # go mod tidy, fails if it was not already tidy

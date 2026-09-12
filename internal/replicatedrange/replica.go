@@ -580,6 +580,13 @@ func (r *Replica) syncAppliedLocked() error {
 	if status.LastApplied == 0 {
 		return nil
 	}
+	durable, err := r.engine.DurableAppliedRaftIndex()
+	if err != nil {
+		return fmt.Errorf("read durable progress before Raft sync: %w", err)
+	}
+	if status.LastApplied <= durable {
+		return nil
+	}
 	if err := r.engine.AdvanceApplied(status.LastApplied); err != nil {
 		return fmt.Errorf("publish no-op applied progress: %w", err)
 	}

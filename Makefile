@@ -21,6 +21,7 @@ TXN_PKGS ?= ./internal/txn ./internal/multiraft ./internal/replicatedrange ./int
 SPLIT_PKGS ?= ./internal/multiraft ./internal/replicatedrange ./internal/storage/engine
 MIGRATION_PKGS ?= ./internal/raft ./internal/replicatedrange ./internal/multiraft
 REBALANCE_PKGS ?= ./internal/multiraft ./internal/replicatedrange
+CHAOS_PKGS ?= ./internal/chaos ./internal/multiraft ./internal/replicatedrange
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -361,6 +362,42 @@ certify-rebalance: ## Run the Phase 9 gate and all frozen Phase 8-through-1 tier
 	$(MAKE) range-stress range-crash
 	$(MAKE) raft-stress raft-chaos raft-exhaustive
 	$(MAKE) stress crash exhaustive PKGS="$(LOCAL_PKGS)"
+
+.PHONY: chaos-test
+chaos-test: ## Run Phase 10 deterministic normal/model and targeted composition tests
+	$(GO) test -count=1 -timeout 30m -run 'Chaos(Config|ModelNormal|ModelReplay|Trace|TargetedOverlap)|Phase10' $(TEST_FLAGS) $(CHAOS_PKGS)
+
+.PHONY: chaos-race
+chaos-race: ## Run bounded Phase 10 model and composition infrastructure under race
+	$(GO) test -race -count=1 -timeout 30m -run 'Chaos(Config|ModelReplay|Trace|TargetedOverlap)|Phase10' $(TEST_FLAGS) $(CHAOS_PKGS)
+
+.PHONY: chaos-stress
+chaos-stress: ## Run the deterministic 1,000,000-event global model campaign
+	RIVETDB_CHAOS_STRESS=1 $(GO) test -count=1 -timeout 60m -run '^TestChaosModelHeavy$$' $(TEST_FLAGS) ./internal/chaos
+
+.PHONY: chaos-durable
+chaos-durable: ## Run real five-node FileStore/LSM compositional chaos
+	RIVETDB_CHAOS_DURABLE=1 $(GO) test -count=1 -timeout 60m -run '^TestPhase10RealDurableCompositionalChaos$$' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: chaos-crash
+chaos-crash: ## Run transaction, split, migration, and controller subprocess exits together
+	RIVETDB_TXN_CRASH=1 RIVETDB_SPLIT_CRASH=1 RIVETDB_MIGRATION_CRASH=1 RIVETDB_REBALANCE_CRASH=1 \
+		$(GO) test -count=1 -timeout 60m -run '(Transaction|Split|Migration|RebalanceController)SubprocessCrashMatrix' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: chaos-overnight
+chaos-overnight: ## Run the optional 5,000,000-event model plus durable/crash tiers
+	RIVETDB_CHAOS_OVERNIGHT=1 $(GO) test -count=1 -timeout 6h -run '^TestChaosModelOvernight$$' $(TEST_FLAGS) ./internal/chaos
+	$(MAKE) chaos-durable chaos-crash
+
+.PHONY: certify-chaos
+certify-chaos: ## Run the complete Phase 10 gate and every inherited Phase 1-9 gate
+	$(MAKE) check
+	$(MAKE) chaos-test
+	$(MAKE) chaos-race
+	$(MAKE) chaos-stress
+	$(MAKE) chaos-durable
+	$(MAKE) chaos-crash
+	$(MAKE) certify-rebalance
 
 .PHONY: diff-check
 diff-check: ## Fail on whitespace errors in the working diff

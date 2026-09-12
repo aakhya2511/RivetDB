@@ -220,11 +220,12 @@ loss, selected delay/delivery, duplication, reordering and partitions. The
 simulator records bounded deterministic traces. Disk throttling, process-level
 network adapters and cross-subsystem faults remain Phase 10 work.
 
-*Planned (Phase 10).* A system-wide controllable framework supporting `KillNode`,
-`RestartNode`, `PauseNode`, `DropMessage`, `DelayMessage`, `DuplicateMessage`,
-`PartitionNodes`, `HealPartition`, `ThrottleDisk`, `ThrottleNetwork` and
-`CorruptWALRecord`. Faults are scheduled from the run's seed, so a campaign is
-reproducible.
+Phase 10 adds one seeded vocabulary for node/range crash and restart,
+drop/delay/duplicate/reorder, directed range and node partitions, controller
+and MetaRange outage, storage maintenance, split, migration, transactions and
+leadership. Real short-write/fsync/corruption semantics remain in certified
+component injectors rather than being approximated unsafely in the logical
+model. See [chaos-testing.md](chaos-testing.md).
 
 Asymmetric partitions get particular attention: they produce the stale-leader
 scenarios that a symmetric partition test never reaches, and those are where
@@ -232,18 +233,16 @@ consensus implementations most often turn out to be wrong.
 
 ### 2.6 Chaos campaigns
 
-Phase 2 implements bounded seeded consensus campaigns against an in-memory
-state machine. *Planned (Phase 10):* long randomized runs of the integrated
-database under concurrent client load while faults are injected continuously,
-with invariants checked during and after. Campaigns run on a schedule rather
-than per-commit, and every failure's
-seed is committed to the corpus so it becomes a fast deterministic regression
-test on every subsequent build.
+Phase 10 composes a high-event deterministic global logical model with a
+lower-count real durable five-node campaign. Cheap invariants run continuously
+and expensive digests run periodically and after healing. Failures print the
+seed and earliest failing prefix; seeds enter the tracked corpus only through
+explicit promotion.
 
 ### 2.7 History-based consistency checking
 
-*Planned (Phase 10).* Clients record every operation as an invocation and a
-response with timestamps:
+Phase 10's bounded trace records each scheduled model operation and result with
+logical time and authority identities:
 
 ```text
 {client: 3, op: write, key: x, value: 1, invoked: t0, returned: t1}
@@ -448,3 +447,14 @@ tests prove automatic execution, expected/actual score improvement, bank and
 historical/latest digest preservation, and same-ID recovery after node failure.
 Abrupt subprocess exits cover five controller/operation boundaries. The target
 composes the exact Phase 8 through Phase 1 tiers.
+
+### Phase 10 compositional chaos gate
+
+`make certify-chaos` adds fixed/fresh 120,000-event normal campaigns, an exact
+one-million-event heavy campaign, bounded replay traces, continuous logical
+authority checks, targeted overlap pairs/triples, a real five-node durable
+campaign and the transaction/split/migration/controller subprocess matrices.
+The durable campaign uses actual FileStores, MVCC LSMs, Manifests, SSTables and
+snapshot staging, then performs a full-cluster restart and logical comparison.
+The target composes `make certify-rebalance`, hence every Phase 1--9 gate.
+`make chaos-overnight` is the separate five-million-event scheduled tier.

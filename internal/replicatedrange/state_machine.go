@@ -272,7 +272,12 @@ func (m *stateMachine) applyTransaction(entry raft.Entry, command Command, alrea
 }
 
 func (m *stateMachine) applyCreate(operation txn.Operation) error {
-	if operation.Home.RangeID != uint64(m.rangeID) || operation.Home.Generation != m.generation {
+	// Migration advances the descriptor generation without changing RangeID or
+	// key authority. Recovery may replay a transaction record admitted under an
+	// older generation after opening the replica with the committed newer one.
+	// A future generation is impossible; an older same-range generation is
+	// durable history and must remain replayable.
+	if operation.Home.RangeID != uint64(m.rangeID) || operation.Home.Generation > m.generation {
 		return ErrKeyOutOfRange
 	}
 	want := txn.Record{ID: operation.ID, Status: txn.StatusPending, ReadTime: operation.ReadTime,

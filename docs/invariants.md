@@ -441,6 +441,27 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 | REBALANCE-17 | Action history and cooldown survive controller restart. | verified (Phase 9) | automatic migration restart/reversal test, split restart test, control codec test |
 | REBALANCE-18 | Every action records reason, cost and expected benefit. | verified (Phase 9) | control codec test and automatic migration expected/actual score assertion |
 
+## Compositional chaos
+
+| ID | Invariant | Status |
+|---|---|---|
+| CHAOS-1 | All existing subsystem invariants remain true under combined fault schedules. | verified (Phase 10) |
+| CHAOS-2 | Reference-model latest logical state equals converged RivetDB logical state. | verified (Phase 10) |
+| CHAOS-3 | Sampled historical MVCC state remains equal across certified operations and failures. | verified (Phase 10) |
+| CHAOS-4 | Committed distributed transactions are atomic; aborted transactions expose no writes. | verified (Phase 10) |
+| CHAOS-5 | Bank/conservation workloads preserve configured invariants. | verified (Phase 10) |
+| CHAOS-6 | The catalog always has exactly one active owner for every covered user key. | verified (Phase 10) |
+| CHAOS-7 | Retired RangeIDs and ReplicaIDs cannot regain active authority. | verified (Phase 10) |
+| CHAOS-8 | Joint consensus never commits without old-and-new majorities. | verified (Phase 10) |
+| CHAOS-9 | Recovery never duplicates an authoritative split, migration or rebalance operation. | verified (Phase 10) |
+| CHAOS-10 | Controller failure cannot stop otherwise healthy data-plane operation. | verified (Phase 10) |
+| CHAOS-11 | After faults cease, a healthy cluster converges to one consistent logical state. | verified (Phase 10) |
+| CHAOS-12 | After workload stabilization, the automatic controller converges to NOOP. | verified (Phase 10) |
+| CHAOS-13 | Long runs have no unbounded goroutine, waiter, trace or action-history growth beyond documented retained state. | verified (Phase 10) |
+| CHAOS-14 | Full-cluster restart preserves committed logical state, membership, catalog lineage, transaction outcomes and controller authority. | verified (Phase 10) |
+| CHAOS-15 | Stale messages and identities cannot resurrect removed authority. | verified (Phase 10) |
+| CHAOS-16 | No acknowledged committed user mutation disappears across any tested fault schedule. | verified (Phase 10) |
+
 ## Foundation
 
 These concern the Phase 0 infrastructure and are enforced today.
