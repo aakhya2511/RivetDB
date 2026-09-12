@@ -33,6 +33,7 @@ func PlanRebalance(observed RebalanceClusterSnapshot, policy RebalancePolicy, co
 		return RebalancePlan{}, ErrStaleRebalancePlan
 	}
 	nodeScores := scoreNodes(snapshot.Nodes, policy)
+	beforePotential := loadPotential(nodeScores)
 	var candidates []rebalanceCandidate
 	insufficient, unsplittable, inProgress, cooled, noEligibleTarget := false, false, false, false, false
 	activeSplits, activeMigrations := uint64(0), uint64(0)
@@ -71,12 +72,12 @@ func PlanRebalance(observed RebalanceClusterSnapshot, policy RebalancePolicy, co
 		}
 	}
 	if policy.Leaders {
-		if candidate, ok := leaderCandidate(snapshot, policy, nodeScores, cooldowns); ok {
+		if candidate, ok := leaderCandidate(snapshot, policy, nodeScores, beforePotential, cooldowns); ok {
 			candidates = append(candidates, rebalanceCandidate{order: 1, action: candidate})
 		}
 	}
 	if policy.Moves && activeMigrations < uint64(policy.MaxConcurrentMigrationsCluster) {
-		moves := moveCandidates(snapshot, policy, nodeScores, cooldowns)
+		moves := moveCandidates(snapshot, policy, nodeScores, beforePotential, cooldowns)
 		noEligibleTarget = len(moves) == 0 && moveOverloaded(snapshot.Nodes, policy, nodeScores, cooldowns)
 		candidates = append(candidates, moves...)
 	}
@@ -287,7 +288,7 @@ func medianSplitKey(metric RebalanceRangeMetric) ([]byte, bool) {
 	return append([]byte(nil), key...), true
 }
 
-func leaderCandidate(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, scores map[raft.NodeID]uint64, cooldowns RebalanceCooldowns) (RebalanceAction, bool) {
+func leaderCandidate(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, scores map[raft.NodeID]uint64, beforePotential uint64, cooldowns RebalanceCooldowns) (RebalanceAction, bool) {
 	nodes := append([]RebalanceNodeMetric(nil), snapshot.Nodes...)
 	sort.Slice(nodes, func(i, j int) bool {
 		if nodes[i].Leaders != nodes[j].Leaders {
@@ -311,7 +312,7 @@ func leaderCandidate(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, 
 			if !ok || !target.Healthy || !target.Available || target.Leaders >= source.Leaders {
 				continue
 			}
-			improvement := projectedPlacementImprovement(snapshot.Nodes, metric, source.NodeID, target.NodeID, policy, true)
+			improvement := projectedPlacementImprovement(snapshot.Nodes, metric, source.NodeID, target.NodeID, policy, true, beforePotential)
 			if improvement == 0 {
 				continue
 			}
@@ -325,7 +326,7 @@ func leaderCandidate(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, 
 	return RebalanceAction{}, false
 }
 
-func moveCandidates(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, scores map[raft.NodeID]uint64, cooldowns RebalanceCooldowns) []rebalanceCandidate {
+func moveCandidates(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, scores map[raft.NodeID]uint64, beforePotential uint64, cooldowns RebalanceCooldowns) []rebalanceCandidate {
 	nodes := append([]RebalanceNodeMetric(nil), snapshot.Nodes...)
 	sort.Slice(nodes, func(i, j int) bool {
 		if scores[nodes[i].NodeID] != scores[nodes[j].NodeID] {
@@ -354,7 +355,7 @@ func moveCandidates(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, s
 				if !eligibleMoveTarget(metric, source, target, policy) {
 					continue
 				}
-				improvement := projectedPlacementImprovement(snapshot.Nodes, metric, source.NodeID, target.NodeID, policy, false)
+				improvement := projectedPlacementImprovement(snapshot.Nodes, metric, source.NodeID, target.NodeID, policy, false, beforePotential)
 				result = append(result, rebalanceCandidate{order: 2, action: RebalanceAction{Type: RebalanceMoveReplica,
 					Reason: ReasonNodeOverloaded, RangeID: metric.RangeID, RangeGeneration: metric.Generation,
 					CatalogGeneration: snapshot.CatalogGeneration, SourceReplicaID: replica.ReplicaID, SourceNodeID: source.NodeID,
@@ -471,44 +472,93 @@ func candidateLess(left, right rebalanceCandidate) bool {
 	return bytes.Compare(left.action.SplitKey, right.action.SplitKey) < 0
 }
 
-func projectedPlacementImprovement(nodes []RebalanceNodeMetric, metric RebalanceRangeMetric, sourceID, targetID raft.NodeID, policy RebalancePolicy, leaderOnly bool) uint64 {
-	projected := append([]RebalanceNodeMetric(nil), nodes...)
-	for index := range projected {
-		node := &projected[index]
-		switch node.NodeID {
-		case sourceID:
-			if leaderOnly {
-				node.Leaders = subtractClamp(node.Leaders, 1)
-				continue
-			}
-			node.HostedReplicas = subtractClamp(node.HostedReplicas, 1)
-			node.LogicalBytes = subtractClamp(node.LogicalBytes, metric.LogicalBytes)
-			node.ReadRate = subtractClamp(node.ReadRate, metric.ReadRate)
-			node.WriteRate = subtractClamp(node.WriteRate, metric.WriteRate)
-			node.RequestRate = subtractClamp(node.RequestRate, metric.RequestRate)
-			node.ApplyBacklog = subtractClamp(node.ApplyBacklog, metric.ApplyBacklog)
-			if metric.Leader == sourceID {
-				node.Leaders = subtractClamp(node.Leaders, 1)
-			}
-		case targetID:
-			if leaderOnly {
-				node.Leaders = saturatingAdd(node.Leaders, 1)
-				continue
-			}
-			node.HostedReplicas = saturatingAdd(node.HostedReplicas, 1)
-			node.LogicalBytes = saturatingAdd(node.LogicalBytes, metric.LogicalBytes)
-			node.ReadRate = saturatingAdd(node.ReadRate, metric.ReadRate)
-			node.WriteRate = saturatingAdd(node.WriteRate, metric.WriteRate)
-			node.RequestRate = saturatingAdd(node.RequestRate, metric.RequestRate)
-			node.ApplyBacklog = saturatingAdd(node.ApplyBacklog, metric.ApplyBacklog)
-			if metric.Leader == sourceID {
-				node.Leaders = saturatingAdd(node.Leaders, 1)
-			}
+func projectedPlacementImprovement(nodes []RebalanceNodeMetric, metric RebalanceRangeMetric, sourceID, targetID raft.NodeID, policy RebalancePolicy, leaderOnly bool, before uint64) uint64 {
+	after := projectedLoadPotential(nodes, metric, sourceID, targetID, policy, leaderOnly)
+	return subtractClamp(before, after)
+}
+
+type placementTotals struct {
+	bytes, writes, reads, leaders, backlog, replicas uint64
+}
+
+// projectedLoadPotential evaluates a candidate without materializing a node
+// slice or score map. Candidate scoring can invoke this thousands of times per
+// controller cycle, so keeping it allocation-free matters at large range
+// counts while leaving the integer scoring formula unchanged.
+func projectedLoadPotential(nodes []RebalanceNodeMetric, metric RebalanceRangeMetric, sourceID, targetID raft.NodeID, policy RebalancePolicy, leaderOnly bool) uint64 {
+	var totals placementTotals
+	for _, original := range nodes {
+		node := projectedNode(original, metric, sourceID, targetID, leaderOnly)
+		totals.bytes = saturatingAdd(totals.bytes, node.LogicalBytes)
+		totals.writes = saturatingAdd(totals.writes, node.WriteRate)
+		totals.reads = saturatingAdd(totals.reads, node.ReadRate)
+		totals.leaders = saturatingAdd(totals.leaders, node.Leaders)
+		totals.backlog = saturatingAdd(totals.backlog, node.ApplyBacklog)
+		totals.replicas = saturatingAdd(totals.replicas, node.HostedReplicas)
+	}
+	count := uint64(len(nodes))
+	var scoreTotal uint64
+	for _, original := range nodes {
+		scoreTotal = saturatingAdd(scoreTotal, placementScore(projectedNode(original, metric, sourceID, targetID, leaderOnly), totals, count, policy))
+	}
+	if count == 0 {
+		return 0
+	}
+	mean := scoreTotal / count
+	var potential uint64
+	for _, original := range nodes {
+		score := placementScore(projectedNode(original, metric, sourceID, targetID, leaderOnly), totals, count, policy)
+		difference := score - min(score, mean)
+		if score < mean {
+			difference = mean - score
+		}
+		potential = saturatingAdd(potential, saturatingMul(difference, difference))
+	}
+	return potential
+}
+
+func placementScore(node RebalanceNodeMetric, totals placementTotals, count uint64, policy RebalancePolicy) uint64 {
+	var score uint64
+	score = saturatingAdd(score, weightedRatio(node.LogicalBytes, totals.bytes, count, policy.BytesWeight))
+	score = saturatingAdd(score, weightedRatio(node.WriteRate, totals.writes, count, policy.WriteWeight))
+	score = saturatingAdd(score, weightedRatio(node.ReadRate, totals.reads, count, policy.ReadWeight))
+	score = saturatingAdd(score, weightedRatio(node.Leaders, totals.leaders, count, policy.LeaderWeight))
+	score = saturatingAdd(score, weightedRatio(node.ApplyBacklog, totals.backlog, count, policy.BacklogWeight))
+	return saturatingAdd(score, weightedRatio(node.HostedReplicas, totals.replicas, count, policy.ReplicaWeight))
+}
+
+func projectedNode(node RebalanceNodeMetric, metric RebalanceRangeMetric, sourceID, targetID raft.NodeID, leaderOnly bool) RebalanceNodeMetric {
+	switch node.NodeID {
+	case sourceID:
+		if leaderOnly {
+			node.Leaders = subtractClamp(node.Leaders, 1)
+			return node
+		}
+		node.HostedReplicas = subtractClamp(node.HostedReplicas, 1)
+		node.LogicalBytes = subtractClamp(node.LogicalBytes, metric.LogicalBytes)
+		node.ReadRate = subtractClamp(node.ReadRate, metric.ReadRate)
+		node.WriteRate = subtractClamp(node.WriteRate, metric.WriteRate)
+		node.RequestRate = subtractClamp(node.RequestRate, metric.RequestRate)
+		node.ApplyBacklog = subtractClamp(node.ApplyBacklog, metric.ApplyBacklog)
+		if metric.Leader == sourceID {
+			node.Leaders = subtractClamp(node.Leaders, 1)
+		}
+	case targetID:
+		if leaderOnly {
+			node.Leaders = saturatingAdd(node.Leaders, 1)
+			return node
+		}
+		node.HostedReplicas = saturatingAdd(node.HostedReplicas, 1)
+		node.LogicalBytes = saturatingAdd(node.LogicalBytes, metric.LogicalBytes)
+		node.ReadRate = saturatingAdd(node.ReadRate, metric.ReadRate)
+		node.WriteRate = saturatingAdd(node.WriteRate, metric.WriteRate)
+		node.RequestRate = saturatingAdd(node.RequestRate, metric.RequestRate)
+		node.ApplyBacklog = saturatingAdd(node.ApplyBacklog, metric.ApplyBacklog)
+		if metric.Leader == sourceID {
+			node.Leaders = saturatingAdd(node.Leaders, 1)
 		}
 	}
-	before := loadPotential(scoreNodes(nodes, policy))
-	after := loadPotential(scoreNodes(projected, policy))
-	return subtractClamp(before, after)
+	return node
 }
 
 func loadPotential(scores map[raft.NodeID]uint64) uint64 {

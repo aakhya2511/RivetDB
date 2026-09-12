@@ -131,6 +131,28 @@ func TestMVCCGetAtAcrossActiveImmutableL0AndL1(t *testing.T) {
 	}
 }
 
+func TestScanAtResultDoesNotAliasMutableMemTable(t *testing.T) {
+	e, err := Open(Options{Directory: t.TempDir(), Mode: ModeReplicatedMVCC, MemTableBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestEngine(t, e)
+	mutation := storage.Mutation{Kind: storage.KindValue, Key: []byte("key"), Value: []byte("value")}
+	err = e.ApplyCommittedMVCC(context.Background(), 1, 1, 1, []byte("command"), mutation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := e.ScanAt(context.Background(), nil, nil, 1)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first scan=%v err=%v", first, err)
+	}
+	first[0].Key[0], first[0].Value[0] = 'X', 'X'
+	second, err := e.ScanAt(context.Background(), nil, nil, 1)
+	if err != nil || len(second) != 1 || string(second[0].Key) != "key" || string(second[0].Value) != "value" {
+		t.Fatalf("second scan=%v err=%v", second, err)
+	}
+}
+
 func TestReplicatedCompactionCannotAdvanceAppliedFrontier(t *testing.T) {
 	e, err := Open(Options{Directory: t.TempDir(), Mode: ModeReplicated, MemTableBytes: 1 << 20, L0Trigger: 4})
 	if err != nil {

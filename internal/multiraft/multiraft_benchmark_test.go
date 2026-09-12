@@ -3,14 +3,16 @@ package multiraft
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/rivetdb/rivetdb/internal/raft"
 	"github.com/rivetdb/rivetdb/internal/testutil"
 )
 
 func BenchmarkCatalogLookup(b *testing.B) {
-	for _, count := range []int{1, 100, 1000} {
+	for _, count := range []int{1, 100, 1000, MaxCatalogRanges} {
 		b.Run(fmt.Sprintf("ranges-%d", count), func(b *testing.B) {
 			catalog := benchmarkCatalog(b, count)
 			key := []byte(fmt.Sprintf("%08d", count/2))
@@ -68,17 +70,56 @@ func BenchmarkSchedulerTick100Groups(b *testing.B) {
 	}
 }
 
+func BenchmarkSchedulerTickRangeScale(b *testing.B) {
+	for _, count := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("ranges-%d", count), func(b *testing.B) {
+			catalog := benchmarkCatalog(b, count).Snapshot()
+			goroutinesBefore := runtime.NumGoroutine()
+			node, err := OpenNode(NodeOptions{NodeID: 1, Directory: testutil.BenchmarkDir(b), Bootstrap: &catalog, MaxHostedRanges: count})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer func() {
+				if err := node.Close(context.Background()); err != nil {
+					b.Fatal(err)
+				}
+			}()
+			transport, _ := NewTransport(max(10_000, count*10))
+			scheduler, _ := NewScheduler(transport)
+			if err := scheduler.AddNode(node); err != nil {
+				b.Fatal(err)
+			}
+			hostedGoroutines := runtime.NumGoroutine() - goroutinesBefore
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if _, err := scheduler.TickNext(); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(hostedGoroutines), "hosted-goroutines")
+			b.ReportMetric(float64(count), "ranges")
+		})
+	}
+}
+
 func BenchmarkRoutedMutation(b *testing.B) {
 	cluster := newMultiTestClusterAt(b, threeRangeBootstrap(), testutil.BenchmarkDir(b))
 	cluster.elect(10, 1)
 	b.ReportAllocs()
+	latencies := make([]time.Duration, 0, min(b.N, 4096))
 	b.ResetTimer()
 	for index := range b.N {
+		started := time.Now()
 		key := []byte(fmt.Sprintf("bench-%08d", index))
 		if err := cluster.router.Put(context.Background(), key, []byte("value")); err != nil {
 			b.Fatal(err)
 		}
+		if len(latencies) < cap(latencies) {
+			latencies = append(latencies, time.Since(started))
+		}
 	}
+	reportLatencyDistribution(b, latencies)
 }
 
 func benchmarkCatalog(b *testing.B, count int) *Catalog {

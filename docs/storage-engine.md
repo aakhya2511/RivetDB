@@ -1017,3 +1017,14 @@ per-chunk CRCs, a whole-image SHA-256 digest, atomic rename and containing-
 directory fsync. Source deletion is a separate terminal action gated by final
 Raft membership, MetaRange placement and a durable replica tombstone; the
 Phase 1 WAL/SSTable formats and publication ordering are unchanged.
+
+## Phase 11 performance audit
+
+The complemented sequence encoding, explicit internal-key comparator and all
+file/containing-directory fsync orderings are unchanged. Eager table validation
+was measured through 1,000 files and retained because lazy validation would
+weaken the corruption boundary without an equivalent trust proof. Existing
+table-cache and Bloom settings were retained; a block cache remains deferred
+because post-open corruption semantics are unresolved. The only Engine changes
+are an immutable empty-Version point-read fast path and lower-copy consumption
+of an iterator-owned MemTable snapshot; neither exposes mutable storage.

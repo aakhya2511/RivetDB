@@ -101,10 +101,39 @@ exhaustive: ## Run every-byte WAL, SSTable, and Manifest campaigns
 	RIVETDB_EXHAUSTIVE=1 $(GO) test -count=1 -timeout 60m -run 'ExhaustiveTruncation|EveryTruncation|ManifestCrashAtEveryOffset' $(TEST_FLAGS) $(PKGS)
 
 BENCH_FLAGS ?= -run '^$$' -bench . -benchmem -count=5
+PROFILE_DIR ?= /private/tmp/rivetdb-profiles
 
 .PHONY: benchmark
-benchmark: ## Run the reproducible benchmark suite (honors RIVETDB_BENCH_DIR)
-	$(GO) test -timeout 120m $(BENCH_FLAGS) $(PKGS)
+benchmark: benchmark-storage benchmark-distributed benchmark-txn benchmark-control ## Run the Phase 11 benchmark matrix
+
+.PHONY: benchmark-storage
+benchmark-storage: ## Benchmark local storage/MVCC/WAL/SSTable paths
+	$(GO) test -timeout 120m $(BENCH_FLAGS) ./internal/storage/...
+
+.PHONY: benchmark-distributed
+benchmark-distributed: ## Benchmark Raft, replicated-range, routing, split and migration paths
+	$(GO) test -timeout 120m $(BENCH_FLAGS) ./internal/raft ./internal/replicatedrange
+	$(GO) test -timeout 120m $(BENCH_FLAGS) -bench 'Benchmark(CatalogLookup|TransportDemux|Scheduler|RoutedMutation|MetadataLookup|LineageResolve|LogicalImageDigest)' ./internal/multiraft
+	$(GO) test -timeout 120m -run '^$$' -bench 'Benchmark(RangeSplit|ReplicaMigration|SnapshotChunkSize)' -benchmem -benchtime=1x -count=5 ./internal/multiraft
+
+.PHONY: benchmark-txn
+benchmark-txn: ## Benchmark read-only and 1/2/3/10-participant transactions
+	$(GO) test -timeout 120m $(BENCH_FLAGS) -bench '^Benchmark(Transaction(s|Conflicts))$$' ./internal/multiraft
+
+.PHONY: benchmark-control
+benchmark-control: ## Benchmark metadata, lineage and rebalancer planning/validation
+	$(GO) test -timeout 120m $(BENCH_FLAGS) -bench 'Benchmark(MetadataLookup|LineageResolve|Rebalance)' ./internal/multiraft
+
+.PHONY: benchmark-profile
+benchmark-profile: ## Capture the reproducible Phase 11 CPU/allocation/mutex/block profile suite
+	mkdir -p $(PROFILE_DIR)
+	$(GO) test -timeout 30m -run '^$$' -bench 'Benchmark(GetActive|MVCCGetLatestRecentOld)' -benchtime=3s -cpuprofile=$(PROFILE_DIR)/cpu-read.pprof ./internal/storage/engine
+	$(GO) test -timeout 30m -run '^$$' -bench 'Benchmark(Put|MixedWorkload)' -benchtime=3s -cpuprofile=$(PROFILE_DIR)/cpu-write-mixed.pprof ./internal/storage/engine
+	$(GO) test -timeout 30m -run '^$$' -bench BenchmarkMVCCScanAt -benchtime=2s -memprofile=$(PROFILE_DIR)/alloc-scanat.pprof ./internal/storage/engine
+	$(GO) test -timeout 45m -run '^$$' -bench '^BenchmarkTransactions/(two-range|three-range)$$' -benchtime=3x -cpuprofile=$(PROFILE_DIR)/cpu-txn.pprof -memprofile=$(PROFILE_DIR)/alloc-txn.pprof -mutexprofile=$(PROFILE_DIR)/mutex-txn.pprof -blockprofile=$(PROFILE_DIR)/block-txn.pprof ./internal/multiraft
+	$(GO) test -timeout 45m -run '^$$' -bench BenchmarkReplicaMigration -benchtime=1x -cpuprofile=$(PROFILE_DIR)/cpu-migration.pprof -memprofile=$(PROFILE_DIR)/alloc-snapshot.pprof ./internal/multiraft
+	$(GO) test -timeout 45m -run '^$$' -bench BenchmarkRangeSplit -benchtime=1x -cpuprofile=$(PROFILE_DIR)/cpu-split.pprof ./internal/multiraft
+	$(GO) test -timeout 30m -run '^$$' -bench 'Benchmark(SchedulerTickRangeScale|RebalancePlanner)' -benchtime=1s -cpuprofile=$(PROFILE_DIR)/cpu-many-range.pprof -memprofile=$(PROFILE_DIR)/alloc-scheduler-planner.pprof -mutexprofile=$(PROFILE_DIR)/mutex-many-range.pprof -blockprofile=$(PROFILE_DIR)/block-many-range.pprof ./internal/multiraft
 
 .PHONY: certify-local
 certify-local: ## Run every local-storage correctness tier in order

@@ -22,6 +22,16 @@ func BenchmarkThreeNodeDurableCommitApply(b *testing.B) {
 	}
 }
 
+func BenchmarkFiveNodeDurableCommitApply(b *testing.B) {
+	cluster := newTestClusterAt(b, 5, testutil.BenchmarkDir(b))
+	cluster.elect(1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		cluster.propose(1, Command{Type: CommandPut, Key: []byte(fmt.Sprintf("key-%08d", index)), Value: []byte("value")})
+	}
+}
+
 func BenchmarkFollowerCatchUp100(b *testing.B) {
 	for iteration := 0; iteration < b.N; iteration++ {
 		b.StopTimer()

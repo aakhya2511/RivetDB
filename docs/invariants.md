@@ -462,6 +462,19 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 | CHAOS-15 | Stale messages and identities cannot resurrect removed authority. | verified (Phase 10) |
 | CHAOS-16 | No acknowledged committed user mutation disappears across any tested fault schedule. | verified (Phase 10) |
 
+## Performance engineering
+
+| ID | Invariant | Status |
+|---|---|---|
+| PERF-1 | Every published benchmark records its configuration, exact commit and relevant machine/filesystem/toolchain environment. | verified (Phase 11) |
+| PERF-2 | No retained optimization weakens a certified correctness invariant or changes an externally visible semantic boundary. | verified (Phase 11) |
+| PERF-3 | Every retained optimization has repeatable measured before/after and allocation evidence. | verified (Phase 11) |
+| PERF-4 | Disk-sensitive results from a constrained filesystem are explicitly labeled and never presented as representative. | verified (Phase 11) |
+| PERF-5 | Simulator and in-process distributed measurements are never labeled real-network or production performance. | verified (Phase 11) |
+| PERF-6 | Benchmarking uses only bounded RivetDB-owned data roots and never depends on or fills unrelated user storage. | verified (Phase 11) |
+| PERF-7 | Performance measurement and telemetry do not alter user workload counters or protocol outcomes. | verified (Phase 11) |
+| PERF-8 | The published final benchmark tree is the exact tree that passes compositional chaos and every inherited correctness gate. | verified (Phase 11) |
+
 ## Foundation
 
 These concern the Phase 0 infrastructure and are enforced today.

@@ -127,3 +127,11 @@ evidence, not formal verification or Jepsen certification. It checks Snapshot
 Isolation, not serializability or linearizable reads. Heavy/overnight runs stay
 out of ordinary `make test`; `make certify-chaos` includes a bounded heavy run
 and all inherited Phase 1--9 gates.
+
+## 7. Phase 11 freeze composition
+
+Performance work does not add a new chaos model or relax an existing check.
+The final optimized tree reruns this complete target after the last executable
+change, including the million-event logical campaign, durable campaign, crash
+matrices and every inherited certification. This is the authority for PERF-2
+and PERF-8; benchmark success alone is not certification.

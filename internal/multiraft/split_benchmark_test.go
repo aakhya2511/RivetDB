@@ -1,9 +1,12 @@
 package multiraft
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/rivetdb/rivetdb/internal/storage"
 	"github.com/rivetdb/rivetdb/internal/storage/engine"
@@ -40,18 +43,63 @@ func BenchmarkLineageResolve(b *testing.B) {
 }
 
 func BenchmarkLogicalImageDigest(b *testing.B) {
-	versions := make([]engine.MVCCVersion, 10_000)
-	var result [32]byte
-	for index := range versions {
-		versions[index] = engine.MVCCVersion{Key: []byte(fmt.Sprintf("key-%06d", index/10)), Timestamp: uint64(10 - index%10), Kind: storage.KindValue, Value: []byte("0123456789abcdef")}
+	for _, count := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("versions-%d", count), func(b *testing.B) {
+			versions := make([]engine.MVCCVersion, count)
+			var result [32]byte
+			for index := range versions {
+				versions[index] = engine.MVCCVersion{Key: []byte(fmt.Sprintf("key-%06d", index/10)), Timestamp: uint64(10 - index%10), Kind: storage.KindValue, Value: []byte("0123456789abcdef")}
+			}
+			b.SetBytes(int64(len(versions) * 36))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				result = digestVersions(versions)
+			}
+			runtime.KeepAlive(result)
+		})
 	}
-	b.SetBytes(int64(len(versions) * 36))
-	b.ReportAllocs()
-	b.ResetTimer()
+}
+
+// BenchmarkRangeSplit measures one complete certified logical split after
+// cluster bootstrap/election. Milestones are cumulative elapsed times from
+// SplitRange entry and therefore expose the dominant phase without hiding it
+// in a total.
+func BenchmarkRangeSplit(b *testing.B) {
 	for range b.N {
-		result = digestVersions(versions)
+		b.StopTimer()
+		cluster := newMigrationCluster(b)
+		cluster.elect(10, 1)
+		catalog := mustCatalog(b, cluster.bootstrap)
+		meta, err := OpenMetaRange(MetaRangeOptions{Nodes: cluster.bootstrap.Nodes, Directory: filepath.Join(cluster.root, "metadata"), Bootstrap: catalog})
+		if err != nil {
+			b.Fatal(err)
+		}
+		started := time.Now()
+		milestones := make(map[SplitHookStage]time.Duration)
+		manager, err := NewSplitManager(SplitManagerOptions{Meta: meta, Router: cluster.router, Hook: func(stage SplitHookStage, _ SplitRecord) {
+			milestones[stage] = time.Since(started)
+		}})
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		record, err := manager.SplitRange(context.Background(), 10, []byte("d"))
+		b.StopTimer()
+		if err != nil || record.State != SplitCommitted {
+			b.Fatalf("split state=%v err=%v", record.State, err)
+		}
+		for stage, name := range map[SplitHookStage]string{
+			BootstrapBarrierDurable: "bootstrap-barrier-ns", ChildQuorumReady: "child-bootstrap-ns",
+			DeltaReplayProgress: "delta-replay-ns", FinalFenceDurable: "final-fence-ns",
+			MetaCutoverDurable: "meta-cutover-ns", ParentRetired: "retired-ns",
+		} {
+			if elapsed, ok := milestones[stage]; ok {
+				b.ReportMetric(float64(elapsed.Nanoseconds()), name)
+			}
+		}
+		cluster.close()
 	}
-	runtime.KeepAlive(result)
 }
 
 func benchmarkLineageState(b *testing.B, splits int) *metadataState {

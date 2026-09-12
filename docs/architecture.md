@@ -637,6 +637,22 @@ Recorded here rather than silently deferred:
 4. **Split key selection.** Sampling gives a size-balanced split; a
    load-balanced split needs per-key access statistics, which cost memory
    proportional to the working set. Undecided.
+
+## 15. Phase 11 performance freeze and optional advisory boundary
+
+Phase 11 changes no layer authority: Raft remains replication durability,
+TxnRecord remains transaction outcome authority, MetaRange remains placement
+authority, and split/migration use their certified logical protocols. Published
+distributed measurements use the in-process transport and do not imply real
+network behavior. Disk-sensitive results from the near-full APFS host are
+explicitly constrained baselines.
+
+An optional Phase 12 advisor may read immutable telemetry snapshots, policy,
+plans, action history and evidence, then recommend ordinary move, split or
+leader-transfer inputs. Recommendations must include snapshot/policy versions,
+observations, threshold, score/cost/benefit, limitations and validator result.
+The existing deterministic fresh-state validator remains mandatory; disabling
+or omitting AI has zero effect on correctness or control behavior.
 ### Phase 5 replicated MVCC layer
 
 Each range now optionally composes a range-scoped HLC, timestamped command

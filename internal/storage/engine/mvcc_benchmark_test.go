@@ -10,7 +10,7 @@ import (
 )
 
 func BenchmarkMVCCGetAtVersionDepth(b *testing.B) {
-	for _, depth := range []int{1, 10, 100, 1000} {
+	for _, depth := range []int{1, 10, 100, 1000, 10_000} {
 		b.Run(fmt.Sprintf("versions-%d", depth), func(b *testing.B) {
 			e, err := Open(Options{Directory: testutil.BenchmarkDir(b), Mode: ModeReplicatedMVCC, MemTableBytes: 16 << 20})
 			if err != nil {

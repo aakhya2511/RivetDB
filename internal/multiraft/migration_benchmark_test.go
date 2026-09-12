@@ -2,11 +2,15 @@ package multiraft
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rivetdb/rivetdb/internal/testutil"
 )
 
 // BenchmarkReplicaMigration is an engineering baseline, not a production
@@ -48,5 +52,37 @@ func BenchmarkReplicaMigration(b *testing.B) {
 			}
 		}
 		cluster.close()
+	}
+}
+
+func BenchmarkSnapshotChunkSize(b *testing.B) {
+	const payloadBytes = 4 << 20
+	payload := make([]byte, payloadBytes)
+	digest := sha256.Sum256(payload)
+	root := testutil.BenchmarkDir(b)
+	for _, chunkBytes := range []int{32 << 10, 64 << 10, 128 << 10, 256 << 10} {
+		b.Run(fmt.Sprintf("chunk-%dKiB", chunkBytes>>10), func(b *testing.B) {
+			for iteration := range b.N {
+				directory := filepath.Join(root, fmt.Sprintf("chunk-%d-%d", chunkBytes, iteration))
+				header := migrationSnapshotHeader{MigrationID: 1, RangeID: 1, ReplicaID: 1, Index: 1, Term: 1, Total: payloadBytes, Digest: digest}
+				for offset := 0; offset < len(payload); offset += chunkBytes {
+					end := min(offset+chunkBytes, len(payload))
+					chunk := payload[offset:end]
+					if err := stageSnapshotChunk(directory, header, uint64(offset), chunk, crc32.Checksum(chunk, migrationSnapshotCRC)); err != nil {
+						b.Fatal(err)
+					}
+				}
+				if err := finalizeStagedSnapshot(directory, header); err != nil {
+					b.Fatal(err)
+				}
+				b.StopTimer()
+				if err := os.RemoveAll(directory); err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+			}
+			b.SetBytes(payloadBytes)
+			b.ReportMetric(float64((payloadBytes+chunkBytes-1)/chunkBytes), "chunks/op")
+		})
 	}
 }

@@ -92,3 +92,13 @@ Failure domain is NodeID. MetaRange membership, topology/locality, range merge,
 GC, stronger isolation, ReadIndex, SQL, ML and AI execution are out of scope.
 Candidate enumeration is `O(R*N)` plus deterministic `O(C log C)` ranking.
 Snapshot memory is `O(N + R + replicas)` and history is policy-bounded.
+
+## 7. Phase 11 performance audit
+
+Projected move and leader-transfer scoring now computes the same sum-squared
+potential without materializing a full projected node slice and lookup map for
+every candidate. A reference implementation test requires exact score equality
+for both action kinds. At 1,000 ranges this reduced the matched benchmark median
+15.7%, bytes 29.8% and allocations 45.3%; collection and fresh validation
+remain separately measured costs. Planning policy, tie-breaks, admission and
+execution semantics are unchanged.

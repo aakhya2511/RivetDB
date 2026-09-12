@@ -853,6 +853,26 @@ func moveOnlyPolicy() RebalancePolicy {
 	return policy
 }
 
+func TestProjectedLoadPotentialMatchesMaterializedReference(t *testing.T) {
+	policy := DefaultRebalancePolicy()
+	nodes := []RebalanceNodeMetric{
+		{NodeID: 1, LogicalBytes: 900, WriteRate: 70, ReadRate: 11, Leaders: 5, ApplyBacklog: 9, HostedReplicas: 7},
+		{NodeID: 2, LogicalBytes: 400, WriteRate: 20, ReadRate: 33, Leaders: 2, ApplyBacklog: 4, HostedReplicas: 4},
+		{NodeID: 3, LogicalBytes: 100, WriteRate: 10, ReadRate: 56, Leaders: 1, ApplyBacklog: 1, HostedReplicas: 2},
+	}
+	metric := RebalanceRangeMetric{LogicalBytes: 125, WriteRate: 13, ReadRate: 7, ApplyBacklog: 2, Leader: 1}
+	for _, leaderOnly := range []bool{false, true} {
+		materialized := append([]RebalanceNodeMetric(nil), nodes...)
+		for index := range materialized {
+			materialized[index] = projectedNode(materialized[index], metric, 1, 3, leaderOnly)
+		}
+		want := loadPotential(scoreNodes(materialized, policy))
+		if got := projectedLoadPotential(nodes, metric, 1, 3, policy, leaderOnly); got != want {
+			t.Fatalf("leaderOnly=%v potential=%d want=%d", leaderOnly, got, want)
+		}
+	}
+}
+
 func moveSnapshot(leftWrite, rightWrite uint64) RebalanceClusterSnapshot {
 	rangeWrite := uint64(0)
 	if leftWrite > rightWrite {

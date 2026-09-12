@@ -458,3 +458,17 @@ The durable campaign uses actual FileStores, MVCC LSMs, Manifests, SSTables and
 snapshot staging, then performs a full-cluster restart and logical comparison.
 The target composes `make certify-rebalance`, hence every Phase 1--9 gate.
 `make chaos-overnight` is the separate five-million-event scheduled tier.
+
+### Phase 11 performance freeze gate
+
+Phase 11 retains only three measured, semantics-preserving changes. Each has a
+matched five-sample A/B comparison, allocation evidence and focused regression
+tests. `make benchmark` composes the fixed storage, replication, transaction,
+movement and control-plane matrix; `make benchmark-profile` captures CPU,
+allocation, mutex and block evidence without committing large profiles.
+
+The exact performance-frozen tree must pass `make certify-chaos`, which already
+composes every Phase 1--10 correctness tier. Near-full storage may qualify
+timings, but never weakens or substitutes a correctness tier. The environment,
+claim boundary and full results are recorded in
+[evidence/phase-11.md](evidence/phase-11.md).

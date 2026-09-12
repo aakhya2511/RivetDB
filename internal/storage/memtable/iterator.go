@@ -35,3 +35,15 @@ func (it *Iterator) Entry() (Entry, bool) {
 	entry.Value = bytes.Clone(entry.Value)
 	return entry, true
 }
+
+// BorrowedEntry returns a read-only view of the current snapshot entry. The
+// view remains valid for the Iterator lifetime; callers must not mutate it.
+// Unlike Entry, this avoids copying a value that the Iterator snapshot already
+// owns. It is intended for internal merge consumers that transfer ownership of
+// the snapshot bytes into an independently owned result.
+func (it *Iterator) BorrowedEntry() (Entry, bool) {
+	if it == nil || !it.valid {
+		return Entry{}, false
+	}
+	return it.entries[it.index], true
+}

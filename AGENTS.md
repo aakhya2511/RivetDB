@@ -12,7 +12,8 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phases 0–10 are complete and certified. Phase 11 performance engineering is next.**
+**Phases 0–11 are complete and certified. The core is performance-frozen;
+optional Phase 12 advisory AI is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -42,7 +43,10 @@ Phase 10 adds `internal/chaos`: a bounded deterministic global logical model,
 exact replay trace and continuous/periodic invariant checkers. Its real durable
 tier composes the existing five-node FileStore/LSM, transaction, split,
 migration, controller and restart fixtures. See `docs/chaos-testing.md`; do not
-turn Phase 11 profiling into feature work or weaken the inherited gate.
+Phase 11 adds the benchmark/profile contract in `docs/performance.md`, bounded
+latency distributions and three measured changes without altering semantics.
+See `docs/evidence/phase-11.md`. Do not change performance-frozen code casually
+or weaken the inherited gate for optional Phase 12 work.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for

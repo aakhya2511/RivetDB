@@ -25,7 +25,7 @@ find than to prevent.
 | 8 | Online replica migration | ✅ |
 | 9 | Workload-aware rebalancer | ✅ complete |
 | 10 | Chaos and correctness campaigns | ✅ complete |
-| 11 | Performance engineering | ⬜ |
+| 11 | Performance engineering | ✅ |
 | 12 | Optional AI operator | ⬜ |
 
 **What exists right now:** Phase 0, the certified Phase 1 local latest-state
@@ -337,7 +337,7 @@ composition · every Phase 1--9 gate remains green. See
 
 ---
 
-## Phase 11 — Performance engineering ⬜
+## Phase 11 — Performance engineering ✅
 
 **Build:** the benchmark harness (throughput and latency percentiles for GET,
 PUT, mixed, scan, transactions, cross-shard transactions) · uniform, Zipfian,
@@ -348,6 +348,14 @@ impact measurements.
 **Gate:** profile-driven optimisation only. Each documented optimisation states
 the measured problem, the diagnosed cause, the change and the measured result.
 No optimisation is claimed without a before-and-after number.
+
+**Built and measured:** fixed local/replicated/transaction/movement/control
+benchmark groups · bounded direct P50/P95/P99 sampling · versions/ranges/
+participants/concurrency/data-size/recovery scaling · CPU/allocation/mutex/
+block profile suite · constrained-environment qualification · three measured
+correctness-preserving optimisations · compact CSV and narrative evidence.
+See [performance.md](performance.md) and
+[evidence/phase-11.md](evidence/phase-11.md).
 
 ---
 

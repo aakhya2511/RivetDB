@@ -15,6 +15,16 @@ func BenchmarkThreeNodeProposeCommitApply(b *testing.B) {
 	}
 }
 
+func BenchmarkFiveNodeProposeCommitApply(b *testing.B) {
+	for b.Loop() {
+		simulator := newTestSimulator(b, 5, 101)
+		electNode(b, simulator, 1)
+		if _, err := simulator.ProposeAndApply(1, []byte("command"), 1_000); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkFileStateEncodeDecode100k(b *testing.B) {
 	state := PersistentState{HardState: HardState{Term: 100}}
 	for index := uint64(1); index <= 100_000; index++ {

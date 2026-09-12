@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/rivetdb/rivetdb/internal/storage"
 	"github.com/rivetdb/rivetdb/internal/storage/compaction"
@@ -78,6 +82,105 @@ func BenchmarkDelete(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func BenchmarkConcurrentPut(b *testing.B) {
+	for _, concurrency := range []int{1, 2, 4, 8, 16, 32} {
+		b.Run(fmt.Sprintf("writers-%d", concurrency), func(b *testing.B) {
+			e := openBenchmarkEngine(b, 64)
+			defer closeTestEngine(b, e)
+			jobs := make(chan int, concurrency)
+			var operations, workers sync.WaitGroup
+			workers.Add(concurrency)
+			for range concurrency {
+				go func() {
+					defer workers.Done()
+					for index := range jobs {
+						if err := e.Put(context.Background(), []byte(fmt.Sprintf("concurrent-%08d", index)), []byte("value")); err != nil {
+							b.Error(err)
+						}
+						operations.Done()
+					}
+				}()
+			}
+			operations.Add(b.N)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for index := range b.N {
+				jobs <- index
+			}
+			operations.Wait()
+			b.StopTimer()
+			close(jobs)
+			workers.Wait()
+		})
+	}
+}
+
+// BenchmarkUserLatencyDistribution directly samples bounded operation
+// durations after setup/warmup. Its p50/p95/p99 metrics are observations, not
+// percentiles inferred from testing.B's aggregate ns/op.
+func BenchmarkUserLatencyDistribution(b *testing.B) {
+	b.Run("put-durable", func(b *testing.B) {
+		e := openBenchmarkEngine(b, 64)
+		defer closeTestEngine(b, e)
+		benchmarkTimedOperations(b, func(index int) error {
+			return e.Put(context.Background(), []byte(fmt.Sprintf("latency-%08d", index)), []byte("value"))
+		})
+	})
+	b.Run("get-active", func(b *testing.B) {
+		e := openBenchmarkEngine(b, 64)
+		defer closeTestEngine(b, e)
+		mustPut(b, e, []byte("key"), []byte("value"))
+		if _, err := e.Get(context.Background(), []byte("key")); err != nil {
+			b.Fatal(err)
+		}
+		benchmarkTimedOperations(b, func(int) error {
+			_, err := e.Get(context.Background(), []byte("key"))
+			return err
+		})
+	})
+	b.Run("getat-old", func(b *testing.B) {
+		e, err := Open(Options{Directory: testutil.BenchmarkDir(b), Mode: ModeReplicatedMVCC, MemTableBytes: 16 << 20})
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer closeTestEngine(b, e)
+		for index := 1; index <= 1000; index++ {
+			if err := e.ApplyCommittedMVCC(context.Background(), uint64(index), 1, uint64(index), []byte("command"), storage.Mutation{Kind: storage.KindValue, Key: []byte("hot"), Value: []byte("value")}); err != nil {
+				b.Fatal(err)
+			}
+		}
+		benchmarkTimedOperations(b, func(int) error {
+			_, err := e.GetAt(context.Background(), []byte("hot"), 1)
+			return err
+		})
+	})
+}
+
+func benchmarkTimedOperations(b *testing.B, operation func(int) error) {
+	b.Helper()
+	latencies := make([]time.Duration, 0, min(b.N, 4096))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := range b.N {
+		started := time.Now()
+		if err := operation(index); err != nil {
+			b.Fatal(err)
+		}
+		if len(latencies) < cap(latencies) {
+			latencies = append(latencies, time.Since(started))
+		}
+	}
+	b.StopTimer()
+	slices.Sort(latencies)
+	percentile := func(numerator int) float64 {
+		index := (len(latencies)*numerator + 99) / 100
+		return float64(latencies[max(0, index-1)].Nanoseconds())
+	}
+	b.ReportMetric(percentile(50), "p50-ns")
+	b.ReportMetric(percentile(95), "p95-ns")
+	b.ReportMetric(percentile(99), "p99-ns")
 }
 
 func BenchmarkGetActive(b *testing.B) {
@@ -244,7 +347,7 @@ func BenchmarkOpenRestart(b *testing.B) {
 }
 
 func BenchmarkOpenSSTableScale(b *testing.B) {
-	for _, count := range []int{1, 10, 100} {
+	for _, count := range []int{1, 10, 100, 1000} {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
 			directory := testutil.BenchmarkDir(b)
 			e := openBenchmarkEngineAt(b, directory, 1_000)
@@ -322,6 +425,59 @@ func BenchmarkWriteFrequentFlush(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func BenchmarkFlush1000(b *testing.B) {
+	root := testutil.BenchmarkDir(b)
+	for iteration := range b.N {
+		b.StopTimer()
+		e := openBenchmarkEngineAt(b, filepath.Join(root, fmt.Sprintf("flush-%d", iteration)), 64)
+		mutations := make([]storage.Mutation, 1000)
+		for index := range mutations {
+			mutations[index] = storage.Mutation{Kind: storage.KindValue, Key: []byte(fmt.Sprintf("key-%06d", index)), Value: []byte("value")}
+		}
+		if err := e.WriteBatch(context.Background(), mutations); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		if err := e.Flush(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		closeTestEngine(b, e)
+		if err := os.RemoveAll(filepath.Join(root, fmt.Sprintf("flush-%d", iteration))); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(1000, "entries/op")
+}
+
+func BenchmarkCompactionFourTables(b *testing.B) {
+	root := testutil.BenchmarkDir(b)
+	for iteration := range b.N {
+		b.StopTimer()
+		e := openBenchmarkEngineAt(b, filepath.Join(root, fmt.Sprintf("compact-%d", iteration)), 4)
+		for table := range 4 {
+			mutations := make([]storage.Mutation, 250)
+			for index := range mutations {
+				mutations[index] = storage.Mutation{Kind: storage.KindValue, Key: []byte(fmt.Sprintf("key-%06d", table*250+index)), Value: []byte("value")}
+			}
+			if err := e.WriteBatch(context.Background(), mutations); err != nil {
+				b.Fatal(err)
+			}
+			mustFlushBenchmark(b, e)
+		}
+		b.StartTimer()
+		if _, err := e.Compact(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		closeTestEngine(b, e)
+		if err := os.RemoveAll(filepath.Join(root, fmt.Sprintf("compact-%d", iteration))); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(1000, "entries/op")
 }
 
 func openBenchmarkEngine(b testing.TB, trigger int) *Engine {

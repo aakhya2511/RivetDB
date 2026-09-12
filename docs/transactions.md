@@ -122,3 +122,14 @@ uses the unchanged Phase 7 transaction fence/drain. The planner observes but
 never interprets intents or changes transaction outcomes. Same-range active
 operations exclude another automatic action; an action failure is recorded and
 cooled down without stopping transaction traffic on unrelated ranges.
+
+## 10. Phase 11 performance audit
+
+The measured transaction path remains synchronous: for N written participants
+it performs `3N+3` Raft commits and `2N` serial participant prepare/resolve
+rounds. Five-sample constrained in-process results scale from one through ten
+participants as documented in [evidence/phase-11.md](evidence/phase-11.md).
+Parallel participant work and one-phase commit were rejected for this freeze:
+their recovery, ordering and idempotency proof cost outweighed the evidence.
+TxnRecord authority, participant ordering, failure handling and retained
+terminal records are unchanged.

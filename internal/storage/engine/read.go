@@ -151,19 +151,21 @@ func (e *Engine) getMVCCAt(ctx context.Context, key []byte, requested *uint64) (
 				}
 			}
 		}
-		for _, table := range tablesForPoint(view.version, key) {
-			if table.Level == 0 {
-				e.getL0TableReads.Add(1)
-			} else {
-				e.getHigherTableReads.Add(1)
-			}
-			value, found, readErr := e.tableCandidate(table, key, target)
-			if readErr != nil {
-				return MVCCEntry{}, readErr
-			}
-			if found {
-				if err := consider(candidate{entry: value, fileNumber: table.FileNumber}); err != nil {
-					return MVCCEntry{}, err
+		if view.version.LiveTableCount() != 0 {
+			for _, table := range tablesForPoint(view.version, key) {
+				if table.Level == 0 {
+					e.getL0TableReads.Add(1)
+				} else {
+					e.getHigherTableReads.Add(1)
+				}
+				value, found, readErr := e.tableCandidate(table, key, target)
+				if readErr != nil {
+					return MVCCEntry{}, readErr
+				}
+				if found {
+					if err := consider(candidate{entry: value, fileNumber: table.FileNumber}); err != nil {
+						return MVCCEntry{}, err
+					}
 				}
 			}
 		}
@@ -500,7 +502,7 @@ type memIterator struct{ iterator *memtable.Iterator }
 
 func (m *memIterator) Next() bool { return m.iterator.Next() }
 func (m *memIterator) Entry() (sstable.Entry, bool) {
-	entry, ok := m.iterator.Entry()
+	entry, ok := m.iterator.BorrowedEntry()
 	return sstable.Entry{Key: entry.Key, Value: entry.Value}, ok
 }
 func (m *memIterator) Error() error { return nil }

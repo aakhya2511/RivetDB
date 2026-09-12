@@ -11,7 +11,7 @@ Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 10 complete — compositional chaos certified.**
+> **Project status: Phase 11 complete — performance freeze candidate.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -66,6 +66,10 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > reference model (including a one-million-event heavy campaign) and a real
 > five-node durable crash/recovery campaign with bounded replay traces,
 > continuous invariants, historical digests and resource audits.
+> Phase 11 fixes a reproducible benchmark/profile taxonomy, adds bounded direct
+> latency distributions and full-stack scaling coverage, and retains three
+> profile-supported changes: an empty-Version point-read fast path, lower-copy
+> MemTable scan consumption and allocation-free projected planner scoring.
 >
 > **There is no distributed read protocol, network database service, server or
 > client yet.** Phase 4/5 local inspection and historical snapshots are
@@ -251,6 +255,36 @@ volume was approximately 96% utilized, so disk-sensitive timings are explicitly
 labeled constrained-environment baselines rather than representative
 performance claims. Benchmark database data can be placed on an external local
 SSD with `RIVETDB_BENCH_DIR`; no volume name is hard-coded.
+
+## Phase 11 performance snapshot
+
+Phase 11 measurements on an Apple M4 MacBook Air (10 cores, 16 GiB, Go
+1.25.14) found an active-MemTable `Get` median of 150.8 ns, a 1,000-key
+`ScanAt` median of 138.7 us, and a 1,000-range controller-plan median of
+711.8 us. These are exact-host CPU/allocation microbenchmarks, not production
+claims. The internal APFS volume was 99–100% utilized, so durable Put,
+replicated mutation, transaction, split, migration, flush, compaction and
+restart timings are labeled `CONSTRAINED-ENVIRONMENT BASELINE` and are not
+representative disk results. Distributed benchmarks use an in-process
+transport, not a real network.
+
+The retained changes improved empty-Version `Get` by 22.2%, reduced ScanAt
+allocations by 33.0%, and improved 1,000-range planning by 15.7% while cutting
+planner allocations by 45.3% in matched five-sample A/B runs. See
+[the complete Phase 11 evidence](docs/evidence/phase-11.md) for boundaries,
+ranges, profiles, rejected changes and limitations.
+
+```bash
+RIVETDB_BENCH_DIR=/path/on/a/local/volume make benchmark
+PROFILE_DIR=/private/tmp/rivetdb-profiles make benchmark-profile
+make benchmark-storage
+make benchmark-distributed
+make benchmark-txn
+make benchmark-control
+```
+
+No MVCC/transaction-record GC, range merge, real RPC benchmark, linearizable
+distributed read or representative disk result is implied by this snapshot.
 
 ---
 
