@@ -336,15 +336,15 @@ rebalance-race: ## Run Phase 9 packages under the race detector
 
 .PHONY: rebalance-stress
 rebalance-stress: ## Run the 100k-event workload-placement policy model
-	RIVETDB_REBALANCE_STRESS=1 $(GO) test -count=1 -timeout 90m -run '^TestRandomizedRebalancePlannerHeavy$$' $(TEST_FLAGS) ./internal/multiraft
+	RIVETDB_REBALANCE_STRESS=1 $(GO) test -count=1 -timeout 90m -run '^TestRandomized(RebalancePlannerHeavy|StatefulRebalanceControllerHeavy)$$' $(TEST_FLAGS) ./internal/multiraft
 
 .PHONY: rebalance-chaos
 rebalance-chaos: ## Run automatic move, split, leadership, restart, and adversarial planner tests
-	$(GO) test -count=1 -timeout 30m -run 'AutomaticRebalance|RebalanceControllerRestart|PlannerRejects|HysteresisAndCooldown' $(TEST_FLAGS) ./internal/multiraft
+	$(GO) test -count=1 -timeout 30m -run 'AutomaticRebalance|Automatic(Migration|Split)NodeFailure|RebalanceControllerRestart|PlannerRejects|HysteresisAndCooldown|RebalanceExact|RebalanceTransient|RebalanceRepeated|RebalanceBalanced|RebalanceCounter|RebalanceUnsatisfiable|LeaderSkewLong|ManualOperations|RecoveredNode' $(TEST_FLAGS) ./internal/multiraft
 
 .PHONY: rebalance-crash
 rebalance-crash: ## Run controller interruption and certified operation recovery seams
-	RIVETDB_REBALANCE_CRASH=1 $(GO) test -count=1 -timeout 30m -run 'RebalanceController(SubprocessCrashMatrix|Restart)' $(TEST_FLAGS) ./internal/multiraft
+	RIVETDB_REBALANCE_CRASH=1 $(GO) test -count=1 -timeout 30m -run 'RebalanceController(SubprocessCrashMatrix|Restart)|Automatic(Migration|Split)NodeFailure' $(TEST_FLAGS) ./internal/multiraft
 
 .PHONY: certify-rebalance
 certify-rebalance: ## Run the Phase 9 gate and all frozen Phase 8-through-1 tiers

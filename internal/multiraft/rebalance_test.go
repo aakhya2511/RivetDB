@@ -11,6 +11,7 @@ import (
 
 	"github.com/rivetdb/rivetdb/internal/clock"
 	"github.com/rivetdb/rivetdb/internal/raft"
+	"github.com/rivetdb/rivetdb/internal/replicatedrange"
 )
 
 func TestRebalancePolicyValidation(t *testing.T) {
@@ -201,6 +202,60 @@ func TestValidateRebalancePlanRejectsStaleCatalog(t *testing.T) {
 	}
 }
 
+func TestValidateRebalancePlanRechecksMoveHardConstraints(t *testing.T) {
+	policy := moveOnlyPolicy()
+	base := moveSnapshot(80, 20)
+	plan, err := PlanRebalance(base, policy, RebalanceCooldowns{})
+	if err != nil || len(plan.Actions) != 1 {
+		t.Fatalf("plan=%+v err=%v", plan, err)
+	}
+	tests := map[string]func(*RebalanceClusterSnapshot){
+		"failed-target":      func(snapshot *RebalanceClusterSnapshot) { snapshot.Nodes[1].Healthy = false },
+		"unavailable-target": func(snapshot *RebalanceClusterSnapshot) { snapshot.Nodes[1].Available = false },
+		"duplicate-placement": func(snapshot *RebalanceClusterSnapshot) {
+			snapshot.Ranges[0].Replicas = append(snapshot.Ranges[0].Replicas, RebalanceReplicaMetric{RangeID: 10, ReplicaID: 999, NodeID: 2, Role: "VOTER", Healthy: true})
+		},
+		"incoming-limit": func(snapshot *RebalanceClusterSnapshot) {
+			snapshot.Nodes[1].MigrationsIn = uint64(policy.MaxIncomingMigrationsPerNode)
+		},
+		"outgoing-limit": func(snapshot *RebalanceClusterSnapshot) {
+			snapshot.Nodes[0].MigrationsOut = uint64(policy.MaxOutgoingMigrationsPerNode)
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			fresh, cloneErr := CanonicalizeRebalanceSnapshot(base)
+			if cloneErr != nil {
+				t.Fatal(cloneErr)
+			}
+			mutate(&fresh)
+			if validateErr := ValidateRebalancePlan(plan, fresh, policy); !errors.Is(validateErr, ErrStaleRebalancePlan) {
+				t.Fatalf("validation error=%v", validateErr)
+			}
+		})
+	}
+	for name, configure := range map[string]func(*RebalancePolicy, *RebalanceClusterSnapshot){
+		"replica-capacity": func(p *RebalancePolicy, snapshot *RebalanceClusterSnapshot) {
+			p.MaxReplicaCountPerNode, snapshot.Nodes[1].HostedReplicas = 1, 1
+		},
+		"byte-capacity": func(p *RebalancePolicy, snapshot *RebalanceClusterSnapshot) {
+			p.MaxLogicalBytesPerNode, snapshot.Nodes[1].LogicalBytes = 100, 1
+		},
+		"write-capacity": func(p *RebalancePolicy, snapshot *RebalanceClusterSnapshot) {
+			p.MaxWriteRatePerNode = snapshot.Nodes[1].WriteRate + snapshot.Ranges[0].WriteRate - 1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			configured, fresh := policy, base
+			fresh.Nodes = append([]RebalanceNodeMetric(nil), base.Nodes...)
+			configure(&configured, &fresh)
+			if validateErr := ValidateRebalancePlan(plan, fresh, configured); !errors.Is(validateErr, ErrStaleRebalancePlan) {
+				t.Fatalf("validation error=%v", validateErr)
+			}
+		})
+	}
+}
+
 func TestRebalanceControlReplicatesAndCodecRoundTrips(t *testing.T) {
 	catalog := mustCatalog(t, threeRangeBootstrap())
 	meta, err := OpenMetaRange(MetaRangeOptions{Nodes: catalog.Snapshot().Nodes, Directory: t.TempDir(), Bootstrap: catalog})
@@ -300,21 +355,24 @@ func TestAutomaticRebalanceUsesCertifiedMoveReplica(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cluster.router.PutMVCC(t.Context(), []byte("a-history"), []byte("v2")); err != nil {
+	historicalAt2, err := cluster.router.PutMVCC(t.Context(), []byte("a-history"), []byte("v2"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	gHistoricalAt, err := cluster.router.PutMVCC(t.Context(), []byte("g-history"), []byte("v1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cluster.router.PutMVCC(t.Context(), []byte("g-history"), []byte("v2")); err != nil {
+	gHistoricalAt2, err := cluster.router.PutMVCC(t.Context(), []byte("g-history"), []byte("v2"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	pHistoricalAt, err := cluster.router.PutMVCC(t.Context(), []byte("p-history"), []byte("v1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cluster.router.PutMVCC(t.Context(), []byte("p-history"), []byte("v2")); err != nil {
+	pHistoricalAt2, err := cluster.router.PutMVCC(t.Context(), []byte("p-history"), []byte("v2"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	transferCommitted := false
@@ -373,6 +431,11 @@ func TestAutomaticRebalanceUsesCertifiedMoveReplica(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	preSnapshot, err := controller.Observe(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preScore := loadPotential(scoreNodes(preSnapshot.Nodes, policy))
 	plan, err := controller.RunCycle(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -406,12 +469,12 @@ func TestAutomaticRebalanceUsesCertifiedMoveReplica(t *testing.T) {
 	if total != 1000 {
 		t.Fatalf("bank total=%d", total)
 	}
-	historyKey, historyTimestamp := []byte("a-history"), historicalAt
+	historyKey, historyTimestamp, historyTimestamp2 := []byte("a-history"), historicalAt, historicalAt2
 	switch plan.Actions[0].RangeID {
 	case 11:
-		historyKey, historyTimestamp = []byte("g-history"), gHistoricalAt
+		historyKey, historyTimestamp, historyTimestamp2 = []byte("g-history"), gHistoricalAt, gHistoricalAt2
 	case 12:
-		historyKey, historyTimestamp = []byte("p-history"), pHistoricalAt
+		historyKey, historyTimestamp, historyTimestamp2 = []byte("p-history"), pHistoricalAt, pHistoricalAt2
 	}
 	target, err := cluster.nodes[plan.Actions[0].TargetNodeID].Replica(plan.Actions[0].RangeID)
 	if err != nil {
@@ -421,6 +484,91 @@ func TestAutomaticRebalanceUsesCertifiedMoveReplica(t *testing.T) {
 	if err != nil || string(old) != "v1" {
 		t.Fatalf("historical value=%q err=%v", old, err)
 	}
+	old2, err := target.GetAt(t.Context(), historyKey, historyTimestamp2)
+	if err != nil || string(old2) != "v2" {
+		t.Fatalf("second historical value=%q err=%v", old2, err)
+	}
+	targetDigest1, err := target.DigestAt(t.Context(), historyTimestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDigest2, err := target.DigestAt(t.Context(), historyTimestamp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reference *replicatedrange.Replica
+	for _, placement := range meta.Snapshot().Catalog.Snapshot().Ranges {
+		if placement.RangeID != plan.Actions[0].RangeID {
+			continue
+		}
+		for _, replica := range placement.Replicas {
+			if replica.NodeID == plan.Actions[0].TargetNodeID {
+				continue
+			}
+			reference, err = cluster.nodes[replica.NodeID].Replica(plan.Actions[0].RangeID)
+			if err == nil {
+				break
+			}
+		}
+	}
+	if reference == nil {
+		t.Fatal("missing post-migration digest reference")
+	}
+	referenceDigest1, _ := reference.DigestAt(t.Context(), historyTimestamp)
+	referenceDigest2, _ := reference.DigestAt(t.Context(), historyTimestamp2)
+	targetLatest, err := target.LogicalStateDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	referenceLatest, err := reference.LogicalStateDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetDigest1 != referenceDigest1 || targetDigest2 != referenceDigest2 || targetLatest != referenceLatest {
+		t.Fatal("MVCC/latest digest mismatch after automatic migration")
+	}
+	postSnapshot, err := controller.Observe(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	postScore := loadPotential(scoreNodes(postSnapshot.Nodes, policy))
+	if postScore >= preScore {
+		t.Fatalf("automatic migration did not improve score: %d -> %d", preScore, postScore)
+	}
+	t.Logf("range=%d source=%d target=%d MigrationID=%d preScore=%d expectedImprovement=%d postScore=%d actualImprovement=%d bankTotal=1000 SI_violations=0 digestMismatches=0",
+		plan.Actions[0].RangeID, plan.Actions[0].SourceNodeID, plan.Actions[0].TargetNodeID, control.History[0].MigrationID,
+		preScore, plan.Actions[0].ExpectedImprovement, postScore, preScore-postScore)
+
+	controller.Stop()
+	restarted, err := NewRebalanceController(RebalanceControllerOptions{Meta: meta, Router: cluster.router, Clock: fake, Policy: policy, Migration: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := restarted.Activate(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverse := modeledReverseSnapshot(plan.Actions[0], epoch, policy.Version, fake.Now())
+	protected, err := PlanRebalance(reverse, policy, meta.Snapshot().Rebalance.Cooldowns)
+	if err != nil || len(protected.Actions) != 0 {
+		t.Fatalf("restart reverse plan=%+v err=%v", protected, err)
+	}
+	fake.Advance(policy.Cooldown + time.Second)
+	reverse.SnapshotTime = fake.Now()
+	eligible, err := PlanRebalance(reverse, policy, meta.Snapshot().Rebalance.Cooldowns)
+	if err != nil || len(eligible.Actions) != 1 || eligible.Actions[0].SourceNodeID != plan.Actions[0].TargetNodeID || eligible.Actions[0].TargetNodeID != plan.Actions[0].SourceNodeID {
+		t.Fatalf("post-cooldown reverse=%+v err=%v", eligible, err)
+	}
+	t.Logf("controllerRestartEpoch=%d protectedReverseMoves=0 postCooldownReverseEligible=1", epoch)
+}
+
+func modeledReverseSnapshot(action RebalanceAction, epoch, policyVersion uint64, at time.Time) RebalanceClusterSnapshot {
+	return RebalanceClusterSnapshot{SnapshotTime: at, CatalogGeneration: action.CatalogGeneration, PolicyVersion: policyVersion, ControllerEpoch: epoch,
+		Nodes: []RebalanceNodeMetric{{NodeID: action.SourceNodeID, HostedReplicas: 1, WriteRate: 20, Healthy: true, Available: true},
+			{NodeID: action.TargetNodeID, HostedReplicas: 3, WriteRate: 80, Healthy: true, Available: true}},
+		Ranges: []RebalanceRangeMetric{{RangeID: action.RangeID, Generation: action.RangeGeneration, Active: true, Samples: 3,
+			LogicalBytes: 100, PhysicalBytes: 200, WriteRate: 30,
+			Replicas: []RebalanceReplicaMetric{{RangeID: action.RangeID, ReplicaID: action.SourceReplicaID, NodeID: action.TargetNodeID, Role: "VOTER", Healthy: true}}}}}
 }
 
 func TestAutomaticRebalanceUsesCertifiedSplitRange(t *testing.T) {
@@ -449,6 +597,134 @@ func TestAutomaticRebalanceUsesCertifiedSplitRange(t *testing.T) {
 	if len(plan.Actions) != 1 || plan.Actions[0].Type != RebalanceSplitRange || len(control.History) != 1 || control.History[0].State != RebalanceActionSucceeded || control.History[0].SplitID == 0 {
 		t.Fatalf("plan=%+v history=%+v", plan, control.History)
 	}
+}
+
+func TestAutomaticRebalanceSustainedHotRateSplitAndChildWarmup(t *testing.T) {
+	cluster, meta, split := newSplitHarness(t)
+	cluster.elect(10, 1)
+	for _, key := range []string{"a", "c", "e"} {
+		if _, err := cluster.router.PutMVCC(t.Context(), []byte(key), []byte("seed")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy := DefaultRebalancePolicy()
+	policy.Moves, policy.Leaders = false, false
+	policy.MinSamples = 2
+	policy.MinRangeBytes = 1
+	policy.RangeSplitBytes = ^uint64(0)
+	policy.RangeHotWriteRate = 2
+	policy.RangeHotReadRate = ^uint64(0)
+	fake := clock.NewMock()
+	controller, err := NewRebalanceController(RebalanceControllerOptions{Meta: meta, Router: cluster.router, Clock: fake, Policy: policy, Split: split})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Activate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Observe(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for sample := 0; sample < int(policy.MinSamples); sample++ {
+		for _, key := range []string{"a", "c", "e"} {
+			if _, err := cluster.router.PutMVCC(t.Context(), []byte(key), []byte(fmt.Sprintf("hot-%d", sample))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fake.Advance(policy.SampleInterval)
+		if _, err := controller.Observe(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pre, err := controller.Observe(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := findRebalanceRange(t, pre, 10)
+	if parent.LogicalBytes >= policy.RangeSplitBytes || parent.WriteRate < policy.RangeHotWriteRate || parent.Samples < policy.MinSamples {
+		t.Fatalf("not exclusively hot-rate eligible: %+v", parent)
+	}
+	plan, err := controller.RunCycle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Type != RebalanceSplitRange || string(plan.Actions[0].SplitKey) != "c" {
+		t.Fatalf("hot split plan=%+v", plan)
+	}
+	record := meta.Snapshot().Rebalance.History[len(meta.Snapshot().Rebalance.History)-1]
+	if record.SplitID == 0 || record.State != RebalanceActionSucceeded {
+		t.Fatalf("record=%+v", record)
+	}
+	children, err := controller.Observe(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children.Ranges) != 4 { // the original three-range fixture replaces one parent with two children.
+		t.Fatalf("ranges after split=%d", len(children.Ranges))
+	}
+	var leftBytes, rightBytes uint64
+	var splitRecord SplitRecord
+	for _, candidate := range meta.Snapshot().Splits {
+		if candidate.SplitID == record.SplitID {
+			splitRecord = candidate
+		}
+	}
+	if splitRecord.SplitID == 0 {
+		t.Fatal("missing authoritative split record")
+	}
+	for _, metric := range children.Ranges {
+		if metric.RangeID == 10 {
+			t.Fatal("retired parent remained active")
+		}
+		isLeft, isRight := metric.RangeID == splitRecord.Left.RangeID, metric.RangeID == splitRecord.Right.RangeID
+		if (isLeft || isRight) && metric.Samples != 0 {
+			t.Fatalf("child %d samples=%d", metric.RangeID, metric.Samples)
+		}
+		if isLeft {
+			leftBytes = metric.LogicalBytes
+		}
+		if isRight {
+			rightBytes = metric.LogicalBytes
+		}
+	}
+	immediate, err := controller.Plan(t.Context())
+	if err != nil || len(immediate.Actions) != 0 {
+		t.Fatalf("child warmup plan=%+v err=%v", immediate, err)
+	}
+	t.Logf("parentLoad=%d writeRate=%d splitKey=c SplitID=%d leftChildBytes=%d rightChildBytes=%d childSamples=0 immediateActions=0",
+		parent.LogicalBytes, parent.WriteRate, record.SplitID, leftBytes, rightBytes)
+}
+
+func TestHotRangeTransientSpikeDoesNotSplit(t *testing.T) {
+	policy := DefaultRebalancePolicy()
+	policy.Moves, policy.Leaders = false, false
+	policy.MinRangeBytes, policy.RangeSplitBytes = 1, ^uint64(0)
+	policy.MinSamples, policy.RangeHotWriteRate = 3, 100
+	snapshot := moveSnapshot(10, 10)
+	snapshot.Nodes = append(snapshot.Nodes, RebalanceNodeMetric{NodeID: 3, Healthy: true, Available: true})
+	snapshot.Ranges[0].LogicalBytes = 10
+	snapshot.Ranges[0].UserKeys = [][]byte{[]byte("a"), []byte("c"), []byte("e")}
+	snapshot.Ranges[0].Samples, snapshot.Ranges[0].WriteRate = 1, 10_000
+	spike, err := PlanRebalance(snapshot, policy, RebalanceCooldowns{})
+	if err != nil || len(spike.Actions) != 0 {
+		t.Fatalf("spike plan=%+v err=%v", spike, err)
+	}
+	snapshot.Ranges[0].Samples, snapshot.Ranges[0].WriteRate = policy.MinSamples, policy.RangeHotWriteRate
+	sustained, err := PlanRebalance(snapshot, policy, RebalanceCooldowns{})
+	if err != nil || len(sustained.Actions) != 1 || sustained.Actions[0].Type != RebalanceSplitRange {
+		t.Fatalf("sustained plan=%+v err=%v", sustained, err)
+	}
+}
+
+func findRebalanceRange(t *testing.T, snapshot RebalanceClusterSnapshot, rangeID RangeID) RebalanceRangeMetric {
+	t.Helper()
+	for _, metric := range snapshot.Ranges {
+		if metric.RangeID == rangeID {
+			return metric
+		}
+	}
+	t.Fatalf("missing range %d", rangeID)
+	return RebalanceRangeMetric{}
 }
 
 func TestAutomaticRebalanceUsesCertifiedLeadershipTransfer(t *testing.T) {

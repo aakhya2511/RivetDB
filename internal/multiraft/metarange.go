@@ -252,11 +252,20 @@ func validRebalanceControlTransition(old, next RebalanceControlSnapshot) bool {
 	} else if len(old.History) != 0 && !sameRebalanceRecord(old.History[len(old.History)-1], next.History[len(next.History)-1]) {
 		before, after := old.History[len(old.History)-1], next.History[len(next.History)-1]
 		if before.Action.ActionID != after.Action.ActionID || before.ControllerEpoch != after.ControllerEpoch || before.PolicyVersion != after.PolicyVersion ||
-			!sameRebalanceAction(before.Action, after.Action) || !legalRebalanceActionTransition(before.State, after.State) || after.UpdatedAt.Before(before.UpdatedAt) {
+			!sameRebalanceAction(before.Action, after.Action) || !legalRebalanceRecordUpdate(before, after) || after.UpdatedAt.Before(before.UpdatedAt) {
 			return false
 		}
 	}
 	return cooldownsDoNotRegress(old.Cooldowns, next.Cooldowns)
+}
+
+func legalRebalanceRecordUpdate(before, after RebalanceActionRecord) bool {
+	if legalRebalanceActionTransition(before.State, after.State) {
+		return true
+	}
+	return before.State == RebalanceActionExecuting && after.State == RebalanceActionExecuting &&
+		(before.MigrationID == 0 || before.MigrationID == after.MigrationID) &&
+		(before.SplitID == 0 || before.SplitID == after.SplitID)
 }
 
 func sameRebalanceAction(left, right RebalanceAction) bool {
@@ -514,6 +523,19 @@ func (m *MetaRange) AdvanceRebalanceAction(ctx context.Context, actionID uint64,
 			return ErrStaleRebalancePlan
 		}
 		if record.State == state {
+			if migrationID != 0 {
+				record.MigrationID = migrationID
+			}
+			if splitID != 0 {
+				record.SplitID = splitID
+			}
+			if lastError != "" {
+				record.LastError = lastError
+			}
+			if at.After(record.UpdatedAt) || at.Equal(record.UpdatedAt) {
+				record.UpdatedAt = at
+			}
+			meta.rebalance.History[index] = record
 			result = record
 			return nil
 		}

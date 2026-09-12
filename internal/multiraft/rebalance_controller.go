@@ -55,7 +55,7 @@ func NewRebalanceController(options RebalanceControllerOptions) (*RebalanceContr
 	if err := options.Policy.Validate(); err != nil {
 		return nil, err
 	}
-	collector, err := NewRebalanceCollector(options.Meta, options.Router, options.Clock, options.Policy.EWMAAlphaPPM)
+	collector, err := NewRebalanceCollector(options.Meta, options.Router, options.Clock, options.Policy.EWMAAlphaPPM, options.Policy.MinSamples)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +148,21 @@ func (c *RebalanceController) RunCycle(ctx context.Context) (RebalancePlan, erro
 		c.observe(RebalanceActionExecutingDurable, record)
 		migrationID, splitID, executeErr := c.execute(ctx, record.Action)
 		c.observe(RebalanceCertifiedOperationReturned, record)
+		if executeErr != nil {
+			discoveredMigration, discoveredSplit := c.discoverOperationIDs(record.Action)
+			if migrationID == 0 {
+				migrationID = discoveredMigration
+			}
+			if splitID == 0 {
+				splitID = discoveredSplit
+			}
+		}
+		if executeErr != nil && c.operationStillAuthoritative(record.Action.Type, migrationID, splitID) {
+			if _, persistErr := c.meta.AdvanceRebalanceAction(ctx, record.Action.ActionID, RebalanceActionExecuting, migrationID, splitID, executeErr.Error(), c.clock.Now(), time.Time{}, time.Time{}, time.Time{}); persistErr != nil {
+				return plan, persistErr
+			}
+			return plan, fmt.Errorf("execute rebalance action %d pending authoritative recovery: %w", record.Action.ActionID, executeErr)
+		}
 		terminal, lastError, cooldown := RebalanceActionSucceeded, "", c.policy.Cooldown
 		if executeErr != nil {
 			terminal, lastError, cooldown = RebalanceActionFailed, executeErr.Error(), c.policy.FailureCooldown
@@ -166,6 +181,46 @@ func (c *RebalanceController) RunCycle(ctx context.Context) (RebalancePlan, erro
 		}
 	}
 	return plan, nil
+}
+
+func (c *RebalanceController) discoverOperationIDs(action RebalanceAction) (MigrationID, SplitID) {
+	metadata := c.meta.Snapshot()
+	if action.Type == RebalanceMoveReplica {
+		for index := len(metadata.Migrations) - 1; index >= 0; index-- {
+			record := metadata.Migrations[index]
+			if record.RangeID == action.RangeID && record.SourceReplicaID == action.SourceReplicaID && record.TargetNodeID == action.TargetNodeID {
+				return record.MigrationID, 0
+			}
+		}
+	}
+	if action.Type == RebalanceSplitRange {
+		for index := len(metadata.Splits) - 1; index >= 0; index-- {
+			record := metadata.Splits[index]
+			if record.Parent.RangeID == action.RangeID && bytes.Equal(record.SplitKey, action.SplitKey) {
+				return 0, record.SplitID
+			}
+		}
+	}
+	return 0, 0
+}
+
+func (c *RebalanceController) operationStillAuthoritative(actionType RebalanceActionType, migrationID MigrationID, splitID SplitID) bool {
+	metadata := c.meta.Snapshot()
+	if actionType == RebalanceMoveReplica && migrationID != 0 {
+		for _, record := range metadata.Migrations {
+			if record.MigrationID == migrationID {
+				return record.State != MigrationAborted && record.State != MigrationSourceRetired
+			}
+		}
+	}
+	if actionType == RebalanceSplitRange && splitID != 0 {
+		for _, record := range metadata.Splits {
+			if record.SplitID == splitID {
+				return record.State != SplitAborted && record.State != SplitCommitted
+			}
+		}
+	}
+	return false
 }
 
 func (c *RebalanceController) Reconcile(ctx context.Context) error {

@@ -426,20 +426,20 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 | REBALANCE-2 | The planner never mutates membership or catalog ownership; execution uses certified APIs. | verified (Phase 9) | `TestAutomaticRebalanceUsesCertifiedMoveReplica`, `TestAutomaticRebalanceUsesCertifiedSplitRange` |
 | REBALANCE-3 | Every replica move satisfies placement uniqueness, replication factor and identity constraints. | verified (Phase 9) | `TestPlannerRejectsFailedFullAndDuplicateTargets`, randomized policy model |
 | REBALANCE-4 | Every split targets an active splittable range and a valid interior user key. | verified (Phase 9) | `TestPlanSplitUsesUserKeyMedianAndRejectsOneKey`, `TestHotTinyRangeDoesNotSplit` |
-| REBALANCE-5 | Cluster and per-node operation concurrency never exceed policy. | verified (Phase 9) | planner constraint tests and randomized policy model |
-| REBALANCE-6 | Split and migration remain mutually exclusive for one range. | verified (Phase 9) | Phase 7/8 exclusion tests plus operation snapshot filtering |
-| REBALANCE-7 | Hysteresis and durable cooldown prevent immediate reverse movement. | verified (Phase 9) | `TestPlanRebalanceHysteresisAndCooldown` |
-| REBALANCE-8 | Stale catalog/range/replica telemetry cannot execute. | verified (Phase 9) | `TestValidateRebalancePlanRejectsStaleCatalog` |
-| REBALANCE-9 | Controller restart cannot duplicate an authoritative migration or split. | verified (Phase 9) | `TestRebalanceControllerSubprocessCrashMatrix` |
-| REBALANCE-10 | Failed, unavailable or full nodes are never selected as targets. | verified (Phase 9) | `TestPlannerRejectsFailedFullAndDuplicateTargets` |
+| REBALANCE-5 | Cluster and per-node operation concurrency never exceed policy. | verified (Phase 9) | `TestValidateRebalancePlanRechecksMoveHardConstraints`, stateful campaigns |
+| REBALANCE-6 | Split and migration remain mutually exclusive for one range. | verified (Phase 9) | `TestManualOperationsSuppressConflictingAutomaticActions`, Phase 7/8 exclusion tests |
+| REBALANCE-7 | Hysteresis and durable cooldown prevent immediate reverse movement. | verified (Phase 9) | `TestRebalanceExactAntiOscillationSequence`, `TestRebalanceTransientSpikeVersusSustainedLoad`, automatic migration restart test |
+| REBALANCE-8 | Stale catalog/range/replica telemetry cannot execute. | verified (Phase 9) | `TestValidateRebalancePlanRejectsStaleCatalog`, `TestValidateRebalancePlanRechecksMoveHardConstraints`, `TestControllerRejectsFailedTargetBeforeExecution` |
+| REBALANCE-9 | Controller restart cannot duplicate an authoritative migration or split. | verified (Phase 9) | `TestRebalanceControllerSubprocessCrashMatrix`, automatic migration/split node-failure reconciliation tests |
+| REBALANCE-10 | Failed, unavailable or full nodes are never selected as targets. | verified (Phase 9) | hard-revalidation tests, `TestRecoveredNodeRequiresStableWarmupBeforePlacement` |
 | REBALANCE-11 | Learners and retired replicas are excluded from normal balance counts. | verified (Phase 9) | collector role filtering and Phase 8 learner tests |
-| REBALANCE-12 | Leader transfer uses only healthy caught-up voters. | verified (Phase 9) | `TestPlanPrefersLeaderTransferForLeaderOnlySkew`, Phase 8 lagging-transfer tests |
-| REBALANCE-13 | A static feasible workload reaches a no-op state within tolerance. | verified (Phase 9) | `TestProjectedMoveConvergesWithoutReverseChurn` |
-| REBALANCE-14 | Unchanged converged telemetry cannot cause perpetual movement. | verified (Phase 9) | `TestProjectedMoveConvergesWithoutReverseChurn`, cooldown test |
+| REBALANCE-12 | Leader transfer uses only healthy caught-up voters. | verified (Phase 9) | `TestPlanPrefersLeaderTransferForLeaderOnlySkew`, `TestLeaderSkewLongRunUsesTransfersOnly`, Phase 8 lagging-transfer tests |
+| REBALANCE-13 | A static feasible workload reaches a no-op state within tolerance. | verified (Phase 9) | `TestRebalanceRepeatedConvergenceAndLongNoop`, leader-skew long run |
+| REBALANCE-14 | Unchanged converged telemetry cannot cause perpetual movement. | verified (Phase 9) | convergence test, `TestRebalanceBalancedClusterThousandNoopCycles`, unsatisfiable-topology test |
 | REBALANCE-15 | No automatic action reduces replication safety. | verified (Phase 9) | automatic integration tests plus composed Phase 7/8 gates |
-| REBALANCE-16 | Automatic actions preserve MVCC and transaction semantics through certified execution. | verified (Phase 9) | automatic migration bank-total and historical-read assertions |
-| REBALANCE-17 | Action history and cooldown survive controller restart. | verified (Phase 9) | `TestRebalanceControllerRestartReconcilesCompletedSplit`, control codec test |
-| REBALANCE-18 | Every action records reason, cost and expected benefit. | verified (Phase 9) | `TestRebalanceControlReplicatesAndCodecRoundTrips` |
+| REBALANCE-16 | Automatic actions preserve MVCC and transaction semantics through certified execution. | verified (Phase 9) | automatic migration bank-total, two historical digests and latest-state digest; stateful campaigns |
+| REBALANCE-17 | Action history and cooldown survive controller restart. | verified (Phase 9) | automatic migration restart/reversal test, split restart test, control codec test |
+| REBALANCE-18 | Every action records reason, cost and expected benefit. | verified (Phase 9) | control codec test and automatic migration expected/actual score assertion |
 
 ## Foundation
 

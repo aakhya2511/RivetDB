@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rivetdb/rivetdb/internal/clock"
 	"github.com/rivetdb/rivetdb/internal/mvcc"
@@ -171,23 +172,26 @@ func (r MembershipRole) String() string {
 // Replica is one deterministic Raft group plus one range-scoped replicated LSM.
 // It owns no timer or transport goroutine; callers drive Tick and Step.
 type Replica struct {
-	mu           sync.Mutex
-	rangeID      RangeID
-	replicaID    ReplicaID
-	generation   uint64
-	containsKey  func([]byte) bool
-	containsSpan func([]byte, []byte) bool
-	node         *raft.Node
-	engine       *engine.Engine
-	store        raft.Store
-	hlc          *mvcc.Clock
-	mvcc         bool
-	machine      *stateMachine
-	waiters      map[uint64]chan Result
-	snapshots    map[uint64]mvcc.Timestamp
-	nextSnapshot uint64
-	maxWaiters   int
-	stopped      bool
+	mu              sync.Mutex
+	rangeID         RangeID
+	replicaID       ReplicaID
+	generation      uint64
+	containsKey     func([]byte) bool
+	containsSpan    func([]byte, []byte) bool
+	node            *raft.Node
+	engine          *engine.Engine
+	store           raft.Store
+	hlc             *mvcc.Clock
+	mvcc            bool
+	machine         *stateMachine
+	waiters         map[uint64]chan Result
+	snapshots       map[uint64]mvcc.Timestamp
+	nextSnapshot    uint64
+	maxWaiters      int
+	stopped         bool
+	trafficReads    atomic.Uint64
+	trafficWrites   atomic.Uint64
+	trafficRequests atomic.Uint64
 }
 
 func Open(options Options) (_ *Replica, resultErr error) {
@@ -503,6 +507,10 @@ func (r *Replica) ProposeMVCC(ctx context.Context, command Command) (mvcc.Timest
 		return 0, 0, nil, nil, err
 	}
 	index, messages, waiter, err := r.proposeLocked(encoded)
+	if err == nil {
+		r.trafficWrites.Add(1)
+		r.trafficRequests.Add(1)
+	}
 	return timestamp, index, messages, waiter, err
 }
 
@@ -726,9 +734,7 @@ func (r *Replica) RebalanceTelemetry(ctx context.Context) (RebalanceTelemetry, e
 	if err != nil {
 		return RebalanceTelemetry{}, err
 	}
-	stats := r.engine.Stats()
-	result := RebalanceTelemetry{Reads: stats.Gets + stats.Scans, Writes: stats.Puts + stats.Deletes}
-	result.Requests = result.Reads + result.Writes
+	result := RebalanceTelemetry{Reads: r.trafficReads.Load(), Writes: r.trafficWrites.Load(), Requests: r.trafficRequests.Load()}
 	var previous []byte
 	haveUser, choseCommitted := false, false
 	for _, version := range versions {

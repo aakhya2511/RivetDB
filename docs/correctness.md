@@ -437,11 +437,14 @@ composes the exact Phase 7 and lower certification tiers.
 ### Phase 9 workload-aware rebalancing gate
 
 `make certify-rebalance` adds injected-clock rates and integer EWMA tests,
-warm-up/reset/overflow handling, shuffled-input determinism, hard placement
-filters, hysteresis and durable cooldowns, 10,000-event fixed/fresh reference
-campaigns and an opt-in 100,000-event campaign. Integration tests prove that
-automatic plans invoke the certified move, split and leadership-transfer
-paths. Abrupt subprocess exits cover action durability, operation submission,
-and operation completion before controller-history completion; restart
-reconciles the existing operation without duplication. The target composes
-the exact Phase 8 through Phase 1 tiers.
+counter-reset/clock-regression handling, tuple-keyed sampler identity, recovered
+node and split-child warm-up, the exact alternating threshold sequence, spike
+suppression, repeated convergence and 1,000-cycle no-churn checks. Fresh
+validation rechecks execution-critical health, placement, capacity and
+operation limits. Three 10,000-event stateful campaigns and one 100,000-event
+campaign record moves, splits, leader transfers, failures, restarts, manual
+operations, transactions, digests, cooldowns and stale plans. Real-filesystem
+tests prove automatic execution, expected/actual score improvement, bank and
+historical/latest digest preservation, and same-ID recovery after node failure.
+Abrupt subprocess exits cover five controller/operation boundaries. The target
+composes the exact Phase 8 through Phase 1 tiers.

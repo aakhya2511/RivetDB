@@ -34,7 +34,7 @@ func PlanRebalance(observed RebalanceClusterSnapshot, policy RebalancePolicy, co
 	}
 	nodeScores := scoreNodes(snapshot.Nodes, policy)
 	var candidates []rebalanceCandidate
-	insufficient, unsplittable, inProgress, cooled := false, false, false, false
+	insufficient, unsplittable, inProgress, cooled, noEligibleTarget := false, false, false, false, false
 	activeSplits, activeMigrations := uint64(0), uint64(0)
 	for _, node := range snapshot.Nodes {
 		activeMigrations = saturatingAdd(activeMigrations, node.MigrationsIn)
@@ -76,7 +76,9 @@ func PlanRebalance(observed RebalanceClusterSnapshot, policy RebalancePolicy, co
 		}
 	}
 	if policy.Moves && activeMigrations < uint64(policy.MaxConcurrentMigrationsCluster) {
-		candidates = append(candidates, moveCandidates(snapshot, policy, nodeScores, cooldowns)...)
+		moves := moveCandidates(snapshot, policy, nodeScores, cooldowns)
+		noEligibleTarget = len(moves) == 0 && moveOverloaded(snapshot.Nodes, policy, nodeScores, cooldowns)
+		candidates = append(candidates, moves...)
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidateLess(candidates[i], candidates[j]) })
 	usedRanges := make(map[RangeID]struct{})
@@ -118,6 +120,8 @@ func PlanRebalance(observed RebalanceClusterSnapshot, policy RebalancePolicy, co
 			plan.NoopReason = ReasonHotUnsplittableKeyspace
 		case cooled:
 			plan.NoopReason = ReasonCooldown
+		case noEligibleTarget:
+			plan.NoopReason = ReasonNoEligibleTarget
 		default:
 			plan.NoopReason = ReasonBalanced
 		}
@@ -150,8 +154,55 @@ func ValidateRebalancePlan(plan RebalancePlan, fresh RebalanceClusterSnapshot, p
 		if !exists || metric.Generation != action.RangeGeneration || metric.Migrating || metric.Splitting || !metric.Active {
 			return fmt.Errorf("%w: range %d changed", ErrStaleRebalancePlan, action.RangeID)
 		}
+		switch action.Type {
+		case RebalanceMoveReplica:
+			source, sourceOK := findNode(fresh.Nodes, action.SourceNodeID)
+			target, targetOK := findNode(fresh.Nodes, action.TargetNodeID)
+			replica, hosted := replicaOn(metric, action.SourceNodeID)
+			if !sourceOK || !targetOK || !hosted || replica.ReplicaID != action.SourceReplicaID ||
+				!replica.Healthy || replica.Role != "VOTER" || !eligibleMoveTarget(metric, source, target, policy) {
+				return fmt.Errorf("%w: move constraints changed for range %d", ErrStaleRebalancePlan, action.RangeID)
+			}
+			if activeMigrationCount(fresh) >= uint64(policy.MaxConcurrentMigrationsCluster) {
+				return fmt.Errorf("%w: migration capacity changed", ErrStaleRebalancePlan)
+			}
+		case RebalanceSplitRange:
+			key, valid := medianSplitKey(metric)
+			if !valid || !bytes.Equal(key, action.SplitKey) || !splitNodesHaveCapacity(fresh.Nodes, metric, policy) ||
+				activeSplitCount(fresh) >= uint64(policy.MaxConcurrentSplitsCluster) || uint64(len(fresh.Ranges)) >= policy.MaxRanges {
+				return fmt.Errorf("%w: split constraints changed for range %d", ErrStaleRebalancePlan, action.RangeID)
+			}
+		case RebalanceTransferLeader:
+			target, targetOK := findNode(fresh.Nodes, action.TargetNodeID)
+			replica, hosted := replicaOn(metric, action.TargetNodeID)
+			if metric.Leader != action.SourceNodeID || !targetOK || !target.Healthy || !target.Available || !hosted ||
+				!replica.Healthy || replica.Role != "VOTER" || replica.Lag != 0 || replica.LastApplied < metric.CommitIndex ||
+				(policy.MaxLeaderCountPerNode != 0 && target.Leaders >= policy.MaxLeaderCountPerNode) {
+				return fmt.Errorf("%w: leadership constraints changed for range %d", ErrStaleRebalancePlan, action.RangeID)
+			}
+		default:
+			return fmt.Errorf("%w: unknown action type", ErrStaleRebalancePlan)
+		}
 	}
 	return nil
+}
+
+func activeMigrationCount(snapshot RebalanceClusterSnapshot) uint64 {
+	var count uint64
+	for _, node := range snapshot.Nodes {
+		count = saturatingAdd(count, node.MigrationsIn)
+	}
+	return count
+}
+
+func activeSplitCount(snapshot RebalanceClusterSnapshot) uint64 {
+	var count uint64
+	for _, metric := range snapshot.Ranges {
+		if metric.Splitting {
+			count++
+		}
+	}
+	return count
 }
 
 func scoreNodes(nodes []RebalanceNodeMetric, policy RebalancePolicy) map[raft.NodeID]uint64 {
@@ -261,11 +312,14 @@ func leaderCandidate(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, 
 				continue
 			}
 			improvement := projectedPlacementImprovement(snapshot.Nodes, metric, source.NodeID, target.NodeID, policy, true)
+			if improvement == 0 {
+				continue
+			}
 			return RebalanceAction{Type: RebalanceTransferLeader, Reason: ReasonLeaderSkew, RangeID: metric.RangeID,
 				RangeGeneration: metric.Generation, CatalogGeneration: snapshot.CatalogGeneration, SourceNodeID: source.NodeID,
 				TargetNodeID: target.NodeID, SourceScore: scores[source.NodeID], TargetScore: scores[target.NodeID],
 				EstimatedCost: 1, ExpectedImprovement: improvement,
-				Constraints: []string{"existing healthy voter", "caught up through commit index", "range operation exclusion"}}, improvement != 0
+				Constraints: []string{"existing healthy voter", "caught up through commit index", "range operation exclusion"}}, true
 		}
 	}
 	return RebalanceAction{}, false
@@ -282,19 +336,13 @@ func moveCandidates(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, s
 	if len(nodes) < 2 {
 		return nil
 	}
-	weight := policy.BytesWeight + policy.WriteWeight + policy.ReadWeight + policy.LeaderWeight + policy.BacklogWeight + policy.ReplicaWeight
-	thresholdPPM := policy.NodeImbalanceStartPPM
-	if _, recovering := cooldowns.Nodes[nodes[0].NodeID]; recovering {
-		thresholdPPM = policy.NodeImbalanceRecoveryPPM
-	}
-	threshold := mulDivSaturating(weight*rateScale, rateScale+thresholdPPM, rateScale)
-	if scores[nodes[0].NodeID] <= threshold {
+	if !moveOverloaded(nodes, policy, scores, cooldowns) {
 		return nil
 	}
 	var result []rebalanceCandidate
 	for _, source := range nodes {
 		for _, metric := range snapshot.Ranges {
-			if metric.Splitting || metric.Migrating || !metric.Active || metric.Samples < policy.MinSamples && metric.LogicalBytes == 0 || !cooldownExpired(snapshot, cooldowns, metric.RangeID, source.NodeID) {
+			if metric.Splitting || metric.Migrating || !metric.Active || moveRateWarmupRequired(metric, policy) || !cooldownExpired(snapshot, cooldowns, metric.RangeID, source.NodeID) {
 				continue
 			}
 			replica, hosted := replicaOn(metric, source.NodeID)
@@ -319,8 +367,32 @@ func moveCandidates(snapshot RebalanceClusterSnapshot, policy RebalancePolicy, s
 	return result
 }
 
+func moveOverloaded(nodes []RebalanceNodeMetric, policy RebalancePolicy, scores map[raft.NodeID]uint64, cooldowns RebalanceCooldowns) bool {
+	if len(nodes) < 2 {
+		return false
+	}
+	ordered := append([]RebalanceNodeMetric(nil), nodes...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if scores[ordered[i].NodeID] != scores[ordered[j].NodeID] {
+			return scores[ordered[i].NodeID] > scores[ordered[j].NodeID]
+		}
+		return ordered[i].NodeID < ordered[j].NodeID
+	})
+	weight := policy.BytesWeight + policy.WriteWeight + policy.ReadWeight + policy.LeaderWeight + policy.BacklogWeight + policy.ReplicaWeight
+	thresholdPPM := policy.NodeImbalanceStartPPM
+	if _, recovering := cooldowns.Nodes[ordered[0].NodeID]; recovering {
+		thresholdPPM = policy.NodeImbalanceRecoveryPPM
+	}
+	threshold := mulDivSaturating(weight*rateScale, rateScale+thresholdPPM, rateScale)
+	return scores[ordered[0].NodeID] > threshold
+}
+
+func moveRateWarmupRequired(metric RebalanceRangeMetric, policy RebalancePolicy) bool {
+	return metric.Samples < policy.MinSamples && (policy.WriteWeight != 0 || policy.ReadWeight != 0)
+}
+
 func eligibleMoveTarget(metric RebalanceRangeMetric, source, target RebalanceNodeMetric, policy RebalancePolicy) bool {
-	if source.NodeID == target.NodeID || !source.Healthy || !target.Healthy || !target.Available || target.MigrationsIn >= uint64(policy.MaxIncomingMigrationsPerNode) || source.MigrationsOut >= uint64(policy.MaxOutgoingMigrationsPerNode) {
+	if source.NodeID == target.NodeID || !source.Healthy || !target.Healthy || !target.Available || target.Warming || target.MigrationsIn >= uint64(policy.MaxIncomingMigrationsPerNode) || source.MigrationsOut >= uint64(policy.MaxOutgoingMigrationsPerNode) {
 		return false
 	}
 	if policy.MaxReplicaCountPerNode != 0 && target.HostedReplicas >= policy.MaxReplicaCountPerNode {

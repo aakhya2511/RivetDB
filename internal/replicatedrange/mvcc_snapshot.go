@@ -22,6 +22,8 @@ func (r *Replica) GetAt(ctx context.Context, key []byte, timestamp mvcc.Timestam
 	if err != nil {
 		return nil, fmt.Errorf("local MVCC get: %w", err)
 	}
+	r.trafficReads.Add(1)
+	r.trafficRequests.Add(1)
 	return value, nil
 }
 
@@ -44,6 +46,8 @@ func (r *Replica) ScanAt(ctx context.Context, start, end []byte, timestamp mvcc.
 			return nil, ErrKeyOutOfRange
 		}
 	}
+	r.trafficReads.Add(1)
+	r.trafficRequests.Add(1)
 	return values, nil
 }
 

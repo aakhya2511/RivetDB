@@ -30,7 +30,9 @@ Reconcile -> authoritative operation IDs, completion and replicated cooldown
 ```
 
 The executor contains no alternate migration, split or membership algorithm.
-Plan validation rejects stale catalog/range generations and re-plans. A stopped
+Plan validation rejects stale catalog/range generations and rechecks target
+health, availability, duplicate placement, capacity, role, lag and current
+cluster/per-node operation limits immediately before execution. A stopped
 controller submits nothing and never aborts data-plane operations. MetaRange
 unavailability pauses admission; user ranges continue independently.
 
@@ -79,7 +81,10 @@ deadlines. An action is recorded PLANNED before calling a certified primitive,
 then EXECUTING and SUCCEEDED or FAILED. Restart increments
 the controller epoch, reconciles referenced MigrationID/SplitID, and cannot
 duplicate an already authoritative action. Existing split/migration records
-exclude conflicting automatic plans on the same range.
+exclude conflicting automatic plans on the same range. If execution is
+interrupted after an authoritative operation record exists, the action remains
+EXECUTING with that MigrationID or SplitID and recovery resumes the same
+operation rather than marking it failed or submitting a duplicate.
 
 ## 6. Scope and complexity
 

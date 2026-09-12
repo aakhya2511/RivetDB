@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rivetdb/rivetdb/internal/clock"
+	"github.com/rivetdb/rivetdb/internal/raft"
 )
 
 // TrafficCounters are monotonic request counters. Callers must use saturating
@@ -27,34 +28,52 @@ type trafficSample struct {
 	samples  uint32
 }
 
+type trafficIdentity struct {
+	rangeID   RangeID
+	replicaID ReplicaID
+	nodeID    raft.NodeID
+}
+
 // TelemetrySampler derives deterministic integer EWMA rates per durable
 // replica identity. It owns no timer; the controller decides when to sample.
 type TelemetrySampler struct {
 	mu      sync.Mutex
 	clock   clock.Clock
 	alpha   uint64
-	samples map[ReplicaID]trafficSample
+	samples map[trafficIdentity]trafficSample
 }
 
 func NewTelemetrySampler(c clock.Clock, alphaPPM uint64) (*TelemetrySampler, error) {
 	if c == nil || alphaPPM == 0 || alphaPPM > rateScale {
 		return nil, ErrInvalidRebalancePolicy
 	}
-	return &TelemetrySampler{clock: c, alpha: alphaPPM, samples: make(map[ReplicaID]trafficSample)}, nil
+	return &TelemetrySampler{clock: c, alpha: alphaPPM, samples: make(map[trafficIdentity]trafficSample)}, nil
 }
 
 // Observe returns per-second EWMA rates. The first observation and an
 // observation after counter/time regression establish a new baseline.
 func (s *TelemetrySampler) Observe(id ReplicaID, counters TrafficCounters) (read, write, request uint64, samples uint32, err error) {
+	return s.observe(trafficIdentity{replicaID: id}, counters)
+}
+
+func (s *TelemetrySampler) ObserveReplica(rangeID RangeID, id ReplicaID, nodeID raft.NodeID, counters TrafficCounters) (read, write, request uint64, samples uint32, err error) {
+	if rangeID == 0 || nodeID == 0 {
+		return 0, 0, 0, 0, ErrInvalidDescriptor
+	}
+	return s.observe(trafficIdentity{rangeID: rangeID, replicaID: id, nodeID: nodeID}, counters)
+}
+
+func (s *TelemetrySampler) observe(identity trafficIdentity, counters TrafficCounters) (read, write, request uint64, samples uint32, err error) {
+	id := identity.replicaID
 	if id == 0 {
 		return 0, 0, 0, 0, ErrInvalidDescriptor
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock.Now()
-	previous, exists := s.samples[id]
+	previous, exists := s.samples[identity]
 	if !exists || now.Before(previous.at) || counters.Reads < previous.counters.Reads || counters.Writes < previous.counters.Writes || counters.Requests < previous.counters.Requests {
-		s.samples[id] = trafficSample{at: now, counters: counters}
+		s.samples[identity] = trafficSample{at: now, counters: counters}
 		return 0, 0, 0, 0, nil
 	}
 	if now.Equal(previous.at) {
@@ -69,7 +88,7 @@ func (s *TelemetrySampler) Observe(id ReplicaID, counters TrafficCounters) (read
 	previous.request = ewma(previous.request, instantRequest, s.alpha, previous.samples != 0)
 	previous.samples = saturatingInc32(previous.samples)
 	previous.at, previous.counters = now, counters
-	s.samples[id] = previous
+	s.samples[identity] = previous
 	return previous.read, previous.write, previous.request, previous.samples, nil
 }
 

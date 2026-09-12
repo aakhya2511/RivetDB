@@ -120,7 +120,7 @@ type RebalanceNodeMetric struct {
 	HostedReplicas, Leaders, LogicalBytes, PhysicalBytes       uint64
 	ReadRate, WriteRate, RequestRate, ApplyBacklog             uint64
 	MigrationLoad, MigrationsIn, MigrationsOut, SplitsInFlight uint64
-	Healthy, Available                                         bool
+	Healthy, Available, Warming                                bool
 }
 
 type RebalanceClusterSnapshot struct {
