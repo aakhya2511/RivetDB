@@ -11,7 +11,7 @@ Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 11 complete — performance freeze candidate.**
+> **Project status: Phase 12 complete — optional advisory AI freeze candidate.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -70,11 +70,15 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > latency distributions and full-stack scaling coverage, and retains three
 > profile-supported changes: an empty-Version point-read fast path, lower-copy
 > MemTable scan consumption and allocation-free projected planner scoring.
+> Phase 12 adds an optional provider-independent advisor over bounded canonical
+> telemetry. It explains evidence and proposes RangeID-only move, split or
+> leadership intents; every candidate still passes the unchanged Phase 9
+> planner and fresh validator, and the advisor exposes no mutation API.
 >
 > **There is no distributed read protocol, network database service, server or
 > client yet.** Phase 4/5 local inspection and historical snapshots are
 > stale-capable and are not a linearizable distributed read API. Everything else described below
-> is a design with a written specification, not working code — see
+> is not implemented — see
 > [Roadmap](docs/roadmap.md) for exactly what is built and what is not.
 >
 > RivetDB is a research and demonstration system. It is not production
@@ -285,6 +289,34 @@ make benchmark-control
 
 No MVCC/transaction-record GC, range merge, real RPC benchmark, linearizable
 distributed read or representative disk result is implied by this snapshot.
+
+## Optional advisory AI operator
+
+Phase 12 adds a provider-independent advisory layer that explains bounded
+canonical cluster telemetry and proposes NOOP, WAIT, INVESTIGATE, move, split
+or leadership-rebalance intents. AI is never correctness authority: it cannot
+select split keys or placement targets, mutate metadata, execute controller
+actions or participate in recovery. Human approval invokes the unchanged
+Phase 9 planner and fresh validator; only a separate certified host could then
+submit the resulting existing action.
+
+Certification is entirely offline with a deterministic mock. It covers strict
+schema bounds, evidence grounding, invented/stale identities, cooldown and
+operation conflicts, provider failure, timeout, cancellation, backpressure,
+audit linkage, parser fuzzing, 10,000 randomized advice cycles and advisor
+shadow-mode chaos. See [the design](docs/ai-operator.md) and
+[Phase 12 evidence](docs/evidence/phase-12.md).
+
+```bash
+make advisor-test
+make advisor-race
+make advisor-fuzz
+make advisor-shadow-chaos
+make advisor-benchmark
+make certify-advisor
+```
+
+No live provider adapter or credential is required or included.
 
 ---
 

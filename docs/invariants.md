@@ -475,6 +475,27 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 | PERF-7 | Performance measurement and telemetry do not alter user workload counters or protocol outcomes. | verified (Phase 11) |
 | PERF-8 | The published final benchmark tree is the exact tree that passes compositional chaos and every inherited correctness gate. | verified (Phase 11) |
 
+## Advisory AI operator
+
+| ID | Invariant | Status |
+|---|---|---|
+| AI-1 | AI is never correctness or control authority. | verified (Phase 12) |
+| AI-2 | Disabling or removing AI changes no database or deterministic controller behavior. | verified (Phase 12) |
+| AI-3 | AI may emit only bounded structured recommendation types. | verified (Phase 12) |
+| AI-4 | Every executable recommendation passes the existing fresh deterministic validator. | verified (Phase 12) |
+| AI-5 | Stale advice cannot become a validated action. | verified (Phase 12) |
+| AI-6 | Unknown or retired identities cannot become a validated action. | verified (Phase 12) |
+| AI-7 | Advice cannot bypass cooldown, concurrency, placement, operation-exclusion or health constraints. | verified (Phase 12) |
+| AI-8 | Model failure, timeout or malformed output cannot affect data-plane correctness. | verified (Phase 12) |
+| AI-9 | Advisor model/tool data access is read-only. | verified (Phase 12) |
+| AI-10 | Advice history is observational, never authority. | verified (Phase 12) |
+| AI-11 | Advisor input requires no raw user values, keys, secrets or command payloads. | verified (Phase 12) |
+| AI-12 | A host-submitted action from advice can link AdviceID to ActionID for audit. | verified (Phase 12) |
+| AI-13 | Untrusted data strings cannot alter the fixed advisor policy. | verified (Phase 12) |
+| AI-14 | Certification is offline and does not depend on an external model/provider. | verified (Phase 12) |
+| AI-15 | A real-model response cannot directly invoke mutation APIs. | verified (Phase 12) |
+| AI-16 | All STORAGE/RAFT/MVCC/TXN/SPLIT/MIGRATE/REBALANCE/CHAOS guarantees remain unchanged. | verified (Phase 12) |
+
 ## Foundation
 
 These concern the Phase 0 infrastructure and are enforced today.

@@ -12,8 +12,8 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phases 0–11 are complete and certified. The core is performance-frozen;
-optional Phase 12 advisory AI is next.**
+**Phases 0–12 are complete and certified. The core is feature- and
+performance-frozen; Phase 12 AI remains optional and advisory-only.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -47,6 +47,10 @@ Phase 11 adds the benchmark/profile contract in `docs/performance.md`, bounded
 latency distributions and three measured changes without altering semantics.
 See `docs/evidence/phase-11.md`. Do not change performance-frozen code casually
 or weaken the inherited gate for optional Phase 12 work.
+Phase 12 adds `internal/advisor`, which consumes bounded canonical telemetry,
+parses strict recommendations, reuses the Phase 9 planner/validator and records
+observational audit linkage. It has no mutation API and no core package imports
+it. See `docs/ai-operator.md` and `docs/evidence/phase-12.md`.
 
 The module has **zero dependencies** and no `go.sum`. Keep it that way as long
 as it is honest to; §24 of the project brief allows dependencies for

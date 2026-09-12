@@ -26,7 +26,7 @@ find than to prevent.
 | 9 | Workload-aware rebalancer | ✅ complete |
 | 10 | Chaos and correctness campaigns | ✅ complete |
 | 11 | Performance engineering | ✅ |
-| 12 | Optional AI operator | ⬜ |
+| 12 | Optional AI operator | ✅ complete |
 
 **What exists right now:** Phase 0, the certified Phase 1 local latest-state
 engine, the mechanically qualified Phase 2 single-group Raft core, Phase 3's
@@ -359,13 +359,20 @@ See [performance.md](performance.md) and
 
 ---
 
-## Phase 12 — Optional AI operator ⬜
+## Phase 12 — Optional AI operator ✅
 
 Only after the database gates pass. A component that consumes telemetry and
 explains *why* a range is hot or a node is overloaded, and suggests actions.
 Its suggestions enter the same validator as every other proposal
 (REBALANCE-2) — it recommends, it never executes, and no database correctness
 property depends on it.
+
+**Built:** bounded canonical privacy-filtered snapshots · strict grounded JSON
+advice · RangeID-only action intents · provider-neutral model interface and
+deterministic mock · human approval with fresh Phase 9 planning/validation ·
+SHA-256 provenance and observational ActionID linkage · disabled/shadow mode ·
+failure, fuzz and 10,000-cycle campaigns. See [ai-operator.md](ai-operator.md)
+and [evidence/phase-12.md](evidence/phase-12.md).
 
 ---
 

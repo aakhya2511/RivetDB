@@ -472,3 +472,14 @@ composes every Phase 1--10 correctness tier. Near-full storage may qualify
 timings, but never weakens or substitutes a correctness tier. The environment,
 claim boundary and full results are recorded in
 [evidence/phase-11.md](evidence/phase-11.md).
+
+### Phase 12 advisory AI gate
+
+`make certify-advisor` adds strict-schema/parser, grounding, stale/unknown ID,
+policy/operation conflict, provider failure, cancellation, timeout,
+backpressure, audit linkage and recommendation fixtures. It runs a 10,000-cycle
+randomized advice campaign, bounded Go fuzzing, race detection and identical
+Phase 10 schedules with advisor absent/disabled/shadow-enabled. Certification
+uses only a deterministic mock and then composes the exact `certify-chaos`
+chain. Natural-language quality is not a correctness claim; fail-closed
+structure, fresh validation and unchanged authority are.

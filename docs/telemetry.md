@@ -51,3 +51,13 @@ diagnostics but excluded from normal placement totals. A new ReplicaID starts a
 new metric identity; parent samples are not copied to split children. A node
 observed unavailable must accumulate `MinSamples` stable collector observations
 after recovery before it is eligible as a placement target.
+
+## 4. Phase 12 advisor projection
+
+The optional advisor deep-copies this snapshot into a separately bounded,
+canonically ordered projection. It retains numeric node/range/replica health,
+load, lag and operation summaries but omits range bounds, sampled user keys,
+values, command payloads and raw error text. Recent actions, cooldowns and
+environment-qualified benchmark summaries are independently bounded. Advisor
+inspection is non-accounting and does not update request counters or sampler
+state.

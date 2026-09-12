@@ -22,6 +22,7 @@ SPLIT_PKGS ?= ./internal/multiraft ./internal/replicatedrange ./internal/storage
 MIGRATION_PKGS ?= ./internal/raft ./internal/replicatedrange ./internal/multiraft
 REBALANCE_PKGS ?= ./internal/multiraft ./internal/replicatedrange
 CHAOS_PKGS ?= ./internal/chaos ./internal/multiraft ./internal/replicatedrange
+ADVISOR_PKGS ?= ./internal/advisor
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -427,6 +428,35 @@ certify-chaos: ## Run the complete Phase 10 gate and every inherited Phase 1-9 g
 	$(MAKE) chaos-durable
 	$(MAKE) chaos-crash
 	$(MAKE) certify-rebalance
+
+.PHONY: advisor-test
+advisor-test: ## Run deterministic Phase 12 schema, boundary, validation, failure, and audit tests
+	$(GO) test -count=1 -timeout 10m $(TEST_FLAGS) $(ADVISOR_PKGS)
+
+.PHONY: advisor-race
+advisor-race: ## Run the bounded advisor package under the race detector
+	$(GO) test -race -count=2 -timeout 10m $(TEST_FLAGS) $(ADVISOR_PKGS)
+
+.PHONY: advisor-fuzz
+advisor-fuzz: ## Fuzz the strict structured advice parser for a bounded interval
+	$(GO) test -run '^$$' -fuzz '^FuzzAdviceParser$$' -fuzztime=10s -timeout 2m $(ADVISOR_PKGS)
+
+.PHONY: advisor-shadow-chaos
+advisor-shadow-chaos: ## Prove disabled/shadow advice leaves Phase 10 logical results unchanged
+	$(GO) test -count=1 -timeout 10m -run 'DisabledAndShadowMode|RandomizedAdvisoryCampaign|ShadowAgreement' $(TEST_FLAGS) $(ADVISOR_PKGS)
+
+.PHONY: advisor-benchmark
+advisor-benchmark: ## Measure disabled, snapshot-serialization, and parser overhead
+	$(GO) test -run '^$$' -bench 'Benchmark(SnapshotSerialization|AdviceParse|DisabledAdvisor)' -benchmem -count=5 $(ADVISOR_PKGS)
+
+.PHONY: certify-advisor
+certify-advisor: ## Run Phase 12 offline certification and every inherited Phase 1-11 gate
+	$(MAKE) check
+	$(MAKE) advisor-test
+	$(MAKE) advisor-race
+	$(MAKE) advisor-fuzz
+	$(MAKE) advisor-shadow-chaos
+	$(MAKE) certify-chaos
 
 .PHONY: diff-check
 diff-check: ## Fail on whitespace errors in the working diff

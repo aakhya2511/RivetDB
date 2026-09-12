@@ -653,6 +653,16 @@ leader-transfer inputs. Recommendations must include snapshot/policy versions,
 observations, threshold, score/cost/benefit, limitations and validator result.
 The existing deterministic fresh-state validator remains mandatory; disabling
 or omitting AI has zero effect on correctness or control behavior.
+
+### Phase 12 implemented advisory boundary
+
+`internal/advisor` is a leaf consumer of canonical Phase 9 observations. Core
+packages do not import it. The model sees bounded structured JSON and can emit
+only bounded RangeID-level intents. Human approval derives exact placement or
+split parameters with the unchanged planner and validates them against fresh
+state. The returned candidate is not executed by the advisor. Advice records
+and provider availability are outside MetaRange, Raft, transaction, MVCC,
+split, migration and recovery authority.
 ### Phase 5 replicated MVCC layer
 
 Each range now optionally composes a range-scoped HLC, timestamped command

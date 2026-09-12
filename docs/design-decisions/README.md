@@ -52,6 +52,7 @@ Phase:    which phase this governs
 | [0021](0021-workload-aware-deterministic-rebalancing.md) | Workload-aware deterministic rebalancing | Accepted | 9 |
 | [0022](0022-compositional-distributed-chaos.md) | Compositional distributed chaos and reference-model certification | Accepted | 10 |
 | [0023](0023-evidence-driven-final-performance-engineering.md) | Evidence-driven final performance engineering and benchmark contract | Accepted | 11 |
+| [0024](0024-advisory-ai-operator.md) | Advisory AI operator outside deterministic authority | Accepted | 12 |
 
 ## Planned
 

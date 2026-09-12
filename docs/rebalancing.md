@@ -102,3 +102,12 @@ for both action kinds. At 1,000 ranges this reduced the matched benchmark median
 15.7%, bytes 29.8% and allocations 45.3%; collection and fresh validation
 remain separately measured costs. Planning policy, tie-breaks, admission and
 execution semantics are unchanged.
+
+## 8. Phase 12 advisor boundary
+
+The deterministic planner neither calls nor depends on AI. RangeID-only
+advisor intents are matched to an independently produced plan; exact source,
+target and split key remain planner outputs. The unchanged fresh-state
+validator then rechecks generation, health, placement, lag, capacity,
+cooldowns and split/migration concurrency before a candidate is approved for
+human review. The advisor cannot begin or execute an action.
