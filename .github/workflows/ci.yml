@@ -42,7 +42,7 @@ jobs:
       - name: go mod tidy is up to date
         run: make tidy
 
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.6.1
 
