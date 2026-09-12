@@ -4,14 +4,14 @@ RivetDB is an experimental database built from first principles. Its local LSM
 storage engine, Raft core, durable replicated ranges, static Multi-Raft node,
 range catalog, mutation router, replicated MVCC versions, range-local
 historical snapshots, Snapshot Isolation transactions with cross-range 2PC,
-and transaction-safe online range splitting are implemented; replica migration
-and workload-adaptive placement do not exist yet.
+transaction-safe online range splitting, and explicitly driven online replica
+migration are implemented; workload-adaptive placement does not exist yet.
 
 Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 7 complete — online transaction-safe range splitting certified.**
+> **Project status: Phase 8 complete — online replica migration certified.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -54,6 +54,10 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > exact logical MVCC image transfer, original-timestamp parent delta replay,
 > a short final fence, atomic catalog cutover, immutable lineage, stale-parent
 > redirects, and retained parent transaction-status archives.
+> Phase 8 can move a live range replica between nodes using non-voting
+> learners, bounded checksummed snapshot/bootstrap state transfer, Raft
+> catch-up, joint-consensus membership transition, leadership transfer,
+> replicated placement metadata, and crash-safe old-replica retirement.
 >
 > **There is no distributed read protocol, network database service, server or
 > client yet.** Phase 4/5 local inspection and historical snapshots are
@@ -173,6 +177,7 @@ make certify-multiraft # Phase 4 gate plus every lower regression gate
 make certify-mvcc   # Phase 5 MVCC gate plus every lower regression gate
 make certify-txn    # Phase 6 transaction gate plus every lower regression gate
 make certify-split  # Phase 7 online split gate plus every lower regression gate
+make certify-migration # Phase 8 migration gate plus every lower regression gate
 make benchmark      # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover     # coverage profile and HTML report
 make help      # all targets

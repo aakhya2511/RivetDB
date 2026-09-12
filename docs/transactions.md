@@ -103,5 +103,14 @@ Transactions retain their original `(RangeID,generation)` participant pins. A
 transaction begun before a split but not prepared receives a stale/split error
 and aborts for client retry rather than silently rewriting participants.
 Terminal records remain recoverable in the retired parent's status archive.
-See [range-splitting.md](range-splitting.md). Phase 8 must preserve these
-authorities during replica movement; migration is not implemented.
+See [range-splitting.md](range-splitting.md). Phase 8 preserves these
+authorities during replica movement.
+
+## 8. Phase 8 replica migration
+
+Migration keeps the RangeID and transaction participant identity unchanged and
+does not install a prepare fence. The full logical state snapshot includes
+home TxnRecords, participant records and prepared intents; ordinary replicated
+transaction commands after snapshot index S reach the learner through normal
+Raft catch-up. Readiness compares full logical digests through promotion
+barrier P before the target can vote.

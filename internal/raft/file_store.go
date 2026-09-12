@@ -13,7 +13,7 @@ import (
 const (
 	fileStoreName       = "RAFTSTATE"
 	fileStoreTemporary  = "RAFTSTATE.tmp"
-	fileStoreVersion    = uint16(1)
+	fileStoreVersion    = uint16(2)
 	fileStoreHeaderSize = 16
 	fileStoreMaxBytes   = uint64(256 << 20)
 	fileStoreMaxCommand = uint64(16 << 20)
@@ -165,7 +165,22 @@ func encodeStatePayload(state PersistentState) ([]byte, error) {
 	if uint64(len(state.Snapshot.Data)) > fileStoreMaxCommand || uint64(len(state.Entries)) > fileStoreMaxEntries { //nolint:gosec // nonnegative lengths
 		return nil, ErrResourceLimit
 	}
-	size := uint64(8*4 + 4 + len(state.Snapshot.Data) + 4) //nolint:gosec // checked below
+	configuration := []byte(nil)
+	snapshotConfiguration := []byte(nil)
+	var err error
+	if state.Config.Version != 0 {
+		configuration, err = EncodeConfiguration(state.Config)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if state.Snapshot.Config.Version != 0 {
+		snapshotConfiguration, err = EncodeConfiguration(state.Snapshot.Config)
+		if err != nil {
+			return nil, err
+		}
+	}
+	size := uint64(8*4 + 4 + len(state.Snapshot.Data) + 4 + 4 + len(snapshotConfiguration) + 4 + len(configuration)) //nolint:gosec // checked below
 	for _, entry := range state.Entries {
 		if uint64(len(entry.Command)) > fileStoreMaxCommand { //nolint:gosec // nonnegative length
 			return nil, ErrResourceLimit
@@ -190,6 +205,10 @@ func encodeStatePayload(state PersistentState) ([]byte, error) {
 		payload = appendU32(payload, uint32(len(entry.Command))) //nolint:gosec // bounded above
 		payload = append(payload, entry.Command...)
 	}
+	payload = appendU32(payload, uint32(len(snapshotConfiguration))) //nolint:gosec
+	payload = append(payload, snapshotConfiguration...)
+	payload = appendU32(payload, uint32(len(configuration))) //nolint:gosec // membership is bounded
+	payload = append(payload, configuration...)
 	return payload, nil
 }
 
@@ -278,6 +297,28 @@ func (d *stateDecoder) decode() (PersistentState, error) {
 			return PersistentState{}, ErrCorruptStore
 		}
 		state.Entries = append(state.Entries, Entry{Index: index, Term: entryTerm, Type: kind, Command: command})
+	}
+	snapshotConfiguration, ok := d.bytes(1 << 20)
+	if !ok {
+		return PersistentState{}, ErrCorruptStore
+	}
+	if len(snapshotConfiguration) != 0 {
+		var configErr error
+		state.Snapshot.Config, configErr = DecodeConfiguration(snapshotConfiguration)
+		if configErr != nil {
+			return PersistentState{}, ErrCorruptStore
+		}
+	}
+	configuration, ok := d.bytes(1 << 20)
+	if !ok {
+		return PersistentState{}, ErrCorruptStore
+	}
+	if len(configuration) != 0 {
+		var configErr error
+		state.Config, configErr = DecodeConfiguration(configuration)
+		if configErr != nil {
+			return PersistentState{}, ErrCorruptStore
+		}
 	}
 	if d.remaining() != 0 {
 		return PersistentState{}, ErrCorruptStore

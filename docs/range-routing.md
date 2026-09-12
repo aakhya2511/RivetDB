@@ -110,3 +110,12 @@ than read from coordinator memory.
 Transactions continue to pin the descriptor generation used to build their
 write set. If cutover makes that pin stale before prepare, commit aborts for
 client retry rather than retargeting a transaction mid-protocol.
+
+## 7. Phase 8 placement changes
+
+Migration leaves key bounds and RangeID unchanged. Ordinary routing uses only
+the published descriptor and never selects a learner. A transition descriptor
+exists solely for validated administrative Raft traffic to the target. After
+the final Raft configuration commits, MetaRange atomically publishes the new
+ReplicaID/NodeID placement and increments descriptor/catalog generations;
+stale source-incarnation traffic is rejected.

@@ -203,3 +203,13 @@ user traffic but retain terminal transaction status and physical data.
 The parent Raft log remains the delta source because integrated log compaction
 is still disabled. Final fence index F separates acknowledged pre-fence writes
 from rejected post-fence proposals.
+
+## Phase 8 migration state
+
+Migration adds the LEARNER lifecycle. Learners persist Raft log/snapshots and
+apply committed state but reject ordinary reads, writes and transaction
+service. The canonical full-state snapshot contains every MVCC version and
+tombstone, intent, transaction and participant record, applied/safe frontiers,
+HLC state and lifecycle metadata. Restore is incremental and durable. A target
+becomes ACTIVE only after catch-up through promotion barrier P, logical digest
+equality, committed final membership and MetaRange placement cutover.

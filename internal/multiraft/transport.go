@@ -152,5 +152,8 @@ func cloneEnvelope(envelope Envelope) Envelope {
 	}
 	envelope.Message.Entries = entries
 	envelope.Message.Snapshot.Data = bytes.Clone(envelope.Message.Snapshot.Data)
+	envelope.Message.Snapshot.Config.OldVoters = append([]raft.NodeID(nil), envelope.Message.Snapshot.Config.OldVoters...)
+	envelope.Message.Snapshot.Config.NewVoters = append([]raft.NodeID(nil), envelope.Message.Snapshot.Config.NewVoters...)
+	envelope.Message.Snapshot.Config.Learners = append([]raft.NodeID(nil), envelope.Message.Snapshot.Config.Learners...)
 	return envelope
 }

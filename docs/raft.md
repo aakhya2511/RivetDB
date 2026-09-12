@@ -212,3 +212,14 @@ are independent groups. Split orchestration records authority changes as
 ordinary committed commands: parent barriers/fences, child image and replay,
 then one metadata catalog CAS. Leader replacement replays these commands from
 the durable log; coordinator memory never establishes ownership.
+
+## Phase 8 membership changes
+
+Raft now commits canonical `EntryConfig` records with monotonic configuration
+versions. A configuration is stable (`OldVoters`) or joint
+(`OldVoters`,`NewVoters`), with a separate learner set. Joint commit and
+election quorums require majority(old) AND majority(new); learners never vote,
+campaign, lead or count toward quorum. Committed configuration is persisted in
+the Raft store and snapshots, so log compaction cannot erase membership
+authority. Controlled `TimeoutNow` leadership transfer admits only an eligible,
+caught-up final voter and pauses proposals during the transfer window.

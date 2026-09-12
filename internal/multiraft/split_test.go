@@ -613,7 +613,7 @@ func TestSplitConstrainedEnvironmentBaseline(t *testing.T) {
 		observed[ParentRetired].Sub(started))
 }
 
-func mustCatalog(t *testing.T, bootstrap Bootstrap) *Catalog {
+func mustCatalog(t testing.TB, bootstrap Bootstrap) *Catalog {
 	t.Helper()
 	catalog, err := NewCatalog(bootstrap)
 	if err != nil {

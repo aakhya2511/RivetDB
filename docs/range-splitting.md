@@ -145,3 +145,7 @@ semantics, deletion proof and transaction interaction. Split does not solve
 those problems. Future rebalancing needs range bytes, read/write rates, apply
 backlog, CPU, placement and split history; Phase 7 gathers no automatic policy.
 
+Phase 8 implements those migration primitives without changing split
+semantics. MetaRange rejects a split and migration on the same range, while
+operations on different ranges may proceed independently. A split child is an
+ordinary ACTIVE range and can subsequently migrate without changing lineage.

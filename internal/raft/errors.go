@@ -18,4 +18,5 @@ var (
 	ErrUnsupportedVersion = errors.New("raft: unsupported store version")
 	ErrResourceLimit      = errors.New("raft: resource limit exceeded")
 	ErrInvariantCheck     = errors.New("raft: simulator invariant violation")
+	ErrLeadershipTransfer = errors.New("raft: leadership transfer in progress")
 )

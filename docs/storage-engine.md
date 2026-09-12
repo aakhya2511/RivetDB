@@ -1007,3 +1007,13 @@ so every version and tombstone for the boundary key enters the right child.
 Child bootstrap and replay use replicated Engine application and retain the
 existing file publication order, including containing-directory fsync. Phase 7
 does not share SSTables or delete retired parent files.
+
+## Phase 8 logical replica transfer
+
+Replica migration reuses logical engine enumeration rather than copying raw
+SSTables. The target may produce a different physical layout while preserving
+the complete logical state. Snapshot staging uses bounded synchronous chunks,
+per-chunk CRCs, a whole-image SHA-256 digest, atomic rename and containing-
+directory fsync. Source deletion is a separate terminal action gated by final
+Raft membership, MetaRange placement and a durable replica tombstone; the
+Phase 1 WAL/SSTable formats and publication ordering are unchanged.

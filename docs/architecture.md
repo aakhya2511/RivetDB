@@ -467,14 +467,20 @@ the window:
 {A, B, C, D*}
    │ stream a snapshot to D, then catch it up from the log
    │ promote D to voter              → quorum 3 of {A,B,C,D}
-{A, B, C, D}
+Joint(old={A,B,C}, new={B,C,D})
+   │ every commit/election requires majority(old) AND majority(new)
    │ transfer leadership away from A if A leads
-   │ remove A                        → quorum 2 of {B,C,D}
+   │ commit stable new              → quorum 2 of {B,C,D}
 {B, C, D}
 ```
 
 Learners receive data without voting, so a slow new replica delays the
 migration but never the cluster.
+
+Phase 8 implements this protocol. Raft's committed stable/joint configuration
+is membership authority; MetaRange placement follows the committed final
+configuration. See [raft-membership.md](raft-membership.md) and
+[replica-migration.md](replica-migration.md).
 
 ---
 

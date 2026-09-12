@@ -40,6 +40,7 @@ type EntryType uint8
 const (
 	EntryNoOp EntryType = iota + 1
 	EntryCommand
+	EntryConfig
 )
 
 type Entry struct {
@@ -55,15 +56,26 @@ type HardState struct {
 }
 
 type Snapshot struct {
-	Index uint64
-	Term  uint64
-	Data  []byte
+	Index  uint64
+	Term   uint64
+	Data   []byte
+	Config Configuration
 }
 
 type PersistentState struct {
 	HardState HardState
 	Snapshot  Snapshot
+	Config    Configuration
 	Entries   []Entry
+}
+
+// Configuration is the last committed membership value. NewVoters is empty
+// for a stable configuration and non-empty for joint consensus.
+type Configuration struct {
+	Version   uint64
+	OldVoters []NodeID
+	NewVoters []NodeID
+	Learners  []NodeID
 }
 
 type MessageType uint8
@@ -75,6 +87,7 @@ const (
 	AppendEntriesResponse
 	InstallSnapshot
 	InstallSnapshotResponse
+	TimeoutNow
 )
 
 type Message struct {
@@ -124,22 +137,26 @@ type Config struct {
 	Random             *rand.Rand
 	Store              Store
 	StateMachine       StateMachine
+	InitialConfig      Configuration
+	BootstrapLearner   bool
 }
 
 type Status struct {
-	ID          NodeID
-	Role        Role
-	Term        uint64
-	VotedFor    NodeID
-	LeaderID    NodeID
-	CommitIndex uint64
-	LastApplied uint64
-	LastIndex   uint64
-	LastTerm    uint64
-	Snapshot    Snapshot
-	NextIndex   map[NodeID]uint64
-	MatchIndex  map[NodeID]uint64
-	Fatal       error
+	ID                     NodeID
+	Role                   Role
+	Term                   uint64
+	VotedFor               NodeID
+	LeaderID               NodeID
+	CommitIndex            uint64
+	LastApplied            uint64
+	LastIndex              uint64
+	LastTerm               uint64
+	Snapshot               Snapshot
+	NextIndex              map[NodeID]uint64
+	MatchIndex             map[NodeID]uint64
+	Config                 Configuration
+	Fatal                  error
+	TransferringLeadership bool
 }
 
 func Quorum(nodes int) int {
@@ -164,20 +181,27 @@ func cloneEntries(entries []Entry) []Entry {
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {
 	snapshot.Data = bytes.Clone(snapshot.Data)
+	snapshot.Config = cloneConfiguration(snapshot.Config)
 	return snapshot
 }
 
 func clonePersistent(state PersistentState) PersistentState {
 	state.Snapshot = cloneSnapshot(state.Snapshot)
+	state.Config = cloneConfiguration(state.Config)
 	state.Entries = cloneEntries(state.Entries)
 	return state
 }
 
 func validEntryType(kind EntryType) bool {
-	return kind == EntryNoOp || kind == EntryCommand
+	return kind == EntryNoOp || kind == EntryCommand || kind == EntryConfig
 }
 
 func validatePersistent(state PersistentState) error {
+	if state.Config.Version != 0 {
+		if err := validateConfiguration(state.Config); err != nil {
+			return fmt.Errorf("%w: invalid committed configuration", ErrInvalidState)
+		}
+	}
 	if state.HardState.Term == 0 && state.HardState.VotedFor != 0 {
 		return fmt.Errorf("%w: vote in term zero", ErrInvalidState)
 	}
@@ -186,6 +210,11 @@ func validatePersistent(state PersistentState) error {
 	}
 	if len(state.Snapshot.Data) > MaxCommandBytes {
 		return fmt.Errorf("%w: snapshot exceeds resource limit", ErrInvalidState)
+	}
+	if state.Snapshot.Config.Version != 0 {
+		if err := validateConfiguration(state.Snapshot.Config); err != nil {
+			return fmt.Errorf("%w: invalid snapshot configuration", ErrInvalidState)
+		}
 	}
 	if state.Snapshot.Index > math.MaxUint64-uint64(len(state.Entries)) { //nolint:gosec // nonnegative slice length
 		return fmt.Errorf("%w: log index overflow", ErrInvalidState)
@@ -196,7 +225,7 @@ func validatePersistent(state PersistentState) error {
 		if entry.Index != want || entry.Term == 0 || entry.Term < lastTerm || entry.Term > state.HardState.Term || !validEntryType(entry.Type) || len(entry.Command) > MaxCommandBytes {
 			return fmt.Errorf("%w: entry offset %d index=%d term=%d type=%d", ErrInvalidState, offset, entry.Index, entry.Term, entry.Type)
 		}
-		if entry.Type == EntryNoOp && len(entry.Command) != 0 {
+		if entry.Type == EntryNoOp && len(entry.Command) != 0 || entry.Type == EntryConfig && validateEncodedConfiguration(entry.Command) != nil {
 			return fmt.Errorf("%w: no-op %d has command bytes", ErrInvalidState, entry.Index)
 		}
 		lastTerm = entry.Term

@@ -75,3 +75,12 @@ parent retirement. ABORTED is terminal and leaves the catalog unchanged.
 MetaRange corruption fails only that replica. Other metadata replicas may
 retain quorum. No user-range directory scan is an authority fallback.
 
+## 6. Phase 8 migration authority
+
+MetaRange allocates monotonically increasing MigrationIDs and ReplicaIDs and
+persists the migration state/epoch, source and target identities, snapshot and
+promotion frontiers, configuration version, catalog generation and logical
+digest. It is placement authority, not Raft membership authority. The final
+placement CAS occurs only after the user range commits its stable final Raft
+configuration. Split and migration records are mutually exclusive per range;
+unrelated ranges remain independent.

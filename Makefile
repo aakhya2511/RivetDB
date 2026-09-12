@@ -19,6 +19,7 @@ MULTIRAFT_PKGS ?= ./internal/multiraft
 MVCC_PKGS ?= ./internal/mvcc ./internal/replicatedrange ./internal/multiraft ./internal/storage/engine ./internal/storage/manifest ./internal/storage/pipeline ./internal/storage/compaction
 TXN_PKGS ?= ./internal/txn ./internal/multiraft ./internal/replicatedrange ./internal/storage/engine ./internal/storage/pipeline ./internal/storage/compaction
 SPLIT_PKGS ?= ./internal/multiraft ./internal/replicatedrange ./internal/storage/engine
+MIGRATION_PKGS ?= ./internal/raft ./internal/replicatedrange ./internal/multiraft
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -282,6 +283,41 @@ certify-split: ## Run the Phase 7 gate and every frozen lower-phase certificatio
 	$(MAKE) split-stress
 	$(MAKE) split-chaos
 	$(MAKE) split-crash
+	$(MAKE) txn-stress txn-chaos txn-crash
+	$(MAKE) mvcc-stress mvcc-chaos mvcc-crash
+	$(MAKE) multiraft-stress multiraft-chaos multiraft-crash
+	$(MAKE) range-stress range-crash
+	$(MAKE) raft-stress raft-chaos raft-exhaustive
+	$(MAKE) stress crash exhaustive PKGS="$(LOCAL_PKGS)"
+
+.PHONY: migration-test
+migration-test: ## Run deterministic Phase 8 membership, transfer, migration, and restart tests
+	$(GO) test -count=1 -timeout 60m $(TEST_FLAGS) $(MIGRATION_PKGS)
+
+.PHONY: migration-race
+migration-race: ## Run Phase 8 packages under the race detector
+	$(GO) test -race -count=1 -timeout 90m $(TEST_FLAGS) $(MIGRATION_PKGS)
+
+.PHONY: migration-stress
+migration-stress: ## Run randomized membership and repeated disk-backed migration campaigns
+	RIVETDB_MIGRATION_STRESS=1 $(GO) test -count=1 -timeout 90m -run 'RandomizedMigrationMembershipHeavy|RepeatedDiskBackedMigrations' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: migration-chaos
+migration-chaos: ## Run learner, online traffic, leadership, identity, and reconciliation campaigns
+	$(GO) test -count=1 -timeout 90m -run 'Migration|Migrate|RetiredSource|Learner|Joint|ConfigurationSurvivesSnapshot' $(TEST_FLAGS) ./internal/raft ./internal/replicatedrange ./internal/multiraft
+
+.PHONY: migration-crash
+migration-crash: ## Run abrupt Phase 8 snapshot, configuration, cutover, and deletion crashes
+	RIVETDB_MIGRATION_CRASH=1 $(GO) test -count=1 -timeout 60m -run '^TestMigrationSubprocessCrashMatrix$$' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: certify-migration
+certify-migration: ## Run the Phase 8 gate and every frozen lower-phase certification
+	$(MAKE) check
+	$(MAKE) race RACE_COUNT=1
+	$(MAKE) migration-stress
+	$(MAKE) migration-chaos
+	$(MAKE) migration-crash
+	$(MAKE) split-stress split-chaos split-crash
 	$(MAKE) txn-stress txn-chaos txn-crash
 	$(MAKE) mvcc-stress mvcc-chaos mvcc-crash
 	$(MAKE) multiraft-stress multiraft-chaos multiraft-crash

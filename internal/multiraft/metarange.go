@@ -79,8 +79,8 @@ func (m *metaMachine) Restore(data []byte) error {
 }
 
 func validateMetadataTransition(old, next *metadataState) error {
-	if old == nil || next == nil || next.nextRangeID < old.nextRangeID || next.nextSplitID < old.nextSplitID ||
-		len(next.splits) < len(old.splits) || len(next.lineage) < len(old.lineage) {
+	if old == nil || next == nil || next.nextRangeID < old.nextRangeID || next.nextSplitID < old.nextSplitID || next.nextReplicaID < old.nextReplicaID || next.nextMigrationID < old.nextMigrationID ||
+		len(next.splits) < len(old.splits) || len(next.migrations) < len(old.migrations) || len(next.lineage) < len(old.lineage) {
 		return ErrCorruptMetadata
 	}
 	for parent, edge := range old.lineage {
@@ -107,22 +107,45 @@ func validateMetadataTransition(old, next *metadataState) error {
 			return ErrCorruptMetadata
 		}
 	}
-	added := len(next.splits) - len(old.splits)
-	if added > 1 || changed+added != 1 {
+	addedSplits := len(next.splits) - len(old.splits)
+	for id, before := range old.migrations {
+		after, ok := next.migrations[id]
+		if !ok {
+			return ErrCorruptMetadata
+		}
+		if before == after {
+			continue
+		}
+		changed++
+		if after.Epoch == before.Epoch+1 && after.State == before.State {
+			continue
+		}
+		if after.Epoch != before.Epoch || !legalMigrationTransition(before.State, after.State) {
+			return ErrCorruptMetadata
+		}
+	}
+	addedMigrations := len(next.migrations) - len(old.migrations)
+	if addedSplits+addedMigrations > 1 || changed+addedSplits+addedMigrations != 1 {
 		return ErrCorruptMetadata
 	}
-	if added == 1 {
+	if addedSplits == 1 {
 		if next.nextRangeID != old.nextRangeID+2 || next.nextSplitID != old.nextSplitID+1 ||
-			next.catalog.Generation() != old.catalog.Generation() || len(next.lineage) != len(old.lineage) {
+			next.nextReplicaID != old.nextReplicaID || next.nextMigrationID != old.nextMigrationID || next.catalog.Generation() != old.catalog.Generation() || len(next.lineage) != len(old.lineage) {
 			return ErrCorruptMetadata
 		}
 		return nil
 	}
-	if next.nextRangeID != old.nextRangeID || next.nextSplitID != old.nextSplitID {
+	if addedMigrations == 1 {
+		if next.nextReplicaID != old.nextReplicaID+1 || next.nextMigrationID != old.nextMigrationID+1 || next.nextRangeID != old.nextRangeID || next.nextSplitID != old.nextSplitID || next.catalog.Generation() != old.catalog.Generation() {
+			return ErrCorruptMetadata
+		}
+		return nil
+	}
+	if next.nextRangeID != old.nextRangeID || next.nextSplitID != old.nextSplitID || next.nextReplicaID != old.nextReplicaID || next.nextMigrationID != old.nextMigrationID {
 		return ErrCorruptMetadata
 	}
 	if next.catalog.Generation() == old.catalog.Generation()+1 {
-		if len(next.lineage) != len(old.lineage)+1 {
+		if len(next.lineage) != len(old.lineage)+1 && len(next.lineage) != len(old.lineage) {
 			return ErrCorruptMetadata
 		}
 	} else if next.catalog.Fingerprint() != old.catalog.Fingerprint() || len(next.lineage) != len(old.lineage) {
@@ -346,6 +369,42 @@ func (m *MetaRange) CommitSplit(ctx context.Context, id SplitID, epoch, catalogG
 		var err error
 		result, err = meta.commit(id, epoch, catalogGeneration)
 		return err
+	})
+	return result, err
+}
+
+func (m *MetaRange) BeginMigration(ctx context.Context, rangeID RangeID, source ReplicaID, target raft.NodeID, generation, catalogGeneration uint64) (MigrationRecord, error) {
+	var result MigrationRecord
+	err := m.mutate(ctx, func(state *metadataState) error {
+		var e error
+		result, e = state.beginMigration(rangeID, source, target, generation, catalogGeneration)
+		return e
+	})
+	return result, err
+}
+
+func (m *MetaRange) AdvanceMigration(ctx context.Context, id MigrationID, epoch uint64, state MigrationState, evidence MigrationRecord) (MigrationRecord, error) {
+	var result MigrationRecord
+	err := m.mutate(ctx, func(meta *metadataState) error {
+		var e error
+		result, e = meta.advanceMigration(id, epoch, state, evidence)
+		return e
+	})
+	return result, err
+}
+
+func (m *MetaRange) TakeoverMigration(ctx context.Context, id MigrationID, epoch uint64) (MigrationRecord, error) {
+	var result MigrationRecord
+	err := m.mutate(ctx, func(meta *metadataState) error { var e error; result, e = meta.takeoverMigration(id, epoch); return e })
+	return result, err
+}
+
+func (m *MetaRange) CommitMigration(ctx context.Context, id MigrationID, epoch, catalogGeneration, configVersion uint64) (MigrationRecord, error) {
+	var result MigrationRecord
+	err := m.mutate(ctx, func(meta *metadataState) error {
+		var e error
+		result, e = meta.commitMigration(id, epoch, catalogGeneration, configVersion)
+		return e
 	})
 	return result, err
 }

@@ -16,6 +16,7 @@ const (
 	LifecycleActive Lifecycle = iota + 1
 	LifecycleShadow
 	LifecycleRetired
+	LifecycleLearner
 )
 
 type SplitOperationType uint8

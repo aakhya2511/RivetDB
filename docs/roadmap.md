@@ -22,7 +22,7 @@ find than to prevent.
 | 5 | Replicated MVCC and range-local snapshots | ✅ complete |
 | 6 | Distributed transactions | ✅ |
 | 7 | Online range splitting | ✅ complete |
-| 8 | Online replica migration | ⬜ |
+| 8 | Online replica migration | ✅ |
 | 9 | Workload-aware rebalancer | ⬜ |
 | 10 | Chaos and correctness campaigns | ⬜ |
 | 11 | Performance engineering | ⬜ |
@@ -276,16 +276,19 @@ crashes · deep lineage and fixed/fresh 10k-event campaigns · all lower gates
 
 ---
 
-## Phase 8 — Replica migration ⬜
+## Phase 8 — Replica migration ✅
 
-**Build:** learner replicas · snapshot streaming with flow control · catch-up
+**Built:** learner replicas · snapshot streaming with flow control · catch-up
 from the log · voter promotion · leadership transfer · voter removal ·
 restartable migration state machine.
 
-**Gate:** a range migrates while serving load · a node killed mid-migration
-leaves quorum intact and the migration completes or rolls back · a duplicated
-control-plane command produces one move · MIGRATE-1 through MIGRATE-6 hold
-throughout.
+**Gate:** live follower and leader movement · prepared intent/TxnRecord and
+historical MVCC preservation · dual-majority joint consensus · repeated fresh
+ReplicaIDs · bounded resumable transfer · abrupt crashes from partial snapshot
+through deletion · full lower-phase regression (`MIGRATE-1` through
+`MIGRATE-18`, `RAFT-CONFIG-1` through `RAFT-CONFIG-6`). See
+[replica-migration.md](replica-migration.md),
+[raft-membership.md](raft-membership.md), and [evidence/phase-8.md](evidence/phase-8.md).
 
 ---
 

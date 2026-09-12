@@ -12,7 +12,7 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phases 0–7 are complete and certified. Phase 8 online replica migration is next.**
+**Phases 0–8 are complete and certified. Phase 9 automatic rebalancing is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -26,8 +26,10 @@ waiters. `internal/multiraft` adds the authoritative static catalog, per-node
 hosting, shared bounded transport/schedulers and routed mutations. Phase 7 adds
 a reserved replicated MetaRange, canonical dynamic catalog/ID authority,
 logical all-version transfer, delta replay, transaction fence/drain, atomic
-cutover and immutable lineage. There is no server, client, distributed read
-protocol, replica migration, or dynamic user-range membership.
+cutover and immutable lineage. Phase 8 adds learners, logical Raft snapshots,
+joint consensus, explicit migration records, placement cutover, and durable
+replica retirement. There is no server, client, distributed read protocol, or
+automatic placement/rebalancing policy.
 `internal/mvcc` plus the Phase 5 replicated-range/storage extensions provide
 replicated HLC versions and range-local historical read-only snapshots.
 `internal/txn` plus the Multi-Raft transaction coordinator provide replicated
@@ -209,6 +211,8 @@ Design is written before the code it governs.
 | [docs/transactions.md](docs/transactions.md) | Phase 6 Snapshot Isolation, intents, record authority, 2PC and recovery |
 | [docs/metadata-range.md](docs/metadata-range.md) | Phase 7 replicated catalog, allocators, split records, lineage and recovery authority |
 | [docs/range-splitting.md](docs/range-splitting.md) | Phase 7 transaction fence/drain, image/replay, final fence, cutover and crash proof |
+| [docs/replica-migration.md](docs/replica-migration.md) | Phase 8 online migration protocol, crash proof, retirement and deletion |
+| [docs/raft-membership.md](docs/raft-membership.md) | Stable/joint configuration, learners, quorum mathematics and transfer |
 | [docs/correctness.md](docs/correctness.md) | Test strategy, reproducibility mechanism, and §5's explicit list of what is *not* tested |
 | [docs/roadmap.md](docs/roadmap.md) | The twelve phases and each gate |
 | [docs/design-decisions/](docs/design-decisions/) | ADRs. An ADR records a contested decision with the alternatives that lost, and is superseded rather than rewritten. |

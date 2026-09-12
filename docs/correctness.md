@@ -420,3 +420,15 @@ The certification establishes crash-safe ownership transfer and preservation
 of acknowledged writes and historical MVCC state. It does not establish
 zero-downtime writes at the final fence, automatic splitting, migration,
 linearizable distributed reads, or serializable transactions.
+
+### Phase 8 replica-migration gate
+
+`make certify-migration` adds learner exclusion tests, canonical membership and
+snapshot codecs, dual-majority quorum counterexamples, configuration restart
+and snapshot persistence, bounded resumable snapshot staging, live follower
+and leader replacement, transfer refusal for lagging voters, prepared intent
+and TxnRecord preservation, historical digest equality, monotonic/repeated
+ReplicaID allocation, stale-message rejection, durable retirement and real
+deletion, plus abrupt subprocess recovery at partial-transfer, installed-
+snapshot, joint, final-config, metadata-cutover and deletion boundaries. It
+composes the exact Phase 7 and lower certification tiers.

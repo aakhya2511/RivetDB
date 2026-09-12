@@ -393,12 +393,30 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 | SPLIT-16 | Child HLC authority never regresses below inherited parent MVCC history. | certified (Phase 7) |
 | SPLIT-17 | Transaction terminal status remains recoverable after parent retirement. | certified (Phase 7) |
 | SPLIT-18 | RangeIDs and SplitIDs are never reused. | certified (Phase 7) |
-| MIGRATE-1 | The replica set never drops below the configured replication factor at any intermediate step of a migration. | planned (Phase 8) |
-| MIGRATE-2 | Quorum is preserved at every intermediate step, including if any single node fails mid-migration. | planned (Phase 8) |
-| MIGRATE-3 | Data remains readable throughout a migration. No window exists in which a committed key is unreachable. | planned (Phase 8) |
-| MIGRATE-4 | Repeating a control-plane command is safe. A duplicated `MoveReplica` produces one move, not two. | planned (Phase 8) |
-| MIGRATE-5 | A migration interrupted by a crash or a leader change either completes or rolls back; it does not stall indefinitely. | planned (Phase 8) |
-| MIGRATE-6 | No two replicas of the same range are placed on the same node. | planned (Phase 8) |
+| MIGRATE-1 | RangeID and key bounds never change during replica migration. | Phase 8 design gate |
+| MIGRATE-2 | Every target has a newly allocated ReplicaID that is never reused. | Phase 8 design gate |
+| MIGRATE-3 | A learner never votes, campaigns, leads, serves user traffic, or contributes to quorum. | Phase 8 design gate |
+| MIGRATE-4 | A target cannot vote before durable snapshot, catch-up, applied-barrier, HLC, provenance, and digest readiness proofs. | Phase 8 design gate |
+| MIGRATE-5 | State transfer preserves all replicated logical state, including MVCC history, intents, transaction records, participant records, and HLC state. | Phase 8 design gate |
+| MIGRATE-6 | Joint commitment requires majority(old) and majority(new), never majority(union). | Phase 8 design gate |
+| MIGRATE-7 | At most one membership change is active for a range. | Phase 8 design gate |
+| MIGRATE-8 | Committed Raft configuration is consensus membership authority. | Phase 8 design gate |
+| MIGRATE-9 | MetaRange never publishes a voter before Raft commits that membership. | Phase 8 design gate |
+| MIGRATE-10 | Metadata never removes a source before final Raft configuration excludes it. | Phase 8 design gate |
+| MIGRATE-11 | A source leader transfers leadership to a caught-up final voter before removal. | Phase 8 design gate |
+| MIGRATE-12 | A retired ReplicaID can never campaign, serve, or reactivate after restart. | Phase 8 design gate |
+| MIGRATE-13 | Source files are deletable only after Raft, metadata, retirement, terminal-record, and lifecycle proofs agree. | Phase 8 design gate |
+| MIGRATE-14 | Coordinator failure cannot change migration authority; takeover epochs fence stale workers. | Phase 8 design gate |
+| MIGRATE-15 | Migration preserves transaction and historical MVCC results. | Phase 8 design gate |
+| MIGRATE-16 | Prepared intents, participant state, and transaction records survive migration. | Phase 8 design gate |
+| MIGRATE-17 | Bootstrap and catch-up install no global user-write fence while the existing quorum is healthy. | Phase 8 design gate |
+| MIGRATE-18 | MigrationIDs and ReplicaIDs are monotonic and never reused. | Phase 8 design gate |
+| RAFT-CONFIG-1 | Only committed configuration entries alter voter or learner membership. | Phase 8 design gate |
+| RAFT-CONFIG-2 | Joint quorum is majority(old) AND majority(new). | Phase 8 design gate |
+| RAFT-CONFIG-3 | Learners are excluded from voter and election quorums. | Phase 8 design gate |
+| RAFT-CONFIG-4 | Election safety holds across stable and joint configurations. | Phase 8 design gate |
+| RAFT-CONFIG-5 | Membership changes preserve every committed log entry. | Phase 8 design gate |
+| RAFT-CONFIG-6 | Committed configuration survives crash, restart, snapshot, and log compaction. | Phase 8 design gate |
 
 ## Rebalancing
 

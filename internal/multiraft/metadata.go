@@ -14,14 +14,60 @@ import (
 const (
 	MetaRangeID             RangeID = ^RangeID(0)
 	MaxSplitRecords                 = 4096
+	MaxMigrationRecords             = 4096
 	MaxLineageDepth                 = 128
 	maxMetadataCatalogBytes         = 32 << 20
-	metadataVersion                 = uint16(1)
+	metadataVersion                 = uint16(2)
 )
 
 var metadataMagic = [4]byte{'R', 'V', 'M', 'D'}
 
 type SplitID uint64
+type MigrationID uint64
+
+type MigrationState uint8
+
+const (
+	MigrationPlanned MigrationState = iota + 1
+	MigrationBootstrapping
+	MigrationLearner
+	MigrationCatchingUp
+	MigrationReady
+	MigrationJoint
+	MigrationPromoted
+	MigrationSourceRemoving
+	MigrationCommitted
+	MigrationSourceRetired
+	MigrationAborted
+)
+
+func (s MigrationState) String() string {
+	names := [...]string{"", "PLANNED", "BOOTSTRAPPING", "LEARNER", "CATCHING_UP", "READY", "JOINT", "PROMOTED", "SOURCE_REMOVING", "COMMITTED", "SOURCE_RETIRED", "ABORTED"}
+	if int(s) < len(names) {
+		return names[s]
+	}
+	return fmt.Sprintf("MIGRATION_STATE_%d", s)
+}
+func (s MigrationState) valid() bool { return s >= MigrationPlanned && s <= MigrationAborted }
+
+type MigrationRecord struct {
+	MigrationID       MigrationID
+	RangeID           RangeID
+	RangeGeneration   uint64
+	SourceReplicaID   ReplicaID
+	SourceNodeID      raft.NodeID
+	TargetReplicaID   ReplicaID
+	TargetNodeID      raft.NodeID
+	Epoch             uint64
+	State             MigrationState
+	BootstrapIndex    uint64
+	CatchUpIndex      uint64
+	PromotionBarrier  uint64
+	ConfigVersion     uint64
+	CatalogGeneration uint64
+	StateDigest       [32]byte
+	LastError         string
+}
 
 type SplitState uint8
 
@@ -72,11 +118,14 @@ type LineageRecord struct {
 }
 
 type MetadataSnapshot struct {
-	Catalog     *Catalog
-	NextRangeID RangeID
-	NextSplitID SplitID
-	Splits      []SplitRecord
-	Lineage     []LineageRecord
+	Catalog         *Catalog
+	NextRangeID     RangeID
+	NextSplitID     SplitID
+	Splits          []SplitRecord
+	NextReplicaID   ReplicaID
+	NextMigrationID MigrationID
+	Migrations      []MigrationRecord
+	Lineage         []LineageRecord
 }
 
 // RecoveryRanges returns non-authoritative physical groups that a node may
@@ -96,11 +145,14 @@ func (s MetadataSnapshot) RecoveryRanges() (shadow, retired []RangeDescriptor) {
 }
 
 type metadataState struct {
-	catalog     *Catalog
-	nextRangeID RangeID
-	nextSplitID SplitID
-	splits      map[SplitID]SplitRecord
-	lineage     map[RangeRef]LineageRecord
+	catalog         *Catalog
+	nextRangeID     RangeID
+	nextSplitID     SplitID
+	splits          map[SplitID]SplitRecord
+	nextReplicaID   ReplicaID
+	nextMigrationID MigrationID
+	migrations      map[MigrationID]MigrationRecord
+	lineage         map[RangeRef]LineageRecord
 }
 
 func newMetadataState(catalog *Catalog) (*metadataState, error) {
@@ -108,14 +160,18 @@ func newMetadataState(catalog *Catalog) (*metadataState, error) {
 		return nil, ErrInvalidCatalog
 	}
 	var largest RangeID
+	var largestReplica ReplicaID
 	for _, descriptor := range catalog.Snapshot().Ranges {
 		largest = max(largest, descriptor.RangeID)
+		for _, replica := range descriptor.Replicas {
+			largestReplica = max(largestReplica, replica.ReplicaID)
+		}
 	}
 	if largest == ^RangeID(0) || largest+1 == MetaRangeID {
 		return nil, ErrResourceLimit
 	}
-	return &metadataState{catalog: catalog, nextRangeID: largest + 1, nextSplitID: 1,
-		splits: make(map[SplitID]SplitRecord), lineage: make(map[RangeRef]LineageRecord)}, nil
+	return &metadataState{catalog: catalog, nextRangeID: largest + 1, nextSplitID: 1, nextReplicaID: largestReplica + 1, nextMigrationID: 1,
+		splits: make(map[SplitID]SplitRecord), migrations: make(map[MigrationID]MigrationRecord), lineage: make(map[RangeRef]LineageRecord)}, nil
 }
 
 func cloneSplit(value SplitRecord) SplitRecord {
@@ -126,9 +182,12 @@ func cloneSplit(value SplitRecord) SplitRecord {
 
 func cloneMetadata(source *metadataState) *metadataState {
 	result := &metadataState{catalog: source.catalog, nextRangeID: source.nextRangeID, nextSplitID: source.nextSplitID,
-		splits: make(map[SplitID]SplitRecord, len(source.splits)), lineage: make(map[RangeRef]LineageRecord, len(source.lineage))}
+		nextReplicaID: source.nextReplicaID, nextMigrationID: source.nextMigrationID, splits: make(map[SplitID]SplitRecord, len(source.splits)), migrations: make(map[MigrationID]MigrationRecord, len(source.migrations)), lineage: make(map[RangeRef]LineageRecord, len(source.lineage))}
 	for id, record := range source.splits {
 		result.splits[id] = cloneSplit(record)
+	}
+	for id, record := range source.migrations {
+		result.migrations[id] = record
 	}
 	for parent, record := range source.lineage {
 		record.SplitKey = bytes.Clone(record.SplitKey)
@@ -138,15 +197,19 @@ func cloneMetadata(source *metadataState) *metadataState {
 }
 
 func (s *metadataState) snapshot() MetadataSnapshot {
-	result := MetadataSnapshot{Catalog: s.catalog, NextRangeID: s.nextRangeID, NextSplitID: s.nextSplitID}
+	result := MetadataSnapshot{Catalog: s.catalog, NextRangeID: s.nextRangeID, NextSplitID: s.nextSplitID, NextReplicaID: s.nextReplicaID, NextMigrationID: s.nextMigrationID}
 	for _, record := range s.splits {
 		result.Splits = append(result.Splits, cloneSplit(record))
+	}
+	for _, record := range s.migrations {
+		result.Migrations = append(result.Migrations, record)
 	}
 	for _, record := range s.lineage {
 		record.SplitKey = bytes.Clone(record.SplitKey)
 		result.Lineage = append(result.Lineage, record)
 	}
 	sort.Slice(result.Splits, func(i, j int) bool { return result.Splits[i].SplitID < result.Splits[j].SplitID })
+	sort.Slice(result.Migrations, func(i, j int) bool { return result.Migrations[i].MigrationID < result.Migrations[j].MigrationID })
 	sort.Slice(result.Lineage, func(i, j int) bool { return result.Lineage[i].Parent.RangeID < result.Lineage[j].Parent.RangeID })
 	return result
 }
@@ -168,6 +231,11 @@ func (s *metadataState) begin(parent RangeRef, splitKey []byte, expectedGenerati
 				return cloneSplit(existing), nil
 			}
 			return SplitRecord{}, ErrSplitInProgress
+		}
+	}
+	for _, migration := range s.migrations {
+		if migration.RangeID == parent.RangeID && migration.State != MigrationAborted && migration.State != MigrationSourceRetired {
+			return SplitRecord{}, ErrMigrationInProgress
 		}
 	}
 	if s.nextRangeID == 0 || s.nextRangeID >= MetaRangeID-1 || s.nextSplitID == 0 {
@@ -287,7 +355,7 @@ func (s *metadataState) resolve(ref RangeRef) ([]RangeDescriptor, error) {
 			return nil, ErrCorruptMetadata
 		}
 		seen[current] = struct{}{}
-		if descriptor, err := s.catalog.LookupByID(current.RangeID); err == nil && descriptor.Generation == current.Generation {
+		if descriptor, err := s.catalog.LookupByID(current.RangeID); err == nil && descriptor.Generation >= current.Generation {
 			result = append(result, descriptor)
 			continue
 		}
@@ -317,7 +385,7 @@ func (s *metadataState) validateLineage() error {
 }
 
 func encodeMetadata(s *metadataState) ([]byte, error) {
-	if s == nil || len(s.splits) > MaxSplitRecords || len(s.lineage) > MaxSplitRecords {
+	if s == nil || len(s.splits) > MaxSplitRecords || len(s.migrations) > MaxMigrationRecords || len(s.lineage) > MaxSplitRecords {
 		return nil, ErrResourceLimit
 	}
 	catalogBytes, err := encodeCatalog(s.catalog)
@@ -330,12 +398,18 @@ func encodeMetadata(s *metadataState) ([]byte, error) {
 	result = append(result, 0, 0)
 	result = binary.LittleEndian.AppendUint64(result, uint64(s.nextRangeID))
 	result = binary.LittleEndian.AppendUint64(result, uint64(s.nextSplitID))
+	result = binary.LittleEndian.AppendUint64(result, uint64(s.nextReplicaID))
+	result = binary.LittleEndian.AppendUint64(result, uint64(s.nextMigrationID))
 	result = binary.LittleEndian.AppendUint32(result, uint32(len(catalogBytes))) //nolint:gosec // bounded catalog
 	result = append(result, catalogBytes...)
 	snapshot := s.snapshot()
 	result = binary.LittleEndian.AppendUint32(result, uint32(len(snapshot.Splits))) //nolint:gosec // bounded above
 	for _, record := range snapshot.Splits {
 		result = appendSplitRecord(result, record)
+	}
+	result = binary.LittleEndian.AppendUint32(result, uint32(len(snapshot.Migrations))) //nolint:gosec
+	for _, record := range snapshot.Migrations {
+		result = appendMigrationRecord(result, record)
 	}
 	result = binary.LittleEndian.AppendUint32(result, uint32(len(snapshot.Lineage))) //nolint:gosec // bounded above
 	for _, edge := range snapshot.Lineage {
@@ -398,6 +472,17 @@ func appendLineage(dst []byte, r LineageRecord) []byte {
 	}
 	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(r.SplitKey))) //nolint:gosec
 	return append(dst, r.SplitKey...)
+}
+
+func appendMigrationRecord(dst []byte, r MigrationRecord) []byte {
+	values := []uint64{uint64(r.MigrationID), uint64(r.RangeID), r.RangeGeneration, uint64(r.SourceReplicaID), uint64(r.SourceNodeID), uint64(r.TargetReplicaID), uint64(r.TargetNodeID), r.Epoch, r.BootstrapIndex, r.CatchUpIndex, r.PromotionBarrier, r.ConfigVersion, r.CatalogGeneration}
+	for _, v := range values {
+		dst = binary.LittleEndian.AppendUint64(dst, v)
+	}
+	dst = append(dst, byte(r.State), 0, 0, 0)
+	dst = append(dst, r.StateDigest[:]...)
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(r.LastError))) //nolint:gosec // validation bounds metadata strings before encoding
+	return append(dst, r.LastError...)
 }
 
 type metadataDecoder struct {
@@ -518,6 +603,14 @@ func decodeMetadata(data []byte) (*metadataState, error) {
 	if e != nil {
 		return nil, e
 	}
+	nextReplica, e := d.u64()
+	if e != nil {
+		return nil, e
+	}
+	nextMigration, e := d.u64()
+	if e != nil {
+		return nil, e
+	}
 	catalogN, e := d.u32()
 	if e != nil {
 		return nil, e
@@ -533,7 +626,7 @@ func decodeMetadata(data []byte) (*metadataState, error) {
 	if e != nil {
 		return nil, errors.Join(ErrCorruptMetadata, e)
 	}
-	state := &metadataState{catalog: catalog, nextRangeID: RangeID(nextRange), nextSplitID: SplitID(nextSplit), splits: make(map[SplitID]SplitRecord), lineage: make(map[RangeRef]LineageRecord)}
+	state := &metadataState{catalog: catalog, nextRangeID: RangeID(nextRange), nextSplitID: SplitID(nextSplit), nextReplicaID: ReplicaID(nextReplica), nextMigrationID: MigrationID(nextMigration), splits: make(map[SplitID]SplitRecord), migrations: make(map[MigrationID]MigrationRecord), lineage: make(map[RangeRef]LineageRecord)}
 	splitN, e := d.u32()
 	if e != nil {
 		return nil, e
@@ -550,6 +643,23 @@ func decodeMetadata(data []byte) (*metadataState, error) {
 			return nil, ErrCorruptMetadata
 		}
 		state.splits[record.SplitID] = record
+	}
+	migrationN, e := d.u32()
+	if e != nil {
+		return nil, e
+	}
+	if migrationN > MaxMigrationRecords {
+		return nil, ErrResourceLimit
+	}
+	for range migrationN {
+		record, x := decodeMigrationRecord(&d)
+		if x != nil {
+			return nil, x
+		}
+		if _, ok := state.migrations[record.MigrationID]; ok {
+			return nil, ErrCorruptMetadata
+		}
+		state.migrations[record.MigrationID] = record
 	}
 	lineageN, e := d.u32()
 	if e != nil {
@@ -568,13 +678,50 @@ func decodeMetadata(data []byte) (*metadataState, error) {
 		}
 		state.lineage[edge.Parent] = edge
 	}
-	if d.at != len(data) || state.nextRangeID == 0 || state.nextSplitID == 0 {
+	if d.at != len(data) || state.nextRangeID == 0 || state.nextSplitID == 0 || state.nextReplicaID == 0 || state.nextMigrationID == 0 {
 		return nil, ErrCorruptMetadata
 	}
 	if e := state.validateLineage(); e != nil {
 		return nil, e
 	}
 	return state, nil
+}
+
+func decodeMigrationRecord(d *metadataDecoder) (MigrationRecord, error) {
+	values := make([]uint64, 13)
+	for i := range values {
+		v, e := d.u64()
+		if e != nil {
+			return MigrationRecord{}, e
+		}
+		values[i] = v
+	}
+	state, e := d.u8()
+	if e != nil {
+		return MigrationRecord{}, e
+	}
+	reserved, e := d.take(3)
+	if e != nil || !bytes.Equal(reserved, []byte{0, 0, 0}) {
+		return MigrationRecord{}, ErrCorruptMetadata
+	}
+	digest, e := d.take(32)
+	if e != nil {
+		return MigrationRecord{}, e
+	}
+	n, e := d.u32()
+	if e != nil || n > 1<<16 {
+		return MigrationRecord{}, ErrResourceLimit
+	}
+	last, e := d.take(int(n))
+	if e != nil {
+		return MigrationRecord{}, e
+	}
+	r := MigrationRecord{MigrationID: MigrationID(values[0]), RangeID: RangeID(values[1]), RangeGeneration: values[2], SourceReplicaID: ReplicaID(values[3]), SourceNodeID: raft.NodeID(values[4]), TargetReplicaID: ReplicaID(values[5]), TargetNodeID: raft.NodeID(values[6]), Epoch: values[7], State: MigrationState(state), BootstrapIndex: values[8], CatchUpIndex: values[9], PromotionBarrier: values[10], ConfigVersion: values[11], CatalogGeneration: values[12], LastError: string(last)}
+	copy(r.StateDigest[:], digest)
+	if r.MigrationID == 0 || r.RangeID == 0 || r.RangeGeneration == 0 || r.SourceReplicaID == 0 || r.SourceNodeID == 0 || r.TargetReplicaID == 0 || r.TargetNodeID == 0 || r.Epoch == 0 || !r.State.valid() {
+		return MigrationRecord{}, ErrCorruptMetadata
+	}
+	return r, nil
 }
 
 func decodeSplitRecord(d *metadataDecoder) (SplitRecord, error) {

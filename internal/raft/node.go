@@ -13,7 +13,7 @@ import (
 type Node struct {
 	id                NodeID
 	peers             []NodeID
-	quorum            int
+	configuration     Configuration
 	electionMin       uint64
 	electionMax       uint64
 	heartbeatInterval uint64
@@ -28,6 +28,8 @@ type Node struct {
 	electionElapsed   uint64
 	electionTimeout   uint64
 	heartbeatElapsed  uint64
+	transferElapsed   uint64
+	transferring      bool
 	votes             map[NodeID]bool
 	nextIndex         map[NodeID]uint64
 	matchIndex        map[NodeID]uint64
@@ -46,15 +48,26 @@ func NewNode(config Config) (*Node, error) {
 	if err := validatePersistent(state); err != nil {
 		return nil, err
 	}
-	if state.HardState.VotedFor != 0 && !slices.Contains(config.Peers, state.HardState.VotedFor) {
+	initial := config.InitialConfig
+	if initial.Version == 0 {
+		initial = Configuration{Version: 1, OldVoters: slices.Clone(config.Peers)}
+	}
+	if state.Config.Version != 0 {
+		initial = state.Config
+	}
+	initial = normalizeConfiguration(initial)
+	if err := validateConfiguration(initial); err != nil || !config.BootstrapLearner && !initial.Voter(config.ID) && !initial.Learner(config.ID) {
+		return nil, ErrInvalidConfig
+	}
+	if state.HardState.VotedFor != 0 && !initial.Voter(state.HardState.VotedFor) {
 		return nil, ErrInvalidState
 	}
-	peers := slices.Clone(config.Peers)
-	slices.Sort(peers)
+	peers := initial.Members()
+	state.Config = cloneConfiguration(initial)
 	n := &Node{
 		id:                config.ID,
 		peers:             peers,
-		quorum:            Quorum(len(peers)),
+		configuration:     initial,
 		electionMin:       config.ElectionTimeoutMin,
 		electionMax:       config.ElectionTimeoutMax,
 		heartbeatInterval: config.HeartbeatInterval,
@@ -86,6 +99,7 @@ func (n *Node) Status() Status {
 		LastIndex: lastIndex, LastTerm: lastTerm,
 		Snapshot:  cloneSnapshot(n.persistent.Snapshot),
 		NextIndex: cloneIndexMap(n.nextIndex), MatchIndex: cloneIndexMap(n.matchIndex),
+		Config: cloneConfiguration(n.configuration), TransferringLeadership: n.transferring,
 		Fatal: n.fatal,
 	}
 }
@@ -109,6 +123,12 @@ func (n *Node) Tick() ([]Message, error) {
 		return nil, err
 	}
 	if n.role == Leader {
+		if n.transferring {
+			n.transferElapsed++
+			if n.transferElapsed >= n.electionTimeout {
+				n.transferring, n.transferElapsed = false, 0
+			}
+		}
 		n.heartbeatElapsed++
 		if n.heartbeatElapsed < n.heartbeatInterval {
 			return nil, nil
@@ -116,11 +136,51 @@ func (n *Node) Tick() ([]Message, error) {
 		n.heartbeatElapsed = 0
 		return n.replicationMessages(), nil
 	}
+	if !n.configuration.Voter(n.id) {
+		n.electionElapsed = 0
+		return nil, nil
+	}
 	n.electionElapsed++
 	if n.electionElapsed < n.electionTimeout {
 		return nil, nil
 	}
 	return n.startElection()
+}
+
+// ProposeConfiguration appends one canonical membership entry. It becomes
+// authoritative only after normal Raft commitment and ordered application.
+func (n *Node) ProposeConfiguration(next Configuration) (uint64, []Message, error) {
+	if err := n.usable(); err != nil {
+		return 0, nil, err
+	}
+	if n.role != Leader {
+		return 0, nil, ErrNotLeader
+	}
+	if n.transferring {
+		return 0, nil, ErrLeadershipTransfer
+	}
+	if err := validateConfigurationTransition(n.configuration, next); err != nil {
+		return 0, nil, err
+	}
+	for _, entry := range n.persistent.Entries {
+		if entry.Index > n.commitIndex && entry.Type == EntryConfig {
+			return 0, nil, ErrConfigTransition
+		}
+	}
+	encoded, err := EncodeConfiguration(next)
+	if err != nil {
+		return 0, nil, err
+	}
+	entry := Entry{Index: n.lastIndex() + 1, Term: n.term(), Type: EntryConfig, Command: encoded}
+	n.persistent.Entries = append(n.persistent.Entries, entry)
+	if err := n.persist(); err != nil {
+		return 0, nil, err
+	}
+	n.matchIndex[n.id], n.nextIndex[n.id] = entry.Index, entry.Index+1
+	if err := n.advanceCommit(); err != nil {
+		return 0, nil, err
+	}
+	return entry.Index, n.replicationMessages(), nil
 }
 
 // Propose durably admits one opaque command on a leader. The returned index is
@@ -132,6 +192,9 @@ func (n *Node) Propose(command []byte) (uint64, []Message, error) {
 	}
 	if n.role != Leader {
 		return 0, nil, ErrNotLeader
+	}
+	if n.transferring {
+		return 0, nil, ErrLeadershipTransfer
 	}
 	if len(command) > MaxCommandBytes {
 		return 0, nil, ErrResourceLimit
@@ -146,6 +209,31 @@ func (n *Node) Propose(command []byte) (uint64, []Message, error) {
 	}
 	n.matchIndex[n.id] = entry.Index
 	n.nextIndex[n.id] = entry.Index + 1
+	if err := n.advanceCommit(); err != nil {
+		return 0, nil, err
+	}
+	return entry.Index, n.replicationMessages(), nil
+}
+
+func (n *Node) ProposeNoOp() (uint64, []Message, error) {
+	if err := n.usable(); err != nil {
+		return 0, nil, err
+	}
+	if n.role != Leader {
+		return 0, nil, ErrNotLeader
+	}
+	if n.transferring {
+		return 0, nil, ErrLeadershipTransfer
+	}
+	if n.lastIndex() == math.MaxUint64 {
+		return 0, nil, ErrResourceLimit
+	}
+	entry := Entry{Index: n.lastIndex() + 1, Term: n.term(), Type: EntryNoOp}
+	n.persistent.Entries = append(n.persistent.Entries, entry)
+	if err := n.persist(); err != nil {
+		return 0, nil, err
+	}
+	n.matchIndex[n.id], n.nextIndex[n.id] = entry.Index, entry.Index+1
 	if err := n.advanceCommit(); err != nil {
 		return 0, nil, err
 	}
@@ -177,16 +265,40 @@ func (n *Node) Step(message Message) ([]Message, error) {
 		return n.handleInstallSnapshot(message)
 	case InstallSnapshotResponse:
 		return n.handleSnapshotResponse(message)
+	case TimeoutNow:
+		return n.handleTimeoutNow(message)
 	default:
 		return nil, ErrInvalidMessage
 	}
 }
 
 func validMessageType(kind MessageType) bool {
-	return kind >= RequestVote && kind <= InstallSnapshotResponse
+	return kind >= RequestVote && kind <= TimeoutNow
+}
+
+// TransferLeadership asks a fully caught-up voter to campaign immediately.
+func (n *Node) TransferLeadership(target NodeID) ([]Message, error) {
+	if err := n.usable(); err != nil {
+		return nil, err
+	}
+	if n.role != Leader || target == n.id || !n.configuration.Voter(target) || n.matchIndex[target] < n.lastIndex() {
+		return nil, ErrLeadershipTransfer
+	}
+	n.transferring, n.transferElapsed = true, 0
+	return []Message{{Type: TimeoutNow, From: n.id, To: target, Term: n.term()}}, nil
+}
+
+func (n *Node) handleTimeoutNow(message Message) ([]Message, error) {
+	if message.Term != n.term() || n.role != Follower || n.leaderID != message.From || !n.configuration.Voter(n.id) {
+		return nil, nil
+	}
+	return n.startElection()
 }
 
 func (n *Node) startElection() ([]Message, error) {
+	if !n.configuration.Voter(n.id) {
+		return nil, nil
+	}
 	n.role, n.leaderID = Candidate, 0
 	if n.persistent.HardState.Term == math.MaxUint64 {
 		return nil, n.fail(ErrResourceLimit)
@@ -199,12 +311,15 @@ func (n *Node) startElection() ([]Message, error) {
 	if err := n.persist(); err != nil {
 		return nil, err
 	}
-	if n.quorum == 1 {
+	if n.configuration.Quorum(func(id NodeID) bool { return id == n.id }) {
 		return n.becomeLeader()
 	}
 	messages := make([]Message, 0, len(n.peers)-1)
-	for _, peer := range n.peers {
+	for _, peer := range n.configuration.Members() {
 		if peer == n.id {
+			continue
+		}
+		if !n.configuration.Voter(peer) {
 			continue
 		}
 		messages = append(messages, Message{Type: RequestVote, From: n.id, To: peer, Term: n.term(), CandidateLastIndex: n.lastIndex(), CandidateLastTerm: n.lastTerm()})
@@ -250,6 +365,7 @@ func (n *Node) becomeFollower(leader NodeID) {
 	n.role, n.leaderID = Follower, leader
 	n.votes, n.nextIndex, n.matchIndex = nil, nil, nil
 	n.heartbeatElapsed = 0
+	n.transferring, n.transferElapsed = false, 0
 	n.resetElectionTimer()
 }
 
@@ -258,7 +374,7 @@ func (n *Node) handleRequestVote(message Message) ([]Message, error) {
 		return nil, ErrInvalidMessage
 	}
 	granted := false
-	if message.Term == n.term() && n.logUpToDate(message.CandidateLastIndex, message.CandidateLastTerm) &&
+	if n.configuration.Voter(n.id) && n.configuration.Voter(message.From) && message.Term == n.term() && n.logUpToDate(message.CandidateLastIndex, message.CandidateLastTerm) &&
 		(n.persistent.HardState.VotedFor == 0 || n.persistent.HardState.VotedFor == message.From) {
 		granted = true
 		if n.persistent.HardState.VotedFor != message.From {
@@ -279,13 +395,7 @@ func (n *Node) handleVoteResponse(message Message) ([]Message, error) {
 	if message.VoteGranted {
 		n.votes[message.From] = true
 	}
-	granted := 0
-	for _, vote := range n.votes {
-		if vote {
-			granted++
-		}
-	}
-	if granted >= n.quorum {
+	if n.configuration.Quorum(func(id NodeID) bool { return n.votes[id] }) {
 		return n.becomeLeader()
 	}
 	return nil, nil
@@ -434,13 +544,7 @@ func (n *Node) advanceCommit() error {
 		if term != n.term() {
 			continue
 		}
-		matched := 0
-		for _, peer := range n.peers {
-			if n.matchIndex[peer] >= index {
-				matched++
-			}
-		}
-		if matched >= n.quorum {
+		if n.configuration.Quorum(func(peer NodeID) bool { return n.matchIndex[peer] >= index }) {
 			n.commitIndex = index
 			return n.applyCommitted()
 		}
@@ -455,15 +559,54 @@ func (n *Node) applyCommitted() error {
 		if err != nil {
 			return n.fail(errors.Join(ErrApply, err))
 		}
-		if entry.Type == EntryCommand {
+		switch entry.Type {
+		case EntryCommand:
 			if err := n.stateMachine.Apply(cloneEntry(entry)); err != nil {
 				return n.fail(fmt.Errorf("apply index %d: %w", index, errors.Join(ErrApply, err)))
+			}
+		case EntryConfig:
+			next, err := DecodeConfiguration(entry.Command)
+			if err != nil {
+				return n.fail(errors.Join(ErrApply, ErrConfigTransition, err))
+			}
+			if next.Version > n.configuration.Version {
+				if validateConfigurationTransition(n.configuration, next) != nil {
+					return n.fail(errors.Join(ErrApply, ErrConfigTransition))
+				}
+				n.installConfiguration(next)
+				n.persistent.Config = cloneConfiguration(next)
+				if err := n.persist(); err != nil {
+					return err
+				}
 			}
 		}
 		n.lastApplied = index
 	}
 	invariant.Assert(n.lastApplied <= n.commitIndex, "RAFT-7", "applied %d > commit %d", n.lastApplied, n.commitIndex)
 	return nil
+}
+
+func (n *Node) installConfiguration(next Configuration) {
+	n.configuration = normalizeConfiguration(next)
+	n.peers = n.configuration.Members()
+	if n.role == Leader {
+		last := n.lastIndex()
+		for _, peer := range n.peers {
+			if _, ok := n.nextIndex[peer]; !ok {
+				n.nextIndex[peer] = last + 1
+				n.matchIndex[peer] = n.persistent.Snapshot.Index
+			}
+		}
+		for peer := range n.nextIndex {
+			if !slices.Contains(n.peers, peer) {
+				delete(n.nextIndex, peer)
+				delete(n.matchIndex, peer)
+			}
+		}
+	}
+	if !n.configuration.Voter(n.id) && n.role != Follower {
+		n.becomeFollower(0)
+	}
 }
 
 func (n *Node) replicationMessages() []Message {
@@ -493,7 +636,7 @@ func (n *Node) handleInstallSnapshot(message Message) ([]Message, error) {
 	if message.Term < n.term() {
 		return []Message{{Type: InstallSnapshotResponse, From: n.id, To: message.From, Term: n.term(), Success: false, MatchIndex: n.persistent.Snapshot.Index}}, nil
 	}
-	if message.Snapshot.Index == 0 || message.Snapshot.Term == 0 || message.Snapshot.Term > message.Term || len(message.Snapshot.Data) > MaxCommandBytes {
+	if message.Snapshot.Index == 0 || message.Snapshot.Term == 0 || message.Snapshot.Term > message.Term || len(message.Snapshot.Data) > MaxCommandBytes || message.Snapshot.Config.Version != 0 && validateConfiguration(message.Snapshot.Config) != nil {
 		return nil, ErrInvalidMessage
 	}
 	if n.role == Leader && message.From != n.id {
@@ -514,6 +657,9 @@ func (n *Node) handleInstallSnapshot(message Message) ([]Message, error) {
 	candidate := clonePersistent(n.persistent)
 	candidate.Snapshot = cloneSnapshot(message.Snapshot)
 	candidate.Entries = suffix
+	if message.Snapshot.Config.Version > candidate.Config.Version {
+		candidate.Config = cloneConfiguration(message.Snapshot.Config)
+	}
 	if err := n.save(candidate); err != nil {
 		return nil, err
 	}
@@ -521,6 +667,9 @@ func (n *Node) handleInstallSnapshot(message Message) ([]Message, error) {
 		return nil, n.fail(fmt.Errorf("restore installed snapshot: %w", errors.Join(ErrApply, err)))
 	}
 	n.persistent = candidate
+	if candidate.Config.Version > n.configuration.Version {
+		n.installConfiguration(candidate.Config)
+	}
 	n.commitIndex = max(n.commitIndex, message.Snapshot.Index)
 	n.lastApplied = message.Snapshot.Index
 	// The matching snapshot boundary proves only the prefix through the
@@ -559,7 +708,7 @@ func (n *Node) CreateSnapshot() (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("snapshot state machine: %w", errors.Join(ErrApply, err))
 	}
-	snapshot := Snapshot{Index: n.lastApplied, Term: term, Data: bytes.Clone(data)}
+	snapshot := Snapshot{Index: n.lastApplied, Term: term, Data: bytes.Clone(data), Config: cloneConfiguration(n.configuration)}
 	remaining, err := n.entriesFrom(snapshot.Index + 1)
 	if err != nil {
 		return Snapshot{}, err

@@ -118,3 +118,14 @@ not authority. Different-parent splits progress independently, same-parent
 conflicts are rejected, and range/meta/child leader changes resume from durable
 state. Routers publish generation-monotonic catalog snapshots and perform one
 bounded metadata refresh after a stale-parent response.
+
+## 9. Phase 8 migration composition
+
+`MigrationManager.MoveReplica` is the single explicit administration API. A
+durable MetaRange record drives target creation, bounded snapshot staging,
+learner catch-up, readiness, joint/final Raft configuration, metadata cutover,
+target activation and source retirement. `RecoverMigration` takes over by
+epoch and finishes forward from committed authority. The scheduler transports
+learner traffic using the transition descriptor without exposing the learner
+to ordinary routing; status separates published placement, current Raft voters,
+learners and the desired target.

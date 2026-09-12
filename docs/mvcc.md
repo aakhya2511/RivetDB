@@ -76,3 +76,11 @@ the original timestamp and is complete through an explicit parent Raft-index
 frontier. The final proof partitions the parent's complete history through F by
 user key and transfers an HLC floor to both children. `GetAt` and `ScanAt`
 therefore retain visibility after cutover. No MVCC GC was introduced.
+
+## 7. Phase 8 replica migration
+
+The migration state image is a full copy for the same RangeID. It canonically
+encodes every committed MVCC version, tombstone, intent, abort marker,
+transaction/participant record, applied watermark and HLC floor. Target restore
+is incremental and durable, and a logical digest—not physical SSTable layout—
+proves equivalence through the promotion barrier. Migration adds no MVCC GC.

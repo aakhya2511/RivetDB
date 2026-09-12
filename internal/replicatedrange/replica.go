@@ -67,6 +67,7 @@ var (
 	ErrMVCCRegression   = errors.New("replicated range: MVCC timestamp regression")
 	ErrReplicaBehind    = errors.New("replicated range: requested MVCC timestamp exceeds applied watermark")
 	ErrSnapshotClosed   = errors.New("replicated range: MVCC snapshot closed")
+	ErrSnapshotBehind   = errors.New("replicated range: snapshot behind local durable state")
 	ErrRangeNotServing  = errors.New("replicated range: range is shadow or retired")
 	ErrSplitFenced      = errors.New("replicated range: operation fenced by split")
 	ErrSplitReplayOrder = errors.New("replicated range: noncontiguous parent replay")
@@ -94,6 +95,8 @@ type Options struct {
 	NodeID             raft.NodeID
 	ReplicaID          ReplicaID
 	Peers              []raft.NodeID
+	InitialConfig      raft.Configuration
+	BootstrapLearner   bool
 	Directory          string
 	Store              raft.Store
 	Engine             engine.Options
@@ -131,6 +134,7 @@ type Status struct {
 	MaterializedCommands    uint64
 	Fatal                   error
 	Lifecycle               Lifecycle
+	MembershipRole          MembershipRole
 	SplitID                 uint64
 	SplitEpoch              uint64
 	BootstrapParentIndex    uint64
@@ -140,6 +144,27 @@ type Status struct {
 	BootstrapImageDigest    [sha256.Size]byte
 	FenceParentIndex        uint64
 	ParentReplayThrough     uint64
+}
+
+type MembershipRole uint8
+
+const (
+	MembershipVoter MembershipRole = iota + 1
+	MembershipLearner
+	MembershipRetired
+)
+
+func (r MembershipRole) String() string {
+	switch r {
+	case MembershipVoter:
+		return "VOTER"
+	case MembershipLearner:
+		return "LEARNER"
+	case MembershipRetired:
+		return "RETIRED"
+	default:
+		return "UNKNOWN"
+	}
 }
 
 // Replica is one deterministic Raft group plus one range-scoped replicated LSM.
@@ -276,7 +301,7 @@ func Open(options Options) (_ *Replica, resultErr error) {
 	r.node, err = raft.NewNode(raft.Config{
 		ID: options.NodeID, Peers: options.Peers, ElectionTimeoutMin: options.ElectionTimeoutMin,
 		ElectionTimeoutMax: options.ElectionTimeoutMax, HeartbeatInterval: options.HeartbeatInterval,
-		Random: options.Random, Store: store, StateMachine: machine,
+		Random: options.Random, Store: store, StateMachine: machine, InitialConfig: options.InitialConfig, BootstrapLearner: options.BootstrapLearner,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open range Raft node: %w", err)
@@ -285,6 +310,101 @@ func Open(options Options) (_ *Replica, resultErr error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+// ProposeConfiguration admits a Raft membership entry and returns its apply
+// waiter. It is an administrative path and never bypasses consensus.
+func (r *Replica) ProposeConfiguration(ctx context.Context, next raft.Configuration) (uint64, []raft.Message, <-chan Result, error) {
+	if ctx == nil {
+		return 0, nil, nil, ErrInvalidOptions
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return 0, nil, nil, ErrStopped
+	}
+	if len(r.waiters) >= r.maxWaiters {
+		return 0, nil, nil, ErrTooManyWaiters
+	}
+	before := r.node.Status()
+	index, messages, err := r.node.ProposeConfiguration(next)
+	if err != nil {
+		r.afterRaftLocked(before, err)
+		return 0, nil, nil, fmt.Errorf("propose Raft configuration: %w", err)
+	}
+	waiter := make(chan Result, 1)
+	r.waiters[index] = waiter
+	r.afterRaftLocked(before, nil)
+	return index, messages, waiter, nil
+}
+
+func (r *Replica) ProposeBarrier(ctx context.Context) (uint64, []raft.Message, <-chan Result, error) {
+	if ctx == nil {
+		return 0, nil, nil, ErrInvalidOptions
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return 0, nil, nil, ErrStopped
+	}
+	before := r.node.Status()
+	index, messages, err := r.node.ProposeNoOp()
+	if err != nil {
+		r.afterRaftLocked(before, err)
+		return 0, nil, nil, fmt.Errorf("propose Raft barrier: %w", err)
+	}
+	waiter := make(chan Result, 1)
+	r.waiters[index] = waiter
+	r.afterRaftLocked(before, nil)
+	return index, messages, waiter, nil
+}
+
+func (r *Replica) ActivateMigration() {
+	r.mu.Lock()
+	if r.machine.lifecycle == LifecycleLearner {
+		r.machine.lifecycle = LifecycleActive
+	}
+	r.mu.Unlock()
+}
+
+func (r *Replica) InstallDescriptorGeneration(generation uint64) error {
+	if generation == 0 {
+		return ErrInvalidOptions
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if generation < r.generation {
+		return ErrInvalidOptions
+	}
+	r.generation = generation
+	r.machine.generation = generation
+	return nil
+}
+
+func (r *Replica) TransferLeadership(target raft.NodeID) ([]raft.Message, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return nil, ErrStopped
+	}
+	messages, err := r.node.TransferLeadership(target)
+	if err != nil {
+		return nil, fmt.Errorf("transfer Raft leadership: %w", err)
+	}
+	return messages, nil
+}
+
+func (r *Replica) CreateRaftSnapshot() (raft.Snapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return raft.Snapshot{}, ErrStopped
+	}
+	snapshot, err := r.node.CreateSnapshot()
+	if err != nil {
+		return raft.Snapshot{}, fmt.Errorf("create Raft snapshot: %w", err)
+	}
+	return snapshot, nil
 }
 
 func (r *Replica) Tick() ([]raft.Message, error) {
@@ -481,6 +601,14 @@ func (r *Replica) Status() Status {
 	}
 	result.MaterializedCommands = stats.Puts + stats.Deletes
 	result.Lifecycle, result.SplitID, result.SplitEpoch = r.machine.lifecycle, r.machine.splitID, r.machine.splitEpoch
+	switch {
+	case r.machine.lifecycle == LifecycleRetired:
+		result.MembershipRole = MembershipRetired
+	case raftStatus.Config.Learner(raftStatus.ID) || r.machine.lifecycle == LifecycleLearner:
+		result.MembershipRole = MembershipLearner
+	case raftStatus.Config.Voter(raftStatus.ID):
+		result.MembershipRole = MembershipVoter
+	}
 	result.BootstrapParentIndex, result.FenceParentIndex, result.ParentReplayThrough = r.machine.bootstrapIndex, r.machine.fenceIndex, r.machine.parentReplayThrough
 	result.BootstrapSplitID, result.BootstrapParentRangeID = r.machine.bootstrapSplitID, r.machine.bootstrapParentID
 	result.BootstrapParentGen, result.BootstrapImageDigest = r.machine.bootstrapParentGen, r.machine.bootstrapImage
@@ -726,6 +854,12 @@ func (r *Replica) Digest(ctx context.Context) ([sha256.Size]byte, error) {
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))
 	return digest, nil
+}
+
+func (r *Replica) LogicalStateDigest() ([sha256.Size]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.machine.logicalDigest()
 }
 
 func (r *Replica) Close(ctx context.Context) error {

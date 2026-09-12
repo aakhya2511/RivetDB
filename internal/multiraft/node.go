@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/rivetdb/rivetdb/internal/clock"
@@ -98,7 +99,8 @@ func OpenNode(options NodeOptions) (_ *Node, resultErr error) {
 		return nil, completionErr
 	}
 	for _, descriptor := range assigned {
-		if complete && !rangeDirectoriesExist(options.Directory, descriptor.RangeID) {
+		local, _ := descriptor.ReplicaOn(options.NodeID)
+		if complete && !rangeReplicaDirectoriesExist(options.Directory, descriptor.RangeID, local.ReplicaID) {
 			node.failures[descriptor.RangeID] = ErrMissingRange
 			continue
 		}
@@ -182,6 +184,10 @@ func (n *Node) openReplicaLifecycle(descriptor RangeDescriptor, lifecycle replic
 	}
 	sort.Slice(peers, func(left, right int) bool { return peers[left] < peers[right] })
 	root := filepath.Join(n.directory, "ranges", strconv.FormatUint(uint64(descriptor.RangeID), 10))
+	incarnation := filepath.Join(root, fmt.Sprintf("replica-%d", local.ReplicaID))
+	if rangeRootDirectoriesExist(incarnation) {
+		root = incarnation
+	}
 	var hook replicatedrange.Hook
 	if n.options.RangeHook != nil {
 		hook = n.options.RangeHook(descriptor.RangeID)
@@ -389,6 +395,50 @@ func (n *Node) ProposeSplit(ctx context.Context, rangeID RangeID, command replic
 	return &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
 }
 
+func (n *Node) ProposeConfiguration(ctx context.Context, rangeID RangeID, next raft.Configuration) (*Pending, []Envelope, error) {
+	replica, err := n.liveReplica(rangeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	index, messages, waiter, err := replica.ProposeConfiguration(ctx, next)
+	if err != nil {
+		return nil, nil, fmt.Errorf("propose range configuration: %w", err)
+	}
+	envelopes, err := n.wrapMessages(rangeID, messages)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
+}
+
+func (n *Node) ProposeBarrier(ctx context.Context, rangeID RangeID) (*Pending, []Envelope, error) {
+	replica, err := n.liveReplica(rangeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	index, messages, waiter, err := replica.ProposeBarrier(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("propose range barrier: %w", err)
+	}
+	envelopes, err := n.wrapMessages(rangeID, messages)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
+}
+
+func (n *Node) TransferRangeLeadership(rangeID RangeID, target raft.NodeID) ([]Envelope, error) {
+	replica, err := n.liveReplica(rangeID)
+	if err != nil {
+		return nil, err
+	}
+	messages, err := replica.TransferLeadership(target)
+	if err != nil {
+		return nil, fmt.Errorf("transfer range leadership: %w", err)
+	}
+	return n.wrapMessages(rangeID, messages)
+}
+
 func (n *Node) AssignTransactionTimestamp(ctx context.Context, route Route, floor mvcc.Timestamp) (mvcc.Timestamp, *Pending, []Envelope, error) {
 	descriptor, err := n.activeDescriptor(route.RangeID)
 	if err != nil {
@@ -518,6 +568,111 @@ func (n *Node) AddShadowRange(descriptor RangeDescriptor) error {
 	}
 	if err := n.registry.Register(descriptor.RangeID, replica); err != nil {
 		return errors.Join(err, replica.Close(context.Background()))
+	}
+	return nil
+}
+
+// InstallTransitionDescriptor permits administrative Raft traffic to a
+// learner without publishing it through the user-routing catalog.
+func (n *Node) InstallTransitionDescriptor(descriptor RangeDescriptor) {
+	n.mu.Lock()
+	n.dynamic[descriptor.RangeID] = cloneDescriptor(descriptor)
+	n.mu.Unlock()
+}
+
+//nolint:contextcheck // replicatedrange.Open has no context parameter
+func (n *Node) AddLearnerRange(ctx context.Context, descriptor RangeDescriptor, configuration raft.Configuration, target ReplicaID) error {
+	local, assigned := descriptor.ReplicaOn(n.id)
+	if !assigned || local.ReplicaID != target {
+		return ErrUnknownRange
+	}
+	n.InstallTransitionDescriptor(descriptor)
+	if _, err := n.registry.Lookup(descriptor.RangeID); err == nil {
+		return nil
+	}
+	root := filepath.Join(n.directory, "ranges", strconv.FormatUint(uint64(descriptor.RangeID), 10), fmt.Sprintf("replica-%d", target))
+	peers := configuration.Members()
+	bootstrapLearner := !configuration.Voter(n.id) && !configuration.Learner(n.id)
+	if bootstrapLearner {
+		peers = append(peers, n.id)
+	}
+	replica, err := replicatedrange.Open(replicatedrange.Options{RangeID: descriptor.RangeID, Generation: descriptor.Generation, NodeID: n.id, ReplicaID: target, Peers: peers, InitialConfig: configuration, BootstrapLearner: bootstrapLearner, Directory: root, Engine: engine.Options{MemTableBytes: n.options.MemTableBytes}, ElectionTimeoutMin: 5 + uint64(n.id%3) + uint64(descriptor.RangeID%3), ElectionTimeoutMax: 5 + uint64(n.id%3) + uint64(descriptor.RangeID%3), HeartbeatInterval: 1, Random: rand.New(rand.NewPCG(uint64(n.id), uint64(descriptor.RangeID))), MaxProposalWaiters: n.options.MaxProposalWaiters, ContainsKey: descriptor.Contains, ContainsSpan: descriptor.ContainsSpan, MVCC: n.options.MVCC, Clock: n.options.Clock, Lifecycle: replicatedrange.LifecycleLearner}) //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("open learner range %d: %w", descriptor.RangeID, err)
+	}
+	if err := n.registry.Register(descriptor.RangeID, replica); err != nil {
+		return errors.Join(err, replica.Close(ctx))
+	}
+	return nil
+}
+
+func (n *Node) RetireRange(ctx context.Context, rangeID RangeID) error {
+	replica, err := n.registry.Unregister(rangeID)
+	if err != nil {
+		return ErrReplicaRemoved
+	}
+	if err := replica.Close(ctx); err != nil {
+		return fmt.Errorf("close retired range %d: %w", rangeID, err)
+	}
+	return nil
+}
+
+func (n *Node) RetireReplica(ctx context.Context, rangeID RangeID, replicaID ReplicaID) error {
+	replica, err := n.registry.Lookup(rangeID)
+	if err != nil {
+		return ErrReplicaRemoved
+	}
+	if replica.Status().ReplicaID != replicaID {
+		return ErrReplicaRemoved
+	}
+	tombstone := binary.LittleEndian.AppendUint64(nil, uint64(rangeID))
+	tombstone = binary.LittleEndian.AppendUint64(tombstone, uint64(replicaID))
+	retiredDirectory := filepath.Join(n.directory, "retired")
+	if err := os.MkdirAll(retiredDirectory, 0o750); err != nil {
+		return fmt.Errorf("create retired replica directory: %w", err)
+	}
+	if err := publishSmallFile(retiredDirectory, fmt.Sprintf("%d-%d.tombstone", rangeID, replicaID), tombstone); err != nil {
+		return err
+	}
+	return n.RetireRange(ctx, rangeID)
+}
+
+func (n *Node) DeleteRetiredReplica(rangeID RangeID, replicaID ReplicaID) error {
+	tombstone := filepath.Join(n.directory, "retired", fmt.Sprintf("%d-%d.tombstone", rangeID, replicaID))
+	if _, err := os.Stat(tombstone); err != nil {
+		return ErrReplicaRemoved
+	}
+	base := filepath.Join(n.directory, "ranges", strconv.FormatUint(uint64(rangeID), 10))
+	root := filepath.Join(base, fmt.Sprintf("replica-%d", replicaID))
+	if _, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+		// Phase 7 and earlier replicas used the range root directly. Refuse to
+		// rename that legacy root once it also contains a newer incarnation.
+		entries, readErr := os.ReadDir(base)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return fmt.Errorf("inspect retired replica directory: %w", readErr)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), "replica-") {
+				return ErrMigrationConflict
+			}
+		}
+		root = base
+	} else if err != nil {
+		return fmt.Errorf("inspect retired replica incarnation: %w", err)
+	}
+	retired := filepath.Join(n.directory, "retired", fmt.Sprintf("%d-%d.data", rangeID, replicaID))
+	if err := os.Rename(root, retired); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stage retired replica deletion: %w", err)
+	}
+	directory, err := os.Open(filepath.Dir(root))
+	if err == nil {
+		err = errors.Join(directory.Sync(), directory.Close())
+	}
+	if err != nil {
+		return fmt.Errorf("sync retired replica rename: %w", err)
+	}
+	if err := os.RemoveAll(retired); err != nil {
+		return fmt.Errorf("delete retired replica: %w", err)
 	}
 	return nil
 }
@@ -694,8 +849,7 @@ func publishSmallFile(directory, name string, value []byte) (resultErr error) {
 	return nil
 }
 
-func rangeDirectoriesExist(directory string, rangeID RangeID) bool {
-	root := filepath.Join(directory, "ranges", strconv.FormatUint(uint64(rangeID), 10))
+func rangeRootDirectoriesExist(root string) bool {
 	for _, child := range []string{"raft", "data"} {
 		info, err := os.Stat(filepath.Join(root, child))
 		if err != nil || !info.IsDir() {
@@ -703,6 +857,11 @@ func rangeDirectoriesExist(directory string, rangeID RangeID) bool {
 		}
 	}
 	return true
+}
+
+func rangeReplicaDirectoriesExist(directory string, rangeID RangeID, replicaID ReplicaID) bool {
+	root := filepath.Join(directory, "ranges", strconv.FormatUint(uint64(rangeID), 10))
+	return rangeRootDirectoriesExist(root) || rangeRootDirectoriesExist(filepath.Join(root, fmt.Sprintf("replica-%d", replicaID)))
 }
 
 func findOrphans(directory string, assigned []RangeDescriptor) []string {

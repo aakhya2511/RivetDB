@@ -14,7 +14,9 @@ import (
 	"github.com/rivetdb/rivetdb/internal/txn"
 )
 
-var ErrSnapshotDeferred = errors.New("replicated range: LSM-integrated Raft snapshots are deferred")
+// ErrSnapshotDeferred remains available to deliberately snapshot-less test
+// state machines; production replicated ranges now implement snapshots.
+var ErrSnapshotDeferred = errors.New("replicated range: snapshot deferred")
 
 type stateMachine struct {
 	engine              *engine.Engine
@@ -77,7 +79,7 @@ func (m *stateMachine) Apply(entry raft.Entry) error {
 	if command.Type == CommandSplit {
 		return m.applySplit(entry, command, alreadyDurable)
 	}
-	if m.lifecycle != LifecycleActive || m.userFence {
+	if m.lifecycle != LifecycleActive && m.lifecycle != LifecycleLearner || m.userFence {
 		return ErrRangeNotServing
 	}
 	if command.Type >= CommandTxnBarrier {
@@ -433,7 +435,7 @@ func (m *stateMachine) advanceMetadata(index uint64, alreadyDurable bool) error 
 	return nil
 }
 
-func (*stateMachine) Snapshot() ([]byte, error) { return nil, ErrSnapshotDeferred }
-func (*stateMachine) Restore([]byte) error      { return ErrSnapshotDeferred }
+func (m *stateMachine) Snapshot() ([]byte, error) { return m.encodeSnapshot() }
+func (m *stateMachine) Restore(data []byte) error { return m.restoreSnapshot(data) }
 
 var _ raft.StateMachine = (*stateMachine)(nil)
