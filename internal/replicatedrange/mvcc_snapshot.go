@@ -56,6 +56,9 @@ func (r *Replica) checkHistoricalRead(key []byte, timestamp mvcc.Timestamp) erro
 	if r.stopped {
 		return ErrStopped
 	}
+	if r.machine.lifecycle == LifecycleShadow {
+		return ErrRangeNotServing
+	}
 	if fatal := r.node.Status().Fatal; fatal != nil {
 		return fatal
 	}

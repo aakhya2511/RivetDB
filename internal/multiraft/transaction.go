@@ -37,6 +37,7 @@ type Transaction struct {
 	id         txn.ID
 	readTime   mvcc.Timestamp
 	writes     map[string]txn.Write
+	routes     map[string]RangeRef
 	barriers   map[RangeID]bool
 	bytes      int
 	state      txn.Status
@@ -48,7 +49,7 @@ func (r *Router) Begin(ctx context.Context) (*Transaction, error) {
 	if ctx == nil {
 		return nil, ErrInvalidCatalog
 	}
-	descriptors := r.catalog.Snapshot().Ranges
+	descriptors := r.currentCatalog().Snapshot().Ranges
 	if len(descriptors) == 0 {
 		return nil, ErrRangeNotFound
 	}
@@ -98,7 +99,7 @@ func (r *Router) Begin(ctx context.Context) (*Transaction, error) {
 	r.mu.Lock()
 	r.protected[id], r.seen[id] = readTime, struct{}{}
 	r.mu.Unlock()
-	return &Transaction{router: r, id: id, readTime: readTime, writes: make(map[string]txn.Write), barriers: map[RangeID]bool{selected: true}}, nil
+	return &Transaction{router: r, id: id, readTime: readTime, writes: make(map[string]txn.Write), routes: make(map[string]RangeRef), barriers: map[RangeID]bool{selected: true}}, nil
 }
 
 func (t *Transaction) ID() txn.ID                    { return t.id }
@@ -135,7 +136,8 @@ func (t *Transaction) buffer(write txn.Write) error {
 	if len(write.Key) > sstable.MaxUserKeySize || len(write.Value) > sstable.MaxValueSize {
 		return txn.ErrTooLarge
 	}
-	if _, err := t.router.Route(write.Key); err != nil {
+	route, err := t.router.Route(write.Key)
+	if err != nil {
 		return err
 	}
 	key := string(write.Key)
@@ -149,6 +151,7 @@ func (t *Transaction) buffer(write txn.Write) error {
 	}
 	t.bytes += newBytes
 	t.writes[key] = txn.Write{Key: bytes.Clone(write.Key), Value: bytes.Clone(write.Value), Delete: write.Delete}
+	t.routes[key] = RangeRef{RangeID: route.RangeID, Generation: route.Generation}
 	return nil
 }
 
@@ -243,6 +246,14 @@ func (t *Transaction) Commit(ctx context.Context) error {
 		t.releaseProtection()
 		return nil
 	}
+	for key, pinned := range t.routes {
+		current, routeErr := t.router.Route([]byte(key))
+		if routeErr != nil || current.RangeID != pinned.RangeID || current.Generation != pinned.Generation {
+			t.state, t.closed = txn.StatusAborted, true
+			t.releaseProtection()
+			return errors.Join(ErrRangeSplit, routeErr)
+		}
+	}
 	writes := mapWrites(t.writes)
 	txn.SortWrites(writes)
 	groups, participants, homeDescriptor, homeKey, err := t.router.groupTransactionWrites(writes)
@@ -251,7 +262,7 @@ func (t *Transaction) Commit(ctx context.Context) error {
 	}
 	home := txn.Participant{RangeID: uint64(homeDescriptor.RangeID), Generation: homeDescriptor.Generation}
 	for _, participant := range participants {
-		descriptor, lookupErr := t.router.catalog.LookupByID(RangeID(participant.RangeID))
+		descriptor, lookupErr := t.router.currentCatalog().LookupByID(RangeID(participant.RangeID))
 		if lookupErr != nil {
 			return lookupErr
 		}
@@ -284,7 +295,7 @@ func (t *Transaction) Commit(ctx context.Context) error {
 	} else {
 		var floor = t.readTime
 		for _, participant := range participants {
-			descriptor, lookupErr := t.router.catalog.LookupByID(RangeID(participant.RangeID))
+			descriptor, lookupErr := t.router.currentCatalog().LookupByID(RangeID(participant.RangeID))
 			if lookupErr != nil {
 				return lookupErr
 			}
@@ -306,7 +317,7 @@ func (t *Transaction) Commit(ctx context.Context) error {
 	}
 	prepared := true
 	for _, participant := range participants {
-		descriptor, lookupErr := t.router.catalog.LookupByID(RangeID(participant.RangeID))
+		descriptor, lookupErr := t.router.currentCatalog().LookupByID(RangeID(participant.RangeID))
 		if lookupErr != nil {
 			return lookupErr
 		}
@@ -369,7 +380,7 @@ func (t *Transaction) ensureKeyBarrier(ctx context.Context, key []byte) error {
 	if t.closed {
 		return txn.ErrClosed
 	}
-	descriptor, err := t.router.catalog.Lookup(key)
+	descriptor, err := t.router.currentCatalog().Lookup(key)
 	if err != nil {
 		return err
 	}
@@ -377,7 +388,7 @@ func (t *Transaction) ensureKeyBarrier(ctx context.Context, key []byte) error {
 }
 
 func (t *Transaction) ensureSpanBarriersLocked(ctx context.Context, start, end []byte) error {
-	for _, descriptor := range t.router.catalog.Snapshot().Ranges {
+	for _, descriptor := range t.router.currentCatalog().Snapshot().Ranges {
 		if _, _, ok := intersectDescriptor(descriptor, start, end); !ok {
 			continue
 		}
@@ -498,7 +509,7 @@ func (r *Router) transactionIDKnown(id txn.ID) bool {
 	if known {
 		return true
 	}
-	for _, descriptor := range r.catalog.Snapshot().Ranges {
+	for _, descriptor := range r.currentCatalog().Snapshot().Ranges {
 		if replica, ok := r.immediateLeaderReplica(descriptor); ok {
 			if _, exists := replica.TransactionRecord(id); exists {
 				return true
@@ -512,7 +523,7 @@ func (r *Router) groupTransactionWrites(writes []txn.Write) (map[RangeID][]txn.W
 	groups := make(map[RangeID][]txn.Write)
 	descriptors := make(map[RangeID]RangeDescriptor)
 	for _, write := range writes {
-		descriptor, err := r.catalog.Lookup(write.Key)
+		descriptor, err := r.currentCatalog().Lookup(write.Key)
 		if err != nil {
 			return nil, nil, RangeDescriptor{}, nil, err
 		}
@@ -528,7 +539,7 @@ func (r *Router) groupTransactionWrites(writes []txn.Write) (map[RangeID][]txn.W
 	}
 	txn.SortParticipants(participants)
 	homeKey := bytes.Clone(writes[0].Key)
-	homeDescriptor, err := r.catalog.Lookup(homeKey)
+	homeDescriptor, err := r.currentCatalog().Lookup(homeKey)
 	if err != nil {
 		return nil, nil, RangeDescriptor{}, nil, err
 	}
@@ -575,7 +586,7 @@ func (r *Router) proposeOperation(ctx context.Context, descriptor RangeDescripto
 		}
 	}
 	if operation.Type == txn.OpPrepare || operation.Type == txn.OpResolveCommit || operation.Type == txn.OpResolveAbort {
-		home, err := r.catalog.LookupByID(RangeID(operation.Home.RangeID))
+		home, err := r.currentCatalog().LookupByID(RangeID(operation.Home.RangeID))
 		if err != nil {
 			return err
 		}
@@ -746,7 +757,22 @@ func (r *Router) participantStatus(ctx context.Context, descriptor RangeDescript
 }
 
 func (r *Router) GetTransactionStatus(ctx context.Context, id txn.ID) (txn.Record, error) {
-	for _, descriptor := range r.catalog.Snapshot().Ranges {
+	for _, descriptor := range r.currentCatalog().Snapshot().Ranges {
+		record, ok, err := r.recordStatus(ctx, descriptor, id)
+		if err != nil {
+			return txn.Record{}, err
+		}
+		if ok {
+			return record, nil
+		}
+	}
+	r.mu.Lock()
+	archives := make([]RangeDescriptor, 0, len(r.archives))
+	for _, descriptor := range r.archives {
+		archives = append(archives, cloneDescriptor(descriptor))
+	}
+	r.mu.Unlock()
+	for _, descriptor := range archives {
 		record, ok, err := r.recordStatus(ctx, descriptor, id)
 		if err != nil {
 			return txn.Record{}, err
@@ -764,7 +790,7 @@ func (r *Router) resolveRecord(ctx context.Context, record txn.Record) error {
 		commandType, operationType = replicatedrange.CommandTxnResolveCommit, txn.OpResolveCommit
 	}
 	for _, participant := range record.Participants {
-		descriptor, err := r.catalog.LookupByID(RangeID(participant.RangeID))
+		descriptor, err := r.currentCatalog().LookupByID(RangeID(participant.RangeID))
 		if err != nil {
 			return err
 		}
@@ -785,7 +811,7 @@ func (r *Router) observeTxn(stage TxnStage, id txn.ID) {
 }
 
 func (r *Router) transactionGetAt(ctx context.Context, key []byte, timestamp mvcc.Timestamp) ([]byte, error) {
-	descriptor, err := r.catalog.Lookup(key)
+	descriptor, err := r.currentCatalog().Lookup(key)
 	if err != nil {
 		return nil, err
 	}
@@ -811,7 +837,7 @@ func (r *Router) interpretEntry(ctx context.Context, entry engine.MVCCEntry, tim
 		if err != nil {
 			return nil, errors.Join(engine.ErrCorruption, err)
 		}
-		descriptor, err := r.catalog.LookupByID(RangeID(intent.Home.RangeID))
+		descriptor, err := r.currentCatalog().LookupByID(RangeID(intent.Home.RangeID))
 		if err != nil {
 			return nil, err
 		}
@@ -845,7 +871,7 @@ func (r *Router) transactionScanAt(ctx context.Context, start, end []byte, times
 		return nil, engine.ErrInvalidRange
 	}
 	var result []engine.KV
-	for _, descriptor := range r.catalog.Snapshot().Ranges {
+	for _, descriptor := range r.currentCatalog().Snapshot().Ranges {
 		spanStart, spanEnd, ok := intersectDescriptor(descriptor, start, end)
 		if !ok {
 			continue
@@ -889,7 +915,7 @@ func intersectDescriptor(descriptor RangeDescriptor, start, end []byte) ([]byte,
 
 func (r *Router) RecoverTransactions(ctx context.Context) error {
 	var records []txn.Record
-	for _, descriptor := range r.catalog.Snapshot().Ranges {
+	for _, descriptor := range r.currentCatalog().Snapshot().Ranges {
 		replica, err := r.leaderReplica(ctx, descriptor)
 		if err != nil {
 			return err
@@ -901,7 +927,7 @@ func (r *Router) RecoverTransactions(ctx context.Context) error {
 	}
 	sort.Slice(records, func(left, right int) bool { return bytes.Compare(records[left].ID[:], records[right].ID[:]) < 0 })
 	for _, record := range records {
-		home, err := r.catalog.LookupByID(RangeID(record.Home.RangeID))
+		home, err := r.currentCatalog().LookupByID(RangeID(record.Home.RangeID))
 		if err != nil {
 			return err
 		}

@@ -190,3 +190,16 @@ Metadata-only commands advance Raft apply without inventing an MVCC version.
 Resolution at an existing CT atomically adds committed value/delete or an abort
 marker. Transaction HLC observations, Raft frontier, safe-read barrier and
 maximum materialized MVCC timestamp remain distinct.
+
+## Phase 7 split state
+
+Canonical range commands add begin/abort/final split fences, logical bootstrap,
+parent-index replay/advance, child activation and parent retirement. Every
+transition is applied through Raft. SHADOW children durably record parent,
+SplitID, S, canonical digest, replay provenance and inherited HLC floor; replay
+is idempotent by `(SplitID,parent index,command digest)`. RETIRED parents reject
+user traffic but retain terminal transaction status and physical data.
+
+The parent Raft log remains the delta source because integrated log compaction
+is still disabled. Final fence index F separates acknowledged pre-fence writes
+from rejected post-fence proposals.

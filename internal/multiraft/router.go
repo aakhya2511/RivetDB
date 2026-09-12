@@ -23,6 +23,7 @@ type RouterOptions struct {
 	MaxTxnParticipants int
 	TxnIDGenerator     func() (txn.ID, error)
 	TxnHook            TxnHook
+	Meta               *MetaRange
 }
 
 type Router struct {
@@ -36,10 +37,12 @@ type Router struct {
 	maxTxnParticipants int
 	txnIDGenerator     func() (txn.ID, error)
 	txnHook            TxnHook
+	meta               *MetaRange
 	mu                 sync.Mutex
 	leaders            map[RangeID]raft.NodeID
 	protected          map[txn.ID]mvcc.Timestamp
 	seen               map[txn.ID]struct{}
+	archives           map[RangeID]RangeDescriptor
 }
 
 func NewRouter(options RouterOptions) (*Router, error) {
@@ -73,12 +76,12 @@ func NewRouter(options RouterOptions) (*Router, error) {
 	return &Router{catalog: options.Catalog, scheduler: options.Scheduler, transport: options.Transport,
 		maxAttempts: options.MaxAttempts, maxWork: options.MaxWork, maxTxnWrites: options.MaxTxnWrites,
 		maxTxnBytes: options.MaxTxnBytes, maxTxnParticipants: options.MaxTxnParticipants,
-		txnIDGenerator: options.TxnIDGenerator, txnHook: options.TxnHook,
-		leaders: make(map[RangeID]raft.NodeID), protected: make(map[txn.ID]mvcc.Timestamp), seen: make(map[txn.ID]struct{})}, nil
+		txnIDGenerator: options.TxnIDGenerator, txnHook: options.TxnHook, meta: options.Meta,
+		leaders: make(map[RangeID]raft.NodeID), protected: make(map[txn.ID]mvcc.Timestamp), seen: make(map[txn.ID]struct{}), archives: make(map[RangeID]RangeDescriptor)}, nil
 }
 
 func (r *Router) Route(key []byte) (Route, error) {
-	descriptor, err := r.catalog.Lookup(key)
+	descriptor, err := r.currentCatalog().Lookup(key)
 	if err != nil {
 		return Route{}, err
 	}
@@ -86,19 +89,50 @@ func (r *Router) Route(key []byte) (Route, error) {
 }
 
 func (r *Router) Put(ctx context.Context, key, value []byte) error {
-	return r.mutate(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandPut, Key: key, Value: value})
+	err := r.mutate(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandPut, Key: key, Value: value})
+	if errors.Is(err, ErrRangeSplit) && r.refreshMetadata(ctx) == nil {
+		return r.mutate(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandPut, Key: key, Value: value})
+	}
+	return err
 }
 
 func (r *Router) Delete(ctx context.Context, key []byte) error {
-	return r.mutate(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandDelete, Key: key})
+	err := r.mutate(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandDelete, Key: key})
+	if errors.Is(err, ErrRangeSplit) && r.refreshMetadata(ctx) == nil {
+		return r.mutate(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandDelete, Key: key})
+	}
+	return err
 }
 
 func (r *Router) PutMVCC(ctx context.Context, key, value []byte) (mvcc.Timestamp, error) {
-	return r.mutateMVCC(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandPut, Key: key, Value: value})
+	timestamp, err := r.mutateMVCC(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandPut, Key: key, Value: value})
+	if errors.Is(err, ErrRangeSplit) && r.refreshMetadata(ctx) == nil {
+		return r.mutateMVCC(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandPut, Key: key, Value: value})
+	}
+	return timestamp, err
 }
 
 func (r *Router) DeleteMVCC(ctx context.Context, key []byte) (mvcc.Timestamp, error) {
-	return r.mutateMVCC(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandDelete, Key: key})
+	timestamp, err := r.mutateMVCC(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandDelete, Key: key})
+	if errors.Is(err, ErrRangeSplit) && r.refreshMetadata(ctx) == nil {
+		return r.mutateMVCC(ctx, key, replicatedrange.Command{Type: replicatedrange.CommandDelete, Key: key})
+	}
+	return timestamp, err
+}
+
+func (r *Router) AttachMetaRange(meta *MetaRange) { r.mu.Lock(); r.meta = meta; r.mu.Unlock() }
+
+func (r *Router) refreshMetadata(ctx context.Context) error {
+	r.mu.Lock()
+	meta := r.meta
+	r.mu.Unlock()
+	if meta == nil {
+		return ErrRangeSplit
+	}
+	if err := meta.Sync(ctx); err != nil {
+		return err
+	}
+	return r.InstallCatalog(meta.Snapshot().Catalog)
 }
 
 func (r *Router) mutateMVCC(ctx context.Context, key []byte, command replicatedrange.Command) (mvcc.Timestamp, error) {
@@ -106,7 +140,7 @@ func (r *Router) mutateMVCC(ctx context.Context, key []byte, command replicatedr
 	if err != nil {
 		return 0, err
 	}
-	descriptor, err := r.catalog.LookupByID(route.RangeID)
+	descriptor, err := r.currentCatalog().LookupByID(route.RangeID)
 	if err != nil {
 		return 0, err
 	}
@@ -181,7 +215,7 @@ func (r *Router) Propose(ctx context.Context, route Route, encoded []byte) error
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("before routed proposal: %w", err)
 	}
-	descriptor, err := r.catalog.LookupByID(route.RangeID)
+	descriptor, err := r.currentCatalog().LookupByID(route.RangeID)
 	if err != nil {
 		return err
 	}
@@ -247,6 +281,60 @@ func (r *Router) Propose(ctx context.Context, route Route, encoded []byte) error
 		return fmt.Errorf("%w: proposal exceeded bounded scheduler work", ErrLeaderUnknown)
 	}
 	return ErrLeaderUnknown
+}
+
+func (r *Router) currentCatalog() *Catalog {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.catalog
+}
+
+func (r *Router) InstallCatalog(catalog *Catalog) error {
+	if catalog == nil {
+		return ErrInvalidCatalog
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if catalog.Generation() < r.catalog.Generation() {
+		return ErrStaleRange
+	}
+	r.catalog = catalog
+	return nil
+}
+
+func (r *Router) InstallRetiredArchive(parent RangeDescriptor) {
+	r.mu.Lock()
+	r.archives[parent.RangeID] = cloneDescriptor(parent)
+	r.mu.Unlock()
+}
+
+func (r *Router) proposeSplit(ctx context.Context, descriptor RangeDescriptor, command replicatedrange.Command) (uint64, error) {
+	if _, err := r.leaderReplica(ctx, descriptor); err != nil {
+		return 0, err
+	}
+	for attempts, candidates := 0, r.candidates(descriptor); attempts < min(r.maxAttempts, len(candidates)); attempts++ {
+		nodeID := candidates[attempts]
+		node := r.scheduler.Nodes()[nodeID]
+		if node == nil {
+			continue
+		}
+		pending, outbound, err := node.ProposeSplit(ctx, descriptor.RangeID, command)
+		if err != nil {
+			var notLeader *NotLeaderError
+			if errors.As(err, &notLeader) {
+				if notLeader.Leader != 0 {
+					r.RecordLeader(descriptor.RangeID, notLeader.Leader)
+				}
+				continue
+			}
+			return 0, err
+		}
+		if err := r.sendAndAwait(ctx, descriptor.RangeID, nodeID, pending, outbound); err != nil {
+			return 0, err
+		}
+		return pending.index, nil
+	}
+	return 0, ErrLeaderUnknown
 }
 
 func (r *Router) candidates(descriptor RangeDescriptor) []raft.NodeID {

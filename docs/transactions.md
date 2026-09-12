@@ -91,22 +91,17 @@ command size. Terminal records are retained. No version, tombstone, or
 transaction-record GC is performed; unresolved intents are never collected
 without an authoritative decision.
 
-Phase 7 split-readiness audit:
+## 8. Phase 7 split composition
 
-1. In-flight participants are currently the static `(RangeID,generation)`
-   captured in the record; no descriptor may change during Phase 6.
-2. A range with prepared intents cannot yet split. Phase 7 must order the split
-   against prepare and durably divide each prepared write/index into the child
-   that owns its key.
-3. Transaction recovery needs a stable logical participant identity or a
-   durable parent-to-child lineage; blindly retaining a removed RangeID is not
-   sufficient.
-4. Recovery must consult authoritative metadata redirects and fan out to every
-   descendant holding a prepared key, while keeping one global record outcome.
-5. Phase 7 must add generation pinning/admission, split/prepare serialization,
-   participant redirect metadata, child prepared-state bootstrap, and crash
-   tests at every metadata/data handoff.
+Phase 7 installs a replicated prepare/create fence before bootstrap barrier S.
+Existing prepared participants and nonterminal home records are resolved
+through the Phase 6 outcome authority; inability to reach that home quorum
+blocks the split. No unresolved intent or nonterminal transaction state enters
+a child image.
 
-Phase 8 must transfer record, participant and intent state during replica
-migration without changing transaction authority. Neither split nor migration
-is implemented in Phase 6.
+Transactions retain their original `(RangeID,generation)` participant pins. A
+transaction begun before a split but not prepared receives a stale/split error
+and aborts for client retry rather than silently rewriting participants.
+Terminal records remain recoverable in the retired parent's status archive.
+See [range-splitting.md](range-splitting.md). Phase 8 must preserve these
+authorities during replica movement; migration is not implemented.

@@ -59,14 +59,17 @@ func (s Stage) String() string {
 type Hook func(Stage, uint64)
 
 var (
-	ErrInvalidOptions = errors.New("replicated range: invalid options")
-	ErrLeadershipLost = errors.New("replicated range: leadership lost before local apply")
-	ErrStopped        = errors.New("replicated range: stopped")
-	ErrTooManyWaiters = errors.New("replicated range: proposal waiter capacity reached")
-	ErrKeyOutOfRange  = errors.New("replicated range: command key outside configured range")
-	ErrMVCCRegression = errors.New("replicated range: MVCC timestamp regression")
-	ErrReplicaBehind  = errors.New("replicated range: requested MVCC timestamp exceeds applied watermark")
-	ErrSnapshotClosed = errors.New("replicated range: MVCC snapshot closed")
+	ErrInvalidOptions   = errors.New("replicated range: invalid options")
+	ErrLeadershipLost   = errors.New("replicated range: leadership lost before local apply")
+	ErrStopped          = errors.New("replicated range: stopped")
+	ErrTooManyWaiters   = errors.New("replicated range: proposal waiter capacity reached")
+	ErrKeyOutOfRange    = errors.New("replicated range: command key outside configured range")
+	ErrMVCCRegression   = errors.New("replicated range: MVCC timestamp regression")
+	ErrReplicaBehind    = errors.New("replicated range: requested MVCC timestamp exceeds applied watermark")
+	ErrSnapshotClosed   = errors.New("replicated range: MVCC snapshot closed")
+	ErrRangeNotServing  = errors.New("replicated range: range is shadow or retired")
+	ErrSplitFenced      = errors.New("replicated range: operation fenced by split")
+	ErrSplitReplayOrder = errors.New("replicated range: noncontiguous parent replay")
 )
 
 func maximumCommandTimestamp(entries []raft.Entry) (mvcc.Timestamp, error) {
@@ -105,6 +108,7 @@ type Options struct {
 	ContainsSpan       func([]byte, []byte) bool
 	MVCC               bool
 	Clock              clock.Clock
+	Lifecycle          Lifecycle
 }
 
 type Result struct {
@@ -126,6 +130,16 @@ type Status struct {
 	LiveTableCount          uint64
 	MaterializedCommands    uint64
 	Fatal                   error
+	Lifecycle               Lifecycle
+	SplitID                 uint64
+	SplitEpoch              uint64
+	BootstrapParentIndex    uint64
+	BootstrapSplitID        uint64
+	BootstrapParentRangeID  uint64
+	BootstrapParentGen      uint64
+	BootstrapImageDigest    [sha256.Size]byte
+	FenceParentIndex        uint64
+	ParentReplayThrough     uint64
 }
 
 // Replica is one deterministic Raft group plus one range-scoped replicated LSM.
@@ -157,6 +171,9 @@ func Open(options Options) (_ *Replica, resultErr error) {
 	}
 	if options.MaxProposalWaiters == 0 {
 		options.MaxProposalWaiters = 1024
+	}
+	if options.Lifecycle == 0 {
+		options.Lifecycle = LifecycleActive
 	}
 	if options.Generation == 0 {
 		options.Generation = 1
@@ -252,7 +269,7 @@ func Open(options Options) (_ *Replica, resultErr error) {
 	machine := &stateMachine{engine: local, hook: options.Hook, containsKey: options.ContainsKey,
 		mvcc: options.MVCC, maxApplied: appliedFloor, safeRead: appliedFloor, clock: hlc,
 		rangeID: options.RangeID, generation: options.Generation, records: make(map[txn.ID]txn.Record),
-		participants: make(map[txn.ID]txn.ParticipantRecord)}
+		participants: make(map[txn.ID]txn.ParticipantRecord), lifecycle: options.Lifecycle, provenance: make(map[uint64][32]byte), bootstrapSeen: make(map[[32]byte]struct{})}
 	r := &Replica{rangeID: options.RangeID, replicaID: options.ReplicaID, generation: options.Generation,
 		containsKey: options.ContainsKey, containsSpan: options.ContainsSpan, engine: local, store: store, hlc: hlc, mvcc: options.MVCC, machine: machine,
 		waiters: make(map[uint64]chan Result), snapshots: make(map[uint64]mvcc.Timestamp), maxWaiters: options.MaxProposalWaiters}
@@ -340,6 +357,9 @@ func (r *Replica) ProposeMVCC(ctx context.Context, command Command) (mvcc.Timest
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.machine.lifecycle != LifecycleActive || r.machine.userFence {
+		return 0, 0, nil, nil, ErrRangeNotServing
+	}
 	if r.node.Status().Role != raft.Leader {
 		return 0, 0, nil, nil, raft.ErrNotLeader
 	}
@@ -460,6 +480,10 @@ func (r *Replica) Status() Status {
 		result.HLCFloor = r.hlc.Last()
 	}
 	result.MaterializedCommands = stats.Puts + stats.Deletes
+	result.Lifecycle, result.SplitID, result.SplitEpoch = r.machine.lifecycle, r.machine.splitID, r.machine.splitEpoch
+	result.BootstrapParentIndex, result.FenceParentIndex, result.ParentReplayThrough = r.machine.bootstrapIndex, r.machine.fenceIndex, r.machine.parentReplayThrough
+	result.BootstrapSplitID, result.BootstrapParentRangeID = r.machine.bootstrapSplitID, r.machine.bootstrapParentID
+	result.BootstrapParentGen, result.BootstrapImageDigest = r.machine.bootstrapParentGen, r.machine.bootstrapImage
 	return result
 }
 
@@ -491,10 +515,92 @@ func (r *Replica) ProposeTransaction(ctx context.Context, command Command) (uint
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.machine.lifecycle != LifecycleActive || r.machine.userFence {
+		return 0, nil, nil, ErrRangeNotServing
+	}
+	if r.machine.txnFence && (command.Type == CommandTxnCreate || command.Type == CommandTxnPrepare) {
+		return 0, nil, nil, ErrSplitFenced
+	}
 	if r.node.Status().Role != raft.Leader {
 		return 0, nil, nil, raft.ErrNotLeader
 	}
 	return r.proposeLocked(encoded)
+}
+
+// ProposeSplit admits one already-canonical internal split command.
+func (r *Replica) ProposeSplit(ctx context.Context, command Command) (uint64, []raft.Message, <-chan Result, error) {
+	if ctx == nil || !r.mvcc || command.Type != CommandSplit {
+		return 0, nil, nil, ErrInvalidOptions
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.node.Status().Role != raft.Leader {
+		return 0, nil, nil, raft.ErrNotLeader
+	}
+	operation, err := DecodeSplitOperation(command.Value)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if operation.Type == SplitOpBootstrapBarrier && r.machine.lifecycle == LifecycleActive && operation.Timestamp == 0 {
+		timestamp, clockErr := r.hlc.Now()
+		if clockErr != nil {
+			return 0, nil, nil, fmt.Errorf("assign split barrier timestamp: %w", clockErr)
+		}
+		operation.Timestamp, command.Timestamp = uint64(timestamp), timestamp
+		command.Value, err = EncodeSplitOperation(operation)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+	}
+	encoded, err := EncodeCommand(command)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return r.proposeLocked(encoded)
+}
+
+func (r *Replica) TransactionDrainReady() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, record := range r.machine.records {
+		if !record.Status.Terminal() {
+			return false
+		}
+	}
+	for _, participant := range r.machine.participants {
+		if participant.Status == txn.ParticipantPrepared {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Replica) ExportMVCCVersions(ctx context.Context) ([]engine.MVCCVersion, error) {
+	versions, err := r.engine.ExportMVCCVersions(ctx, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("export range MVCC history: %w", err)
+	}
+	return versions, nil
+}
+
+func (r *Replica) CommittedEntries(from, through uint64) ([]raft.Entry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if through > r.node.Status().LastApplied || from > through+1 {
+		return nil, ErrInvalidOptions
+	}
+	state, err := r.store.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load parent Raft history: %w", err)
+	}
+	var result []raft.Entry
+	for _, entry := range state.Entries {
+		if entry.Index >= from && entry.Index <= through {
+			entry.Command = bytes.Clone(entry.Command)
+			result = append(result, entry)
+		}
+	}
+	return result, nil
 }
 
 // AssignTransactionTimestamp advances the leader HLC above floor and

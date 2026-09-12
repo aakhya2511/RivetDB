@@ -76,13 +76,17 @@ replica. A shared transport or scheduler failure affects the node. The
 simulator distinguishes node links from range-specific links and node crashes
 from replica crashes.
 
-## 5. Deferred work
+## 5. Phase 7 dynamic metadata
 
-Phase 4 does not implement dynamic metadata consensus. Future choices include
-a dedicated meta-range, a distributed catalog, or an external placement
-driver. It also does not integrate LSM Raft snapshots, online splitting,
-migration, rebalancing, dynamic membership, MVCC, cross-range atomicity,
-ReadIndex, or leader leases.
+Phase 7 adds an independent statically bootstrapped MetaRange Raft group. Its
+committed state is authoritative for the active catalog, monotonic identifiers,
+split records and immutable lineage. Local catalog files and range directories
+are caches/storage, never dynamic ownership authority. User ranges remain
+independent groups; children inherit the parent's replica set and are created
+as SHADOW groups before one metadata command activates their descriptors.
+
+Migration, rebalancing, dynamic membership, integrated LSM Raft snapshots,
+ReadIndex and leader leases remain deferred.
 ## 6. Phase 5 MVCC extension
 
 Node construction may enable fresh MVCC ranges and inject a physical clock per
@@ -105,3 +109,12 @@ proposals. Record and participant queries use the in-process routed leader
 adapter; this is not a general network RPC or linearizable read API. Short
 leader-hint/protected-timestamp maps use one mutex, but transaction execution
 has no global lock. An unavailable untouched range is not a dependency.
+
+## 8. Phase 7 split composition
+
+The node hosts and recovers dynamically allocated child groups using committed
+MetaRange descriptors. A bounded split worker drives replicated state; it is
+not authority. Different-parent splits progress independently, same-parent
+conflicts are rejected, and range/meta/child leader changes resume from durable
+state. Routers publish generation-monotonic catalog snapshots and perform one
+bounded metadata refresh after a stale-parent response.

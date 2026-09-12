@@ -204,3 +204,11 @@ inside the command and followers apply it verbatim. No-op entries advance Raft
 application but not the MVCC watermark. On leadership, the range timestamp
 authority conservatively observes its complete durable local command history,
 including uncommitted timestamped entries, before assigning another value.
+
+## Phase 7 split composition
+
+The Raft core and quorum rules are unchanged. MetaRange, parent, and each child
+are independent groups. Split orchestration records authority changes as
+ordinary committed commands: parent barriers/fences, child image and replay,
+then one metadata catalog CAS. Leader replacement replays these commands from
+the durable log; coordinator memory never establishes ownership.

@@ -84,6 +84,16 @@ type MVCCEntry struct {
 	Kind      storage.ValueKind
 }
 
+// MVCCVersion is one exact logical internal MVCC tuple. Unlike MVCCEntry it is
+// not a visibility selection: ExportMVCCVersions returns every version,
+// tombstone, abort marker, and intent in canonical internal-key order.
+type MVCCVersion struct {
+	Key       []byte
+	Value     []byte
+	Timestamp uint64
+	Kind      storage.ValueKind
+}
+
 // Stats is a point-in-time copy of local operation counters.
 type Stats struct {
 	Puts, Deletes, Gets, GetHits, GetMisses, Scans uint64

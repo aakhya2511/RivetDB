@@ -78,14 +78,14 @@ Reads remain stale-capable local inspection. Routing a read to a leader would
 not establish linearizability without ReadIndex or a proved lease, so Phase 4
 makes no distributed-read consistency claim.
 
-## 4. Future split contract
+## 4. Phase 7 split routing
 
-Phase 7 can atomically replace, for example, `R10 [a,z) generation 5` with
-`R10 [a,m) generation 6` and `R20 [m,z) generation 1` in a new immutable
-catalog publication. Requests carrying generation 5 then fail stale rather
-than entering either new ownership interval. Phase 7 still must design split
-command ordering, child bootstrap, state division, concurrent request
-coordination, metadata consensus/publication, rollback, and crash recovery.
+Phase 7 atomically replaces parent `[a,z)` with two new child RangeIDs
+`[a,m)` and `[m,z)` in committed MetaRange state. A stale request to the
+retired parent returns committed child descriptors. The router refreshes its
+immutable metadata snapshot once, resolves lineage to the active leaf, and
+retries there. SHADOW children reject direct traffic before cutover and the
+retired parent never resumes user service.
 
 Replica migration likewise retains RangeID while assigning a new ReplicaID to
 a NodeID and physical directory. Phase 8 must design snapshot/state transfer,
@@ -107,6 +107,6 @@ key. Protocol admission repeats generation and ownership checks; prepare also
 validates every embedded write key. Status is routed to the record home rather
 than read from coordinator memory.
 
-Static metadata is a Phase 6 certification condition. Phase 7 must pin or
-redirect participant identities while descriptors change, identify child
-ranges that inherit prepared keys, and make recovery follow those redirects.
+Transactions continue to pin the descriptor generation used to build their
+write set. If cutover makes that pin stale before prepare, commit aborts for
+client retry rather than retargeting a transaction mid-protocol.

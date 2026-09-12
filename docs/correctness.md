@@ -367,9 +367,9 @@ Stated plainly, because an unlisted gap reads as a claim:
 - **Integrated Raft/LSM snapshots.** Snapshot export and replace-state restore
   are deferred. Integrated ranges retain required history and do not expose log
   compaction.
-- **Dynamic range metadata.** Phase 4 persists a static bootstrap catalog and
-  tests explicit generation replacement, but has no meta-range, placement
-  consensus, online split, migration, or dynamic membership.
+- **Replica migration and placement.** Phase 7 has replicated dynamic metadata
+  and online splitting, but no replica migration, automatic placement,
+  rebalancing, dynamic user-range membership, or range merge.
 - **Serializable or linearizable distributed reads.** Phase 6 certifies
   Snapshot Isolation transaction snapshots and atomic write commit. It does not
   add SSI, predicate validation, ReadIndex, leases, external consistency or a
@@ -405,3 +405,18 @@ real subprocess exit at seven durable 2PC stages. Fixed/fresh campaigns run
 10,800 modeled operations and the opt-in stress tier runs 100,000. Exact reads,
 scans, conflicts and committed histories are compared with a Snapshot Isolation
 reference model. Every Phase 5 and lower gate remains a regression dependency.
+
+### Phase 7 online split gate
+
+`make certify-split` adds hostile metadata codecs, catalog/lineage model tests,
+transaction fence and drain, exact logical MVCC partitioning, online delta
+catch-up, final-fence proof, stale routing, independent child groups,
+parent/meta/child leadership changes, full-cluster restart, and abrupt
+subprocess exits at durable split boundaries. Fixed/fresh campaigns execute
+10,000 catalog events per seed; an opt-in tier executes 100,000 events and
+repeated disk-backed splits. Every Phase 6 and lower gate remains a dependency.
+
+The certification establishes crash-safe ownership transfer and preservation
+of acknowledged writes and historical MVCC state. It does not establish
+zero-downtime writes at the final fence, automatic splitting, migration,
+linearizable distributed reads, or serializable transactions.

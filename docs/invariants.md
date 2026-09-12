@@ -375,10 +375,24 @@ one local LSM. The existing `RANGE` namespace below remains reserved for Phase
 
 | ID | Invariant | Status |
 |---|---|---|
-| SPLIT-1 | A split is atomic with respect to concurrent traffic: every write is ordered strictly before or strictly after it. | planned (Phase 7) |
-| SPLIT-2 | Every key readable before a split is readable after it, with the same value, from exactly one of the resulting ranges. | planned (Phase 7) |
-| SPLIT-3 | A crash at any point during a split leaves a state that recovery completes or abandons cleanly. There is no permanently half-split range. | planned (Phase 7) |
-| SPLIT-4 | The resulting ranges' bounds partition the original range's bounds exactly. | planned (Phase 7) |
+| SPLIT-1 | Parent remains authoritative until one committed metadata cutover. | certified (Phase 7) |
+| SPLIT-2 | Children never serve user traffic before catalog activation. | certified (Phase 7) |
+| SPLIT-3 | Committed catalog state contains either the parent or both children, never an ownership gap or overlap. | certified (Phase 7) |
+| SPLIT-4 | Child keyspaces exactly partition the parent user-key interval. | certified (Phase 7) |
+| SPLIT-5 | Every parent write acknowledged before the final fence is represented in exactly one child after cutover. | certified (Phase 7) |
+| SPLIT-6 | No parent user mutation commits after the final fence. | certified (Phase 7) |
+| SPLIT-7 | Replay uses original MVCC timestamps and never invents new data versions. | certified (Phase 7) |
+| SPLIT-8 | Parent delta replay completeness is proven by an explicit parent-index frontier, not by child data density. | certified (Phase 7) |
+| SPLIT-9 | Historical MVCC visibility is unchanged by splitting. | certified (Phase 7) |
+| SPLIT-10 | Transaction prepare is fenced before bootstrap, and no unresolved prepared intent is copied under the drain-based protocol. | certified (Phase 7) |
+| SPLIT-11 | A stale parent generation resolves only through committed metadata lineage. | certified (Phase 7) |
+| SPLIT-12 | Split coordinator failure cannot change split authority. | certified (Phase 7) |
+| SPLIT-13 | After metadata cutover the parent cannot become active again for that generation. | certified (Phase 7) |
+| SPLIT-14 | Before cutover an aborted split leaves parent authority unchanged. | certified (Phase 7) |
+| SPLIT-15 | Children inherit exactly the parent replica set in Phase 7. | certified (Phase 7) |
+| SPLIT-16 | Child HLC authority never regresses below inherited parent MVCC history. | certified (Phase 7) |
+| SPLIT-17 | Transaction terminal status remains recoverable after parent retirement. | certified (Phase 7) |
+| SPLIT-18 | RangeIDs and SplitIDs are never reused. | certified (Phase 7) |
 | MIGRATE-1 | The replica set never drops below the configured replication factor at any intermediate step of a migration. | planned (Phase 8) |
 | MIGRATE-2 | Quorum is preserved at every intermediate step, including if any single node fails mid-migration. | planned (Phase 8) |
 | MIGRATE-3 | Data remains readable throughout a migration. No window exists in which a committed key is unreachable. | planned (Phase 8) |

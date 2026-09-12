@@ -21,7 +21,7 @@ find than to prevent.
 | 4 | Multi-Raft and static range routing | ✅ complete |
 | 5 | Replicated MVCC and range-local snapshots | ✅ complete |
 | 6 | Distributed transactions | ✅ |
-| 7 | Online range splitting | ⬜ |
+| 7 | Online range splitting | ✅ complete |
 | 8 | Online replica migration | ⬜ |
 | 9 | Workload-aware rebalancer | ⬜ |
 | 10 | Chaos and correctness campaigns | ⬜ |
@@ -33,7 +33,8 @@ engine, the mechanically qualified Phase 2 single-group Raft core, Phase 3's
 durable replicated range, Phase 4's static Multi-Raft node/catalog/router, and
 Phase 5's replicated MVCC history/range-local snapshots, and Phase 6's
 Snapshot Isolation transaction API, replicated intents/records and cross-range
-2PC. There is no serializability claim.
+2PC, and Phase 7's online transaction-safe range splitting through a replicated
+metadata authority. There is no serializability claim.
 There is no network database server, distributed read protocol or client.
 Anything later in [architecture.md](architecture.md) is a design, clearly
 marked as such.
@@ -258,16 +259,20 @@ flush/compaction/restart preservation · all lower gates remain certified
 
 ---
 
-## Phase 7 — Range splitting ⬜
+## Phase 7 — Range splitting ✅
 
-**Build:** split-key selection by sampling · the split as a single Raft entry ·
-new-range state creation · descriptor and generation updates · routing
-invalidation · crash recovery mid-split.
+**Build:** replicated MetaRange/dynamic catalog · monotonic RangeID/SplitID
+allocation · immutable lineage · transaction fence/drain · logical MVCC image
+at S · independent shadow children · original-timestamp delta replay with
+parent-index frontiers · final fence F · atomic metadata cutover · redirects
+and retained parent status archive.
 
-**Gate:** reads and writes continue across a split under load, with the
-throughput dip measured and published · stale clients converge · a crash
-injected at every step of the split recovers cleanly · no key is lost or
-duplicated (SPLIT-1 through SPLIT-4).
+**Gate:** ordinary writes during copy/catch-up · transaction fence and drain ·
+exact MVCC history partition through F · stale refresh · parent/meta/child
+leader changes · mid/post split restart · abrupt image/replay/fence/cutover
+crashes · deep lineage and fixed/fresh 10k-event campaigns · all lower gates
+(`SPLIT-1` through `SPLIT-18`). See [range-splitting.md](range-splitting.md),
+[metadata-range.md](metadata-range.md), and [evidence/phase-7.md](evidence/phase-7.md).
 
 ---
 

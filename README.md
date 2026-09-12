@@ -3,14 +3,15 @@
 RivetDB is an experimental database built from first principles. Its local LSM
 storage engine, Raft core, durable replicated ranges, static Multi-Raft node,
 range catalog, mutation router, replicated MVCC versions, range-local
-historical snapshots, and Snapshot Isolation transactions with cross-range 2PC
-are implemented; the dynamic workload-adaptive range layers do not exist yet.
+historical snapshots, Snapshot Isolation transactions with cross-range 2PC,
+and transaction-safe online range splitting are implemented; replica migration
+and workload-adaptive placement do not exist yet.
 
 Unlike a basic replicated key-value project, RivetDB models independent
 replicated key ranges and is designed to support live range splitting, replica
 movement, cross-range transactions, and automated hotspot mitigation.
 
-> **Project status: Phase 6 complete — Snapshot Isolation distributed transactions certified.**
+> **Project status: Phase 7 complete — online transaction-safe range splitting certified.**
 >
 > What exists today is the documented design, the build and CI gate, the
 > testing foundation, the authoritative internal-key/write-batch primitives,
@@ -48,10 +49,15 @@ movement, cross-range transactions, and automated hotspot mitigation.
 > transaction records, first-committer-wins conflict checks, epoch-fenced 2PC
 > recovery, and atomic commit at one CT across independently replicated ranges.
 > Snapshot Isolation is certified; write skew is intentionally allowed.
+> Phase 7 adds a statically bootstrapped replicated MetaRange, monotonic
+> descriptor/ID authority, new-ID shadow children, transaction fence/drain,
+> exact logical MVCC image transfer, original-timestamp parent delta replay,
+> a short final fence, atomic catalog cutover, immutable lineage, stale-parent
+> redirects, and retained parent transaction-status archives.
 >
 > **There is no distributed read protocol, network database service, server or
-> client yet.** Phase 4/5 local inspection and historical snapshots are stale-capable and
-> is not a linearizable distributed read API. Everything else described below
+> client yet.** Phase 4/5 local inspection and historical snapshots are
+> stale-capable and are not a linearizable distributed read API. Everything else described below
 > is a design with a written specification, not working code — see
 > [Roadmap](docs/roadmap.md) for exactly what is built and what is not.
 >
@@ -166,6 +172,7 @@ make certify-range  # Phase 3 integration gate plus Raft/local regressions
 make certify-multiraft # Phase 4 gate plus every lower regression gate
 make certify-mvcc   # Phase 5 MVCC gate plus every lower regression gate
 make certify-txn    # Phase 6 transaction gate plus every lower regression gate
+make certify-split  # Phase 7 online split gate plus every lower regression gate
 make benchmark      # benchmark suite; honors RIVETDB_BENCH_DIR
 make cover     # coverage profile and HTML report
 make help      # all targets
@@ -200,7 +207,7 @@ or CI execution modifying the working tree.
 
 ## What is implemented today
 
-The Phase 0 foundation and completed Phase 1–6 units. Each piece exists because
+The Phase 0 foundation and completed Phase 1–7 units. Each piece exists because
 a later phase cannot be tested honestly without it.
 
 | Package | Purpose |
@@ -209,8 +216,8 @@ a later phase cannot be tested honestly without it.
 | [`internal/testutil`](internal/testutil) | Seeded randomness with an explicitly promoted failing-seed corpus, goroutine-leak detection, bounded polling helpers. |
 | [`internal/storage`](internal/storage) | Integrated local LSM engine over internal-key/write-batch codecs, WAL, skip-list MemTables, SSTables, bounded FIFO flush, Manifest/VersionSet authority and version-preserving L0-to-L1 compaction. |
 | [`internal/raft`](internal/raft) | Deterministic static-membership Raft with durable term/vote/log, quorum commit, ordered apply, snapshots, crash/restart and an adversarial simulator. |
-| [`internal/replicatedrange`](internal/replicatedrange) | One range-scoped Raft replica, bounded proposal waiters, canonical PUT/DELETE commands, WAL-free Raft-index LSM application, local status/inspection and logical digest. |
-| [`internal/multiraft`](internal/multiraft) | Static descriptors/catalog persistence, per-node range hosting, shared bounded transport/schedulers, range-scoped message validation and immutable routed mutations. |
+| [`internal/replicatedrange`](internal/replicatedrange) | One range-scoped Raft replica, WAL-free Raft-index LSM application, MVCC/transaction commands, split fences, shadow/active/retired lifecycle, logical bootstrap and parent replay provenance. |
+| [`internal/multiraft`](internal/multiraft) | Range hosting/routing plus the replicated MetaRange, monotonic metadata allocators, immutable lineage, online split coordinator, dynamic lifecycle and bounded stale-router refresh. |
 | [`internal/mvcc`](internal/mvcc) | Canonical 48-bit physical/16-bit logical HLC timestamps with injected time, observation, regression resistance and explicit exhaustion. |
 | [`internal/txn`](internal/txn) | Canonical transaction IDs, records, participants, intents and bounded hostile-input-safe protocol codecs. |
 | [`internal/invariant`](internal/invariant) | Named, typed assertions so a violation identifies itself, plus an `Expensive()` tier for O(n) structural checks enabled in tests and chaos runs. |

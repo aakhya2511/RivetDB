@@ -12,7 +12,7 @@ range splitting and replica migration, and workload-adaptive rebalancing. Read
 
 ## 1. Current state
 
-**Phases 0–6 are complete and certified. Phase 7 online range splitting is next.**
+**Phases 0–7 are complete and certified. Phase 8 online replica migration is next.**
 
 What exists: the design documents, build/CI gate, foundation packages,
 internal-key/write-batch primitives, the checksummed WAL, the concurrent
@@ -23,8 +23,11 @@ Raft core, memory/file Raft stores, simulator and snapshot foundation under
 `internal/raft`. `internal/replicatedrange` composes one range with a WAL-free
 Raft-index apply path, explicit durable local frontier and bounded proposal
 waiters. `internal/multiraft` adds the authoritative static catalog, per-node
-hosting, shared bounded transport/schedulers and routed mutations. There is no
-server, client, distributed read protocol or dynamic range metadata.
+hosting, shared bounded transport/schedulers and routed mutations. Phase 7 adds
+a reserved replicated MetaRange, canonical dynamic catalog/ID authority,
+logical all-version transfer, delta replay, transaction fence/drain, atomic
+cutover and immutable lineage. There is no server, client, distributed read
+protocol, replica migration, or dynamic user-range membership.
 `internal/mvcc` plus the Phase 5 replicated-range/storage extensions provide
 replicated HLC versions and range-local historical read-only snapshots.
 `internal/txn` plus the Multi-Raft transaction coordinator provide replicated
@@ -200,10 +203,12 @@ Design is written before the code it governs.
 | [docs/storage-engine.md](docs/storage-engine.md) | Phase 1 spec: byte-level on-disk formats, durability modes, crash-scenario table, test list |
 | [docs/raft.md](docs/raft.md) | Phase 2 protocol, persistence, simulator, snapshot and Phase 3 boundaries |
 | [docs/replicated-range.md](docs/replicated-range.md) | Phase 3 Raft-to-LSM ordering, durability, replay and runtime contract |
-| [docs/multiraft.md](docs/multiraft.md) | Phase 4 node composition, static metadata authority, shared runtime and failure domains |
-| [docs/range-routing.md](docs/range-routing.md) | Phase 4 descriptors, catalog format, routing and future split/migration seams |
+| [docs/multiraft.md](docs/multiraft.md) | Multi-Raft node composition, shared runtime, failure domains and Phase 7 dynamic metadata composition |
+| [docs/range-routing.md](docs/range-routing.md) | Descriptors, catalog format, routing, stale split redirects and migration seams |
 | [docs/mvcc.md](docs/mvcc.md) | Phase 5 HLC authority, historical visibility, snapshots, watermarks and Phase 6 boundary |
 | [docs/transactions.md](docs/transactions.md) | Phase 6 Snapshot Isolation, intents, record authority, 2PC and recovery |
+| [docs/metadata-range.md](docs/metadata-range.md) | Phase 7 replicated catalog, allocators, split records, lineage and recovery authority |
+| [docs/range-splitting.md](docs/range-splitting.md) | Phase 7 transaction fence/drain, image/replay, final fence, cutover and crash proof |
 | [docs/correctness.md](docs/correctness.md) | Test strategy, reproducibility mechanism, and §5's explicit list of what is *not* tested |
 | [docs/roadmap.md](docs/roadmap.md) | The twelve phases and each gate |
 | [docs/design-decisions/](docs/design-decisions/) | ADRs. An ADR records a contested decision with the alternatives that lost, and is superseded rather than rewritten. |
@@ -229,7 +234,9 @@ Decisions recorded: [ADR-0001](docs/design-decisions/0001-lsm-tree-over-b-tree.m
 [ADR-0017](docs/design-decisions/0017-hlc-mvcc-timestamp-authority.md)
 (HLC MVCC timestamp authority), and
 [ADR-0018](docs/design-decisions/0018-snapshot-isolation-transactions-and-2pc.md)
-(Snapshot Isolation transactions and 2PC). The ADR index lists the complete
+(Snapshot Isolation transactions and 2PC), and
+[ADR-0019](docs/design-decisions/0019-online-range-splitting-and-replicated-metadata.md)
+(online splitting and replicated metadata). The ADR index lists the complete
 sequence. They list the rejected options' genuine
 advantages, not strawmen — keep that standard.
 
@@ -284,13 +291,19 @@ Open questions retained for their owning later phases:
 - **No range merging** is planned. A workload that creates many ranges and goes
   quiet leaves them fragmented permanently. Stated as a limitation in the
   README; add it to the roadmap if the Phase 9 demo needs it.
-- **Read path** (Raft read vs ReadIndex vs leader lease) remains undecided for
-  Phase 5. Phase 4 exposes routed mutations and stale-capable local inspection,
+- **Read path** (Raft read vs ReadIndex vs leader lease) remains deferred.
+  Phase 4 exposes routed mutations and stale-capable local inspection,
   not a distributed read surface. Architecture §11 assumes nothing about clock
   skew, while leader leases would make safety depend on clock bounds. See §14.
 
 Phase 6 is frozen at [docs/transactions.md](docs/transactions.md): 128-bit IDs,
 one RT, one CT, buffered writes, replicated record authority and intents,
 first-committer-wins, 2PC, epoch takeover and no GC. Run `make certify-txn`; it
-includes every lower regression gate. Phase 7 must preserve participant
+includes every lower regression gate. Phase 7 preserves pinned participant
 identity and intent/record recovery while ranges change generation and split.
+
+Phase 7 is frozen at [docs/range-splitting.md](docs/range-splitting.md) and
+[docs/metadata-range.md](docs/metadata-range.md). Run `make certify-split`; it
+includes the transaction and every lower certification gate. Phase 8 may reuse
+logical image/provenance/frontier components, but must add placement authority,
+joint-consensus membership change, catch-up roles, and safe old-replica deletion.

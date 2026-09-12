@@ -36,6 +36,7 @@ const (
 	CommandTxnTakeover
 	CommandTxnResolveCommit
 	CommandTxnResolveAbort
+	CommandSplit
 )
 
 type Command struct {
@@ -118,7 +119,7 @@ func DecodeCommand(encoded []byte) (Command, error) {
 }
 
 func validateCommand(command Command) error {
-	if command.Type < CommandPut || command.Type > CommandTxnResolveAbort {
+	if command.Type < CommandPut || command.Type > CommandSplit {
 		return fmt.Errorf("%w: type %d", ErrInvalidCommand, command.Type)
 	}
 	if len(command.Key) > sstable.MaxUserKeySize || len(command.Value) > sstable.MaxValueSize {
@@ -134,10 +135,10 @@ func validateCommand(command Command) error {
 	if (command.Type == CommandDelete || command.Type == CommandTxnBarrier) && len(command.Value) != 0 {
 		return fmt.Errorf("%w: DELETE has value", ErrInvalidCommand)
 	}
-	if command.Type >= CommandTxnBarrier && command.Timestamp == 0 {
+	if command.Type >= CommandTxnBarrier && command.Type < CommandSplit && command.Timestamp == 0 {
 		return fmt.Errorf("%w: transaction command has zero timestamp", ErrInvalidCommand)
 	}
-	if command.Type > CommandTxnBarrier {
+	if command.Type > CommandTxnBarrier && command.Type < CommandSplit {
 		operation, err := txn.DecodeOperation(command.Value)
 		if err != nil {
 			return fmt.Errorf("%w: transaction operation: %w", ErrInvalidCommand, err)
@@ -150,6 +151,12 @@ func validateCommand(command Command) error {
 		}[command.Type]
 		if operation.Type != want || operation.CommitTime != uint64(command.Timestamp) {
 			return fmt.Errorf("%w: transaction operation mismatch", ErrInvalidCommand)
+		}
+	}
+	if command.Type == CommandSplit {
+		operation, err := DecodeSplitOperation(command.Value)
+		if err != nil || operation.Timestamp != uint64(command.Timestamp) {
+			return fmt.Errorf("%w: split operation mismatch", ErrInvalidCommand)
 		}
 	}
 	return nil

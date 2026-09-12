@@ -18,6 +18,7 @@ RANGE_PKGS ?= ./internal/replicatedrange ./internal/storage/engine ./internal/st
 MULTIRAFT_PKGS ?= ./internal/multiraft
 MVCC_PKGS ?= ./internal/mvcc ./internal/replicatedrange ./internal/multiraft ./internal/storage/engine ./internal/storage/manifest ./internal/storage/pipeline ./internal/storage/compaction
 TXN_PKGS ?= ./internal/txn ./internal/multiraft ./internal/replicatedrange ./internal/storage/engine ./internal/storage/pipeline ./internal/storage/compaction
+SPLIT_PKGS ?= ./internal/multiraft ./internal/replicatedrange ./internal/storage/engine
 
 # Race tests are run twice by default. A concurrency bug that reproduces once
 # in twenty runs is worth catching, and doubling a fast suite is cheap.
@@ -253,6 +254,40 @@ certify-txn: ## Run the Phase 6 gate and every frozen lower-phase certification
 	$(MAKE) txn-chaos
 	$(MAKE) txn-crash
 	$(MAKE) certify-mvcc
+
+.PHONY: split-test
+split-test: ## Run deterministic Phase 7 metadata, transfer, MVCC, transaction, and restart tests
+	$(GO) test -count=1 -timeout 60m $(TEST_FLAGS) $(SPLIT_PKGS)
+
+.PHONY: split-race
+split-race: ## Run Phase 7 packages under the race detector
+	$(GO) test -race -count=1 -timeout 60m $(TEST_FLAGS) $(SPLIT_PKGS)
+
+.PHONY: split-stress
+split-stress: ## Run 100k metadata events and repeated disk-backed splits
+	RIVETDB_SPLIT_STRESS=1 $(GO) test -count=1 -timeout 90m -run 'RandomizedSplitCatalogHeavy|RepeatedDiskBackedSplits' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: split-chaos
+split-chaos: ## Run split leaders, hot traffic, transactions, lineage, and full-restart campaigns
+	$(GO) test -count=1 -timeout 60m -run 'OnlineSplit|SplitKeeps|PreparedTransactionDrain|FullClusterRestart|ParentMetaAndChildLeader|StaleRouter|PreSplitBuffered|AbortBeforeFence' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: split-crash
+split-crash: ## Run abrupt logical-image, replay, fence, and cutover subprocess crashes
+	RIVETDB_SPLIT_CRASH=1 $(GO) test -count=1 -timeout 60m -run '^TestSplitSubprocessCrashMatrix$$' $(TEST_FLAGS) ./internal/multiraft
+
+.PHONY: certify-split
+certify-split: ## Run the Phase 7 gate and every frozen lower-phase certification
+	$(MAKE) check
+	$(MAKE) race RACE_COUNT=1
+	$(MAKE) split-stress
+	$(MAKE) split-chaos
+	$(MAKE) split-crash
+	$(MAKE) txn-stress txn-chaos txn-crash
+	$(MAKE) mvcc-stress mvcc-chaos mvcc-crash
+	$(MAKE) multiraft-stress multiraft-chaos multiraft-crash
+	$(MAKE) range-stress range-crash
+	$(MAKE) raft-stress raft-chaos raft-exhaustive
+	$(MAKE) stress crash exhaustive PKGS="$(LOCAL_PKGS)"
 
 .PHONY: diff-check
 diff-check: ## Fail on whitespace errors in the working diff

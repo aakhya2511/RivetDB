@@ -23,17 +23,20 @@ import (
 const bootstrapCompleteFilename = "bootstrap-complete"
 
 type NodeOptions struct {
-	NodeID             raft.NodeID
-	Directory          string
-	Bootstrap          *Bootstrap
-	MaxHostedRanges    int
-	MaxProposalWaiters int
-	MemTableBytes      uint64
-	CatalogHook        CatalogPublishHook
-	RangeHook          func(RangeID) replicatedrange.Hook
-	BootstrapRangeHook func(RangeID) error
-	MVCC               bool
-	Clock              clock.Clock
+	NodeID               raft.NodeID
+	Directory            string
+	Bootstrap            *Bootstrap
+	MaxHostedRanges      int
+	MaxProposalWaiters   int
+	MemTableBytes        uint64
+	CatalogHook          CatalogPublishHook
+	RangeHook            func(RangeID) replicatedrange.Hook
+	BootstrapRangeHook   func(RangeID) error
+	MVCC                 bool
+	Clock                clock.Clock
+	AuthoritativeCatalog *Catalog
+	ShadowRanges         []RangeDescriptor
+	RetiredRanges        []RangeDescriptor
 }
 
 type RangeFailure struct {
@@ -57,6 +60,8 @@ type Node struct {
 	registry  *RangeRegistry
 	options   NodeOptions
 	failures  map[RangeID]error
+	dynamic   map[RangeID]RangeDescriptor
+	retired   map[RangeID][]RangeDescriptor
 	orphans   []string
 	stopped   bool
 }
@@ -75,12 +80,19 @@ func OpenNode(options NodeOptions) (_ *Node, resultErr error) {
 	if err != nil {
 		return nil, err
 	}
+	bootstrapCatalog := catalog
+	if options.AuthoritativeCatalog != nil {
+		if options.AuthoritativeCatalog.Generation() < catalog.Generation() {
+			return nil, ErrStaleRange
+		}
+		catalog = options.AuthoritativeCatalog
+	}
 	assigned := catalog.Assigned(options.NodeID)
 	if len(assigned) > options.MaxHostedRanges {
 		return nil, ErrResourceLimit
 	}
 	node := &Node{id: options.NodeID, directory: options.Directory, catalog: catalog, registry: newRangeRegistry(),
-		options: options, failures: make(map[RangeID]error)}
+		options: options, failures: make(map[RangeID]error), dynamic: make(map[RangeID]RangeDescriptor), retired: make(map[RangeID][]RangeDescriptor)}
 	complete, completionErr := node.bootstrapComplete()
 	if completionErr != nil {
 		return nil, completionErr
@@ -90,7 +102,11 @@ func OpenNode(options NodeOptions) (_ *Node, resultErr error) {
 			node.failures[descriptor.RangeID] = ErrMissingRange
 			continue
 		}
-		replica, openErr := node.openReplica(descriptor)
+		lifecycle := replicatedrange.LifecycleActive
+		if _, baseErr := bootstrapCatalog.LookupByID(descriptor.RangeID); baseErr != nil {
+			lifecycle = replicatedrange.LifecycleShadow
+		}
+		replica, openErr := node.openReplicaLifecycle(descriptor, lifecycle)
 		if openErr != nil {
 			node.failures[descriptor.RangeID] = openErr
 			continue
@@ -106,6 +122,28 @@ func OpenNode(options NodeOptions) (_ *Node, resultErr error) {
 			}
 		}
 	}
+	for _, descriptor := range append(append([]RangeDescriptor(nil), options.ShadowRanges...), options.RetiredRanges...) {
+		if _, assignedHere := descriptor.ReplicaOn(options.NodeID); !assignedHere {
+			continue
+		}
+		if _, existsErr := node.registry.Lookup(descriptor.RangeID); existsErr == nil {
+			continue
+		}
+		initial := replicatedrange.LifecycleShadow
+		if containsDescriptor(options.RetiredRanges, descriptor.RangeID) {
+			initial = replicatedrange.LifecycleActive
+		}
+		replica, openErr := node.openReplicaLifecycle(descriptor, initial)
+		if openErr != nil {
+			node.failures[descriptor.RangeID] = openErr
+			continue
+		}
+		if registerErr := node.registry.Register(descriptor.RangeID, replica); registerErr != nil {
+			node.failures[descriptor.RangeID] = errors.Join(registerErr, replica.Close(context.Background()))
+			continue
+		}
+		node.dynamic[descriptor.RangeID] = cloneDescriptor(descriptor)
+	}
 	if !complete {
 		if len(node.failures) != 0 {
 			closeErr := node.Close(context.Background())
@@ -120,7 +158,20 @@ func OpenNode(options NodeOptions) (_ *Node, resultErr error) {
 	return node, nil
 }
 
+func containsDescriptor(descriptors []RangeDescriptor, id RangeID) bool {
+	for _, descriptor := range descriptors {
+		if descriptor.RangeID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *Node) openReplica(descriptor RangeDescriptor) (*replicatedrange.Replica, error) {
+	return n.openReplicaLifecycle(descriptor, replicatedrange.LifecycleActive)
+}
+
+func (n *Node) openReplicaLifecycle(descriptor RangeDescriptor, lifecycle replicatedrange.Lifecycle) (*replicatedrange.Replica, error) {
 	local, exists := descriptor.ReplicaOn(n.id)
 	if !exists {
 		return nil, ErrUnknownRange
@@ -142,7 +193,7 @@ func (n *Node) openReplica(descriptor RangeDescriptor) (*replicatedrange.Replica
 		ElectionTimeoutMax: 5 + uint64(n.id%3) + uint64(descriptor.RangeID%3), HeartbeatInterval: 1,
 		Random: rand.New(rand.NewPCG(uint64(n.id), uint64(descriptor.RangeID))), MaxProposalWaiters: n.options.MaxProposalWaiters, //nolint:gosec // deterministic election source, not security randomness
 		ContainsKey: descriptor.Contains, ContainsSpan: descriptor.ContainsSpan, Hook: hook,
-		MVCC: n.options.MVCC, Clock: n.options.Clock,
+		MVCC: n.options.MVCC, Clock: n.options.Clock, Lifecycle: lifecycle,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open replicated range %d: %w", descriptor.RangeID, err)
@@ -150,7 +201,7 @@ func (n *Node) openReplica(descriptor RangeDescriptor) (*replicatedrange.Replica
 	return replica, nil
 }
 
-func (n *Node) Catalog() *Catalog { return n.catalog }
+func (n *Node) Catalog() *Catalog { n.mu.RLock(); defer n.mu.RUnlock(); return n.catalog }
 func (n *Node) ID() raft.NodeID   { return n.id }
 
 func (n *Node) Tick(rangeID RangeID) ([]Envelope, error) {
@@ -172,7 +223,7 @@ func (n *Node) Step(envelope Envelope) ([]Envelope, error) {
 	if envelope.Message.To != n.id {
 		return nil, ErrWrongRangeMessage
 	}
-	descriptor, err := n.catalog.LookupByID(envelope.RangeID)
+	descriptor, err := n.descriptorFor(envelope.RangeID)
 	if err != nil {
 		return nil, ErrUnknownRange
 	}
@@ -222,7 +273,7 @@ func (e *NotLeaderError) Error() string {
 func (e *NotLeaderError) Unwrap() error { return ErrNotLeader }
 
 func (n *Node) Propose(ctx context.Context, route Route, encoded []byte) (*Pending, []Envelope, error) {
-	descriptor, err := n.catalog.LookupByID(route.RangeID)
+	descriptor, err := n.activeDescriptor(route.RangeID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -258,7 +309,7 @@ func (n *Node) Propose(ctx context.Context, route Route, encoded []byte) (*Pendi
 }
 
 func (n *Node) ProposeMVCC(ctx context.Context, route Route, command replicatedrange.Command) (mvcc.Timestamp, *Pending, []Envelope, error) {
-	descriptor, err := n.catalog.LookupByID(route.RangeID)
+	descriptor, err := n.activeDescriptor(route.RangeID)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -287,7 +338,7 @@ func (n *Node) ProposeMVCC(ctx context.Context, route Route, command replicatedr
 }
 
 func (n *Node) ProposeTransaction(ctx context.Context, route Route, command replicatedrange.Command) (*Pending, []Envelope, error) {
-	descriptor, err := n.catalog.LookupByID(route.RangeID)
+	descriptor, err := n.activeDescriptor(route.RangeID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -315,8 +366,31 @@ func (n *Node) ProposeTransaction(ctx context.Context, route Route, command repl
 	return &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
 }
 
+func (n *Node) ProposeSplit(ctx context.Context, rangeID RangeID, command replicatedrange.Command) (*Pending, []Envelope, error) {
+	descriptor, err := n.descriptorFor(rangeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	replica, err := n.liveReplica(rangeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	index, messages, waiter, err := replica.ProposeSplit(ctx, command)
+	if err != nil {
+		if errors.Is(err, raft.ErrNotLeader) {
+			return nil, nil, &NotLeaderError{RangeID: rangeID, Leader: replica.Status().Raft.LeaderID}
+		}
+		return nil, nil, fmt.Errorf("propose split command to range %d: %w", rangeID, err)
+	}
+	envelopes, err := n.wrapMessages(descriptor.RangeID, messages)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &Pending{index: index, waiter: waiter, replica: replica}, envelopes, nil
+}
+
 func (n *Node) AssignTransactionTimestamp(ctx context.Context, route Route, floor mvcc.Timestamp) (mvcc.Timestamp, *Pending, []Envelope, error) {
-	descriptor, err := n.catalog.LookupByID(route.RangeID)
+	descriptor, err := n.activeDescriptor(route.RangeID)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -360,8 +434,41 @@ func (e *StaleRangeError) Error() string {
 }
 func (e *StaleRangeError) Unwrap() error { return ErrStaleRange }
 
+type RangeSplitError struct {
+	Parent   RangeID
+	Children []RangeDescriptor
+}
+
+func (e *RangeSplitError) Error() string {
+	return fmt.Sprintf("%v: parent=%d children=%d", ErrRangeSplit, e.Parent, len(e.Children))
+}
+func (e *RangeSplitError) Unwrap() error { return ErrRangeSplit }
+
+func (n *Node) activeDescriptor(rangeID RangeID) (RangeDescriptor, error) {
+	descriptor, err := n.Catalog().LookupByID(rangeID)
+	if err == nil {
+		return descriptor, nil
+	}
+	n.mu.RLock()
+	children := append([]RangeDescriptor(nil), n.retired[rangeID]...)
+	n.mu.RUnlock()
+	if len(children) != 0 {
+		return RangeDescriptor{}, &RangeSplitError{Parent: rangeID, Children: children}
+	}
+	return RangeDescriptor{}, err
+}
+
+func (n *Node) InstallRetiredRedirect(parent RangeID, children []RangeDescriptor) {
+	n.mu.Lock()
+	n.retired[parent] = make([]RangeDescriptor, len(children))
+	for index := range children {
+		n.retired[parent][index] = cloneDescriptor(children[index])
+	}
+	n.mu.Unlock()
+}
+
 func (n *Node) wrapMessages(rangeID RangeID, messages []raft.Message) ([]Envelope, error) {
-	descriptor, err := n.catalog.LookupByID(rangeID)
+	descriptor, err := n.descriptorFor(rangeID)
 	if err != nil {
 		return nil, err
 	}
@@ -376,6 +483,63 @@ func (n *Node) wrapMessages(rangeID RangeID, messages []raft.Message) ([]Envelop
 			FromReplica: from.ReplicaID, ToReplica: to.ReplicaID, Message: message}
 	}
 	return result, nil
+}
+
+func (n *Node) descriptorFor(rangeID RangeID) (RangeDescriptor, error) {
+	n.mu.RLock()
+	if descriptor, ok := n.dynamic[rangeID]; ok {
+		n.mu.RUnlock()
+		return cloneDescriptor(descriptor), nil
+	}
+	catalog := n.catalog
+	n.mu.RUnlock()
+	return catalog.LookupByID(rangeID)
+}
+
+// AddShadowRange creates an assigned child group without granting user-serving
+// authority. Directory existence alone never activates it.
+func (n *Node) AddShadowRange(descriptor RangeDescriptor) error {
+	if _, assigned := descriptor.ReplicaOn(n.id); !assigned {
+		return ErrUnknownRange
+	}
+	n.mu.Lock()
+	if n.stopped || len(n.registry.IDs()) >= n.options.MaxHostedRanges {
+		n.mu.Unlock()
+		return ErrResourceLimit
+	}
+	n.dynamic[descriptor.RangeID] = cloneDescriptor(descriptor)
+	n.mu.Unlock()
+	if _, err := n.registry.Lookup(descriptor.RangeID); err == nil {
+		return nil
+	}
+	replica, err := n.openReplicaLifecycle(descriptor, replicatedrange.LifecycleShadow)
+	if err != nil {
+		return err
+	}
+	if err := n.registry.Register(descriptor.RangeID, replica); err != nil {
+		return errors.Join(err, replica.Close(context.Background()))
+	}
+	return nil
+}
+
+func (n *Node) InstallDynamicCatalog(catalog *Catalog) error {
+	if catalog == nil {
+		return ErrInvalidCatalog
+	}
+	n.mu.Lock()
+	if catalog.Generation() < n.catalog.Generation() {
+		n.mu.Unlock()
+		return ErrStaleRange
+	}
+	for _, descriptor := range n.catalog.Snapshot().Ranges {
+		n.dynamic[descriptor.RangeID] = cloneDescriptor(descriptor)
+	}
+	n.catalog = catalog
+	for _, descriptor := range catalog.Snapshot().Ranges {
+		n.dynamic[descriptor.RangeID] = cloneDescriptor(descriptor)
+	}
+	n.mu.Unlock()
+	return nil
 }
 
 func (n *Node) liveReplica(rangeID RangeID) (*replicatedrange.Replica, error) {
@@ -397,7 +561,7 @@ func (n *Node) Status() NodeStatus {
 			continue
 		}
 		result.Ranges = append(result.Ranges, replica.Status())
-		if descriptor, descriptorErr := n.catalog.LookupByID(rangeID); descriptorErr == nil {
+		if descriptor, descriptorErr := n.Catalog().LookupByID(rangeID); descriptorErr == nil {
 			result.Descriptors = append(result.Descriptors, descriptor)
 		}
 	}
@@ -415,7 +579,7 @@ func (n *Node) Replica(rangeID RangeID) (*replicatedrange.Replica, error) {
 }
 
 func (n *Node) RestartRange(rangeID RangeID) error {
-	descriptor, err := n.catalog.LookupByID(rangeID)
+	descriptor, err := n.descriptorFor(rangeID)
 	if err != nil {
 		return err
 	}

@@ -371,6 +371,73 @@ func (e *Engine) scanMVCCAt(ctx context.Context, start, end []byte, requested *u
 	return values, nil
 }
 
+// ExportMVCCVersions returns every distinct logical internal entry in
+// canonical order over [start,end). It exists for logical state transfer; it
+// deliberately exposes no physical table identity. Equal internal entries
+// present in overlapping authoritative sources are collapsed only when their
+// values match exactly.
+func (e *Engine) ExportMVCCVersions(ctx context.Context, start, end []byte) (result []MVCCVersion, resultErr error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return nil, ErrClosed
+	}
+	if e.mode != ModeReplicatedMVCC || ctx == nil || len(start) > sstable.MaxUserKeySize || len(end) > sstable.MaxUserKeySize {
+		return nil, ErrInvalidOptions
+	}
+	if start != nil && end != nil && bytes.Compare(start, end) > 0 {
+		return nil, ErrInvalidRange
+	}
+	if start != nil && end != nil && bytes.Equal(start, end) {
+		return []MVCCVersion{}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("before MVCC export: %w", err)
+	}
+	view, err := e.captureReadView()
+	if err != nil {
+		return nil, err
+	}
+	inputs, leases, err := e.scanInputs(view, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		for _, lease := range leases {
+			resultErr = errors.Join(resultErr, lease.Release())
+		}
+	}()
+	merge, err := compaction.NewMergeIterator(inputs)
+	if err != nil {
+		return nil, fmt.Errorf("construct MVCC export merge: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, merge.Close()) }()
+	var previous storage.InternalKey
+	var previousValue []byte
+	havePrevious := false
+	for merge.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("MVCC export canceled: %w", err)
+		}
+		entry, ok := merge.Entry()
+		if !ok {
+			return nil, errors.Join(ErrCorruption, compaction.ErrInputCorrupt)
+		}
+		if havePrevious && storage.CompareInternal(previous, entry.Key) == 0 {
+			if !bytes.Equal(previousValue, entry.Value) {
+				return nil, errors.Join(ErrCorruption, ErrDuplicateEntry)
+			}
+			continue
+		}
+		result = append(result, MVCCVersion{Key: entry.Key.UserKey(), Value: bytes.Clone(entry.Value), Timestamp: entry.Key.Sequence(), Kind: entry.Key.Kind()})
+		previous, previousValue, havePrevious = entry.Key, bytes.Clone(entry.Value), true
+	}
+	if err := merge.Error(); err != nil {
+		return nil, fmt.Errorf("export MVCC source: %w", errors.Join(ErrCorruption, err))
+	}
+	return result, nil
+}
+
 func (e *Engine) observeRead(stage ReadStage, generation uint64) {
 	if e.readHook != nil {
 		e.readHook(stage, generation)

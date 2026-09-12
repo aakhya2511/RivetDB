@@ -47,6 +47,7 @@ Phase:    which phase this governs
 | [0016](0016-multiraft-static-range-routing.md) | Multi-Raft hosting and static range routing | Accepted | 4 |
 | [0017](0017-hlc-mvcc-timestamp-authority.md) | HLC timestamp authority and replicated MVCC snapshots | Accepted | 5 |
 | [0018](0018-snapshot-isolation-transactions-and-2pc.md) | Snapshot Isolation transactions, replicated intents, and 2PC | Accepted | 6 |
+| [0019](0019-online-range-splitting-and-replicated-metadata.md) | Online range splitting and replicated metadata authority | Accepted | 7 |
 
 ## Planned
 
@@ -57,5 +58,5 @@ visible rather than implicit; each is noted in
 | Topic | Decided in |
 |---|---|
 | Read path: Raft read vs ReadIndex vs leader lease | Phase 3 |
-| Split key selection: size-based vs load-based | Phase 7 |
+| Automatic split key selection: size-based vs load-based | Phase 9 |
 | Replica migration protocol: push vs pull snapshot transfer | Phase 8 |

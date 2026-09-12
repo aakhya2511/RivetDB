@@ -443,15 +443,17 @@ safe.
 [a, z)  ──►  [a, m)  +  [m, z)
 ```
 
-The split is a single Raft entry in the original range's log. That is what
-makes it atomic with respect to concurrent traffic: every write is ordered
-before or after the split entry, never during it. Applying the entry creates
-the right-hand range's state, updates both descriptors, and bumps both
-generations. Requests that raced the split arrive with the old generation and
-are redirected.
+Phase 7 uses a replicated MetaRange plus a restartable parent/children protocol,
+not one parent-log entry. The parent remains authoritative while two new
+SHADOW Raft groups receive a logical image at S and original-timestamp deltas.
+A short final fence F fixes the last parent write; after both children prove
+replay through F, one MetaRange command atomically replaces parent ownership
+with both children and records immutable lineage. See
+[range-splitting.md](range-splitting.md) and
+[metadata-range.md](metadata-range.md).
 
-The split key is chosen by sampling the range's key distribution, so that the
-result is two ranges of comparable load rather than of comparable width.
+Split initiation is explicit. Automatic sampling and placement policy remain
+Phase 9 work.
 
 ### 8.2 Replica migration
 

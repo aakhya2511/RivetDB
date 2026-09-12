@@ -995,3 +995,15 @@ Flush, SSTable validation, version-preserving compaction and restart retain all
 kinds. Resolution may arrive after a larger unrelated global CT, so
 replicated-MVCC generations permit overlapping timestamp ranges while the
 Manifest maximum remains monotonic. No intent or resolution-artifact GC exists.
+
+## Phase 7 logical split export
+
+The Engine exposes an exact bounded-range enumeration of all internal MVCC
+versions for logical child bootstrap. It preserves the complemented sequence
+encoding and explicit internal-key comparator: versions are never partitioned
+by raw encoded-byte comparison. Image partitioning compares the user key only,
+so every version and tombstone for the boundary key enters the right child.
+
+Child bootstrap and replay use replicated Engine application and retain the
+existing file publication order, including containing-directory fsync. Phase 7
+does not share SSTables or delete retired parent files.

@@ -68,8 +68,11 @@ committed intent is logically visible at its CT, an aborted intent falls through
 to older history, and a pending intent conflicts. Physical resolution adds the
 lower-sorting committed value/delete or abort marker at the same CT.
 
-## 6. Phase 7 readiness boundary
+## 6. Phase 7 split composition
 
-Online splitting must preserve the Phase 5 timestamp history and Phase 6
-intent/record meanings. Descriptor-generation pinning, participant redirects,
-prepared-state division and descendant-aware recovery remain Phase 7 work.
+The parent image copies every logical MVCC tuple through bootstrap barrier S,
+including historical values, tombstones and abort markers. Delta replay keeps
+the original timestamp and is complete through an explicit parent Raft-index
+frontier. The final proof partitions the parent's complete history through F by
+user key and transfers an HLC floor to both children. `GetAt` and `ScanAt`
+therefore retain visibility after cutover. No MVCC GC was introduced.

@@ -2,6 +2,7 @@ package replicatedrange
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -16,20 +17,45 @@ import (
 var ErrSnapshotDeferred = errors.New("replicated range: LSM-integrated Raft snapshots are deferred")
 
 type stateMachine struct {
-	engine       *engine.Engine
-	hook         Hook
-	containsKey  func([]byte) bool
-	mvcc         bool
-	maxApplied   mvcc.Timestamp
-	safeRead     mvcc.Timestamp
-	clock        *mvcc.Clock
-	rangeID      RangeID
-	generation   uint64
-	records      map[txn.ID]txn.Record
-	participants map[txn.ID]txn.ParticipantRecord
+	engine              *engine.Engine
+	hook                Hook
+	containsKey         func([]byte) bool
+	mvcc                bool
+	maxApplied          mvcc.Timestamp
+	safeRead            mvcc.Timestamp
+	clock               *mvcc.Clock
+	rangeID             RangeID
+	generation          uint64
+	records             map[txn.ID]txn.Record
+	participants        map[txn.ID]txn.ParticipantRecord
+	lifecycle           Lifecycle
+	splitID             uint64
+	splitEpoch          uint64
+	txnFence            bool
+	userFence           bool
+	bootstrapIndex      uint64
+	bootstrapSplitID    uint64
+	bootstrapParentID   uint64
+	bootstrapParentGen  uint64
+	bootstrapImage      [32]byte
+	fenceIndex          uint64
+	parentReplayThrough uint64
+	provenance          map[uint64][32]byte
+	bootstrapSeen       map[[32]byte]struct{}
 }
 
 func (m *stateMachine) Apply(entry raft.Entry) error {
+	// Zero is accepted only for older in-package harnesses that construct the
+	// state machine directly; opened replicas always persist an explicit mode.
+	if m.lifecycle == 0 {
+		m.lifecycle = LifecycleActive
+	}
+	if m.provenance == nil {
+		m.provenance = make(map[uint64][32]byte)
+	}
+	if m.bootstrapSeen == nil {
+		m.bootstrapSeen = make(map[[32]byte]struct{})
+	}
 	if m.hook != nil {
 		m.hook(StageRaftCommitted, entry.Index)
 	}
@@ -40,7 +66,7 @@ func (m *stateMachine) Apply(entry raft.Entry) error {
 	if m.containsKey != nil && !m.containsKey(command.Key) {
 		return ErrKeyOutOfRange
 	}
-	if m.mvcc != (command.Timestamp != 0) {
+	if command.Type != CommandSplit && m.mvcc != (command.Timestamp != 0) {
 		return ErrInvalidCommand
 	}
 	frontier, err := m.engine.DurableAppliedRaftIndex()
@@ -48,7 +74,16 @@ func (m *stateMachine) Apply(entry raft.Entry) error {
 		return fmt.Errorf("read durable apply frontier: %w", err)
 	}
 	alreadyDurable := entry.Index <= frontier
+	if command.Type == CommandSplit {
+		return m.applySplit(entry, command, alreadyDurable)
+	}
+	if m.lifecycle != LifecycleActive || m.userFence {
+		return ErrRangeNotServing
+	}
 	if command.Type >= CommandTxnBarrier {
+		if m.txnFence && (command.Type == CommandTxnCreate || command.Type == CommandTxnPrepare) {
+			return ErrSplitFenced
+		}
 		return m.applyTransaction(entry, command, alreadyDurable)
 	}
 	if m.mvcc && !alreadyDurable && command.Timestamp <= m.maxApplied {
@@ -77,6 +112,124 @@ func (m *stateMachine) Apply(entry raft.Entry) error {
 		m.clock.Observe(command.Timestamp)
 	}
 	return nil
+}
+
+func (m *stateMachine) applySplit(entry raft.Entry, command Command, alreadyDurable bool) error {
+	op, err := DecodeSplitOperation(command.Value)
+	if err != nil {
+		return err
+	}
+	if m.splitID != 0 && (m.splitID != op.SplitID || op.Epoch < m.splitEpoch) {
+		return ErrSplitFenced
+	}
+	if m.lifecycle == LifecycleShadow && m.bootstrapSplitID != 0 &&
+		(m.bootstrapSplitID != op.SplitID || m.bootstrapParentID != op.ParentRangeID || m.bootstrapParentGen != op.ParentGeneration) {
+		return ErrSplitFenced
+	}
+	if op.Epoch > m.splitEpoch {
+		m.splitEpoch = op.Epoch
+	}
+	switch op.Type {
+	case SplitOpBegin:
+		if m.lifecycle != LifecycleActive || m.userFence && m.splitID != op.SplitID {
+			return ErrRangeNotServing
+		}
+		m.splitID, m.txnFence = op.SplitID, true
+	case SplitOpBootstrapBarrier:
+		switch m.lifecycle {
+		case LifecycleActive:
+			if !m.txnFence {
+				return ErrSplitFenced
+			}
+			m.bootstrapIndex = entry.Index
+		case LifecycleShadow:
+			if m.bootstrapSplitID == 0 {
+				if op.ParentIndex == 0 || op.Timestamp == 0 || op.ImageDigest == [32]byte{} {
+					return ErrInvalidCommand
+				}
+				m.bootstrapSplitID, m.bootstrapParentID, m.bootstrapParentGen = op.SplitID, op.ParentRangeID, op.ParentGeneration
+				m.bootstrapImage = op.ImageDigest
+			} else if m.bootstrapIndex != op.ParentIndex || op.ImageDigest != [32]byte{} && m.bootstrapImage != op.ImageDigest {
+				return ErrSplitFenced
+			}
+			m.splitID, m.bootstrapIndex = op.SplitID, op.ParentIndex
+			m.parentReplayThrough = max(m.parentReplayThrough, op.ParentIndex)
+			m.safeRead = max(m.safeRead, mvcc.Timestamp(op.Timestamp))
+		default:
+			return ErrRangeNotServing
+		}
+		m.clock.Observe(mvcc.Timestamp(op.Timestamp))
+	case SplitOpBootstrapVersion, SplitOpReplayVersion:
+		if m.lifecycle != LifecycleShadow || op.Kind == storage.KindIntent {
+			return ErrSplitFenced
+		}
+		if op.Type == SplitOpBootstrapVersion {
+			if op.ImageDigest != m.bootstrapImage {
+				return ErrSplitFenced
+			}
+			digest := sha256.Sum256(entry.Command)
+			if _, exists := m.bootstrapSeen[digest]; exists {
+				return m.advanceMetadata(entry.Index, alreadyDurable)
+			}
+			m.bootstrapSeen[digest] = struct{}{}
+		} else {
+			if op.ParentIndex != m.parentReplayThrough+1 {
+				if digest, ok := m.provenance[op.ParentIndex]; ok && digest == op.CommandDigest {
+					return m.advanceMetadata(entry.Index, alreadyDurable)
+				}
+				return ErrSplitReplayOrder
+			}
+			m.provenance[op.ParentIndex] = op.CommandDigest
+			m.parentReplayThrough = op.ParentIndex
+		}
+		if !alreadyDurable {
+			mutation := storage.Mutation{Key: command.Key, Value: op.Value, Kind: op.Kind}
+			if err := m.engine.ApplyPreparedMVCCBatch(context.Background(), entry.Index, entry.Term, op.Timestamp, entry.Command, []storage.Mutation{mutation}); err != nil && !errors.Is(err, engine.ErrAlreadyApplied) {
+				return fmt.Errorf("apply split MVCC version: %w", err)
+			}
+			m.maxApplied = max(m.maxApplied, mvcc.Timestamp(op.Timestamp))
+			m.clock.Observe(mvcc.Timestamp(op.Timestamp))
+		}
+		return nil
+	case SplitOpReplayAdvance:
+		if m.lifecycle != LifecycleShadow || op.ParentIndex != m.parentReplayThrough+1 {
+			return ErrSplitReplayOrder
+		}
+		m.parentReplayThrough = op.ParentIndex
+		m.clock.Observe(mvcc.Timestamp(op.Timestamp))
+		m.safeRead = max(m.safeRead, mvcc.Timestamp(op.Timestamp))
+	case SplitOpFinalFence:
+		if m.lifecycle != LifecycleActive || !m.txnFence {
+			return ErrSplitFenced
+		}
+		m.userFence, m.fenceIndex = true, entry.Index
+	case SplitOpActivate:
+		if m.lifecycle == LifecycleActive && m.splitID == 0 {
+			return m.advanceMetadata(entry.Index, alreadyDurable)
+		}
+		if m.lifecycle != LifecycleShadow || m.parentReplayThrough == 0 {
+			return ErrSplitFenced
+		}
+		m.lifecycle = LifecycleActive
+		m.splitID, m.splitEpoch = 0, 0
+	case SplitOpRetire:
+		if m.lifecycle == LifecycleRetired {
+			return m.advanceMetadata(entry.Index, alreadyDurable)
+		}
+		if m.lifecycle != LifecycleActive || !m.userFence {
+			return ErrSplitFenced
+		}
+		m.lifecycle = LifecycleRetired
+	case SplitOpAbort:
+		if m.userFence || m.lifecycle != LifecycleActive {
+			return ErrSplitFenced
+		}
+		m.splitID, m.splitEpoch, m.bootstrapIndex = 0, 0, 0
+		m.txnFence = false
+	default:
+		return ErrInvalidCommand
+	}
+	return m.advanceMetadata(entry.Index, alreadyDurable)
 }
 
 func (m *stateMachine) applyTransaction(entry raft.Entry, command Command, alreadyDurable bool) error {
